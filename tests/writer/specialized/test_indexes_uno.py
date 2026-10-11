@@ -358,6 +358,104 @@ def test_refresh_toc_entry_keeps_black_and_no_underline_uno(ctx, doc):
     assert bool(toc.getPropertyValue("IsProtected")) is protected
 
 
+def _select_page_digits(text, para):
+    """Cursor over the page number after the last tab. Fill characters are not text."""
+    full = para.getString() or ""
+    tab_at = full.rfind("\t")
+    if tab_at < 0 or tab_at + 1 >= len(full):
+        raise AssertionError("TOC entry has no page number: %r" % full)
+    page = full[tab_at + 1:]
+    cur = text.createTextCursorByRange(para.getStart())
+    if not cur.goRight(tab_at + 1, False):
+        raise AssertionError("could not reach the page number in %r" % full)
+    if not cur.goRight(len(page), True):
+        raise AssertionError("could not select the page number %r" % page)
+    return cur, page
+
+
+@native_test
+@with_native_doc("writer")
+def test_refresh_toc_entry_page_digits_keep_look(ctx, doc):
+    """Replacing only the page digits must not paint Internet-link chrome.
+
+    Discussion #1429: the digits are not in the outline URL, so the URL stays.
+    A same-length setString still splits that run onto navy and a single
+    underline. The title, the neighbor, and the URL stay as they were.
+    """
+    text = doc.getText()
+    text.setString("")
+    _add_heading(text, "Alpha title", True)
+    _add_heading(text, "Beta title", False)
+    tctx = _tool_ctx(ctx, doc)
+    created = IndexesCreate().execute(tctx, kind="toc", title="Contents", target="beginning")
+    assert created.get("status") == "ok", created
+    toc = doc.getDocumentIndexes().getByIndex(0)
+    entries = _tab_paragraphs(doc)
+    assert len(entries) >= 2, [para.getString() for para in entries]
+    protected = bool(toc.getPropertyValue("IsProtected"))
+    if protected:
+        toc.IsProtected = False
+    alpha = next(para for para in entries if "Alpha title" in (para.getString() or ""))
+    beta = next(para for para in entries if "Beta title" in (para.getString() or ""))
+    outline = "#1.Alpha title|outline"
+    cur = text.createTextCursorByRange(alpha.getStart())
+    cur.gotoRange(alpha.getEnd(), True)
+    # URL first (Internet-link defaults), then the customized black / no-underline.
+    cur.setPropertyValue("HyperLinkURL", outline)
+    cur.setPropertyValue("CharColor", 0)
+    cur.setPropertyValue("CharUnderline", 0)
+    page_cur, _generated = _select_page_digits(text, alpha)
+    # A unique same-length token. The generated page is often "1", which also
+    # occurs in the heading number, so the tool match would be ambiguous.
+    # setString on that subrange drops the URL and a URL write on the digits
+    # alone keeps Internet-link chrome (navy 128, underline 1); CharColor on
+    # that same subrange cursor does not undo it. Paint the whole entry again,
+    # URL then look, which is the setup that stays black.
+    page_cur.setString("278")
+    whole = text.createTextCursorByRange(alpha.getStart())
+    whole.gotoRange(alpha.getEnd(), True)
+    whole.setPropertyValue("HyperLinkURL", outline)
+    whole.setPropertyValue("CharColor", 0)
+    whole.setPropertyValue("CharUnderline", 0)
+    if protected:
+        toc.IsProtected = True
+    beta_before = beta.getString()
+    before_looks = _paragraph_looks(alpha)
+    assert before_looks, before_looks
+    assert all(color == 0 and underline == 0 for _chunk, _url, color, underline in before_looks), (
+        before_looks)
+    assert any(
+        "278" in chunk and url == outline
+        for chunk, url, _color, _underline in before_looks
+    ), before_looks
+
+    edited = IndexesRefreshTocEntry().execute(
+        tctx, old_content="278", content="247")
+    assert edited.get("status") == "ok", edited
+    assert edited.get("hyperlink_updated") is False, edited
+    assert edited.get("hyperlink_url") == outline, edited
+    assert edited.get("hyperlink_url_after") == outline, edited
+    body = doc.getText().getString()
+    assert "247" in body, body
+    assert "278" not in body, body
+    assert "Alpha title" in body, body
+    assert beta.getString() == beta_before, (beta.getString(), beta_before)
+
+    entries = _tab_paragraphs(doc)
+    alpha_after = next(para for para in entries if "Alpha title" in (para.getString() or ""))
+    looks = _paragraph_looks(alpha_after)
+    assert looks, looks
+    joined = "".join(chunk for chunk, _url, _color, _underline in looks)
+    assert "247" in joined, looks
+    assert "278" not in joined, looks
+    for chunk, url, color, underline in looks:
+        assert color == 0, (chunk, color, looks)
+        assert underline == 0, (chunk, underline, looks)
+        if chunk == "247" or "247" in chunk:
+            assert url == outline, (chunk, url, looks)
+    assert bool(toc.getPropertyValue("IsProtected")) is protected
+
+
 def _entry_strings(doc):
     return [para.getString() or "" for para in _tab_paragraphs(doc)]
 

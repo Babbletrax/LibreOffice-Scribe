@@ -43,6 +43,11 @@ rewrites it. Skip the title-only paint when the replacement already has the
 new URL. When a paint is still needed (HTML dropped the URL), snapshot
 ``CharColor`` / ``CharUnderline`` after the text replace and put them on the
 same cursor immediately after the assignment.
+
+A page-number replace does not change the URL. ``setString`` of those digits
+still splits the run onto Internet-link chrome, and ``CharColor`` on that
+subrange repaints the whole link. The look captured before the replace is
+written after assigning the same URL on the whole paragraph.
 """
 
 from __future__ import annotations
@@ -90,10 +95,13 @@ class OutlineSnapshot:
     matched: str
     single_paragraph: bool
     preserve_url: str
-    __slots__: ClassVar[tuple[str, ...]] = ("links", "prefix", "suffix", "matched", "single_paragraph", "preserve_url")
+    look: dict[str, Any]
+    __slots__: ClassVar[tuple[str, ...]] = (
+        "links", "prefix", "suffix", "matched", "single_paragraph", "preserve_url", "look")
 
     def __init__(self, links: list[OutlineLink], prefix: str, suffix: str,
-                 matched: str, single_paragraph: bool, preserve_url: str = "") -> None:
+                 matched: str, single_paragraph: bool, preserve_url: str = "",
+                 look: dict[str, Any] | None = None) -> None:
         self.links = links
         self.prefix = prefix
         self.suffix = suffix
@@ -105,6 +113,9 @@ class OutlineSnapshot:
         # it on the new characters; this URL is put back unchanged so the
         # bookmark is not unlinked.
         self.preserve_url = preserve_url
+        # CharColor / CharUnderline of the matched run, copied before the
+        # text replace. A later snapshot already includes Internet-link chrome.
+        self.look = dict(look) if look else {}
 
 
 def empty_snapshot() -> OutlineSnapshot:
@@ -333,9 +344,12 @@ def capture_outline_hyperlinks(text_range: Any) -> OutlineSnapshot:
     links: list[OutlineLink] = []
     seen: set[str] = set()
     preserve_url = ""
+    look: dict[str, Any] = {}
     for portion in _iter_portions(text, text_range.getStart()):
         if not _ranges_overlap(text, portion, text_range):
             continue
+        if not look:
+            look = _read_char_look(portion)
         url = _prop(portion, _URL)
         if not url:
             continue
@@ -349,7 +363,7 @@ def capture_outline_hyperlinks(text_range: Any) -> OutlineSnapshot:
             continue
         seen.add(url)
         links.append(OutlineLink(url, _prop(portion, _NAME), _prop(portion, _TARGET)))
-    return OutlineSnapshot(links, prefix, suffix, matched, single, preserve_url)
+    return OutlineSnapshot(links, prefix, suffix, matched, single, preserve_url, look)
 
 
 def measured_replacement(anchor: Any, snapshot: OutlineSnapshot) -> str | None:
@@ -598,11 +612,38 @@ def restore_outline_hyperlinks(anchor: Any, snapshot: OutlineSnapshot,
         elif not snapshot.links and snapshot.preserve_url:
             put_back = snapshot.preserve_url
         if put_back and new_plain:
-            _paint(text, anchor, snapshot, new_plain, {
-                "new_url": put_back,
-                "new_name": None,
-                "new_target": None,
-            }, required=False, look=title_look)
+            # What was wrong: replacing only the page digits turned them navy
+            # and underlined (discussion #1429). How it happened: those digits
+            # are not in the outline URL, so _paint skips the write when the
+            # URL is still there. setString of the digits still splits the
+            # run. One split leaves the title black and the digits navy; the
+            # next setString can also unlink the last digit and paint the
+            # title. CharColor on the digit subrange alone repaints the whole
+            # link, and CharColor after a subrange HyperLinkURL assignment
+            # does not stick. Why this fixes it: the match look was captured
+            # before the replace. When that one link is the whole paragraph,
+            # assign its URL and then the look on that same whole-paragraph
+            # cursor — the order that returns one black run.
+            restored = False
+            if snapshot.look and snapshot.links and snapshot.single_paragraph:
+                try:
+                    cursor = _cursor_at(text, anchor.getStart())
+                    cursor.gotoStartOfParagraph(False)
+                    cursor.gotoEndOfParagraph(True)
+                    para = str(cursor.getString() or "")
+                except Exception:
+                    para = ""
+                    cursor = None
+                if cursor is not None and para == snapshot.prefix + new_plain + snapshot.suffix:
+                    _set_prop(cursor, _URL, put_back)
+                    _write_char_look(cursor, snapshot.look)
+                    restored = True
+            if not restored:
+                _paint(text, anchor, snapshot, new_plain, {
+                    "new_url": put_back,
+                    "new_name": None,
+                    "new_target": None,
+                }, required=False, look=snapshot.look or title_look)
         return public_hyperlink_reports(plans)
 
     by_url = {plan["url"]: plan for plan in writable if plan["url"]}
