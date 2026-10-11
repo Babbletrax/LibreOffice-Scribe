@@ -1390,24 +1390,43 @@ def wait_controls_send_finished(
         body = transcript_fn() if transcript_fn is not None else ""
         suffix = body[len(before) :] if before and body.startswith(before) else body
         if wait_for:
-            found = wait_for.lower() in suffix.lower()
+            asst_idx = suffix.lower().rfind("assistant:")
+            if asst_idx >= 0:
+                found = wait_for.lower() in suffix[asst_idx:].lower()
+            elif "[" in suffix:
+                found = wait_for.lower() in suffix.lower()
+            else:
+                found = False
             # Only search the whole control when a rich rerender dropped the prefix.
             # ``body != before`` is too weak: any new character plus a needle already
             # in earlier turns (Packet C truncated banner) would look finished.
             if not found and before and body and not body.startswith(before):
-                found = wait_for.lower() in body.lower()
+                asst_idx = body.lower().rfind("assistant:")
+                if asst_idx >= 0:
+                    found = wait_for.lower() in body[asst_idx:].lower()
+                elif "[" in body:
+                    found = wait_for.lower() in body.lower()
+            if found and not busy:
+                return True
         else:
             found = bool(suffix.strip()) or (not before and bool(body.strip()))
-        if (saw_busy or found) and not busy:
-            return True
+            if (saw_busy or found) and not busy:
+                return True
         time.sleep(0.15)
     if wait_for and transcript_fn is not None:
         body = transcript_fn()
         suffix = body[len(before) :] if before and body.startswith(before) else body
-        if wait_for.lower() in suffix.lower():
+        asst_idx = suffix.lower().rfind("assistant:")
+        if asst_idx >= 0 and wait_for.lower() in suffix[asst_idx:].lower():
+            return True
+        if "[" in suffix and wait_for.lower() in suffix.lower():
             return True
         if before and body and not body.startswith(before):
-            return wait_for.lower() in body.lower()
+            asst_idx = body.lower().rfind("assistant:")
+            if asst_idx >= 0 and wait_for.lower() in body[asst_idx:].lower():
+                return True
+            if "[" in body and wait_for.lower() in body.lower():
+                return True
         return False
     en = control_enabled(stop) if stop is not None else None
     return en is not True

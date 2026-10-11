@@ -312,12 +312,15 @@ def _start_until_stop_enabled(text: str, *, delay_ms: int = 40, timeout: float =
     deadline = time.monotonic() + timeout
     while time.monotonic() <= deadline and _is_busy():
         time.sleep(0.1)
+    assert not _is_busy(), "sidebar still busy before starting %r: %r" % (text, _transcript()[-400:])
     _session.config.delay_ms = delay_ms
     before = _transcript()
     controls = getattr(_session, "controls", None)
     if controls is not None:
         set_query_text_via_controls(controls, text)
-        time.sleep(0.2)
+        send_deadline = time.monotonic() + 5.0
+        while time.monotonic() <= send_deadline and _send_enabled() is False:
+            time.sleep(0.05)
         uno_click(controls["send"])
     else:
         sl = getattr(_session, "listener", None)
@@ -550,7 +553,9 @@ def _reset_mock_runtime() -> None:
     try:
         if _wait_stop_enabled(timeout=0.3):
             _press_stop()
-            time.sleep(0.5)
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() <= deadline and _is_busy():
+                time.sleep(0.1)
     except Exception:
         pass
 
@@ -879,7 +884,10 @@ def test_b1c_no_html_rerender_after_stop(ctx):
         suffix = _transcript()
         if suffix.startswith(before):
             suffix = suffix[len(before) :]
-        assert "[Stopped by user]" in suffix
+        assert "[Stopped by user]" in suffix, (
+            "B1c expected [Stopped by user] in suffix, got suffix=%r full=%r"
+            % (suffix[-300:], _transcript()[-500:])
+        )
         assert suffix.strip().endswith("[Stopped by user]") or "[Stopped by user]" in suffix[-80:], (
             "B1c expected Stopped banner at tail, got %r" % suffix[-200:]
         )

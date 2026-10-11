@@ -1134,6 +1134,34 @@ def test_wait_controls_send_finished_wait_for_ignores_prior_turns(monkeypatch) -
     assert ok is False
 
 
+def test_wait_controls_send_finished_wait_for_ignores_user_prompt(monkeypatch) -> None:
+    """wait_for must match against the assistant reply or banner, not the user's prompt."""
+    stop = _StopCtrl()
+    stop._model.Enabled = False
+    prior = "Assistant: prior turn\n"
+
+    monkeypatch.setattr("plugin.chatbot.sidebar_test_hooks.time.sleep", lambda _s: None)
+    # The user prompt contains "hello", but no assistant response has arrived yet.
+    ok = wait_controls_send_finished(
+        {"stop": stop},
+        timeout=0.4,
+        transcript_fn=lambda: prior + "You: hello\n",
+        wait_for="hello",
+        before=prior,
+    )
+    assert ok is False
+
+    # Once the assistant turn arrives, wait_for matches and finishes.
+    ok = wait_controls_send_finished(
+        {"stop": stop},
+        timeout=0.4,
+        transcript_fn=lambda: prior + "You: hello\nAssistant: hello there!\n",
+        wait_for="hello",
+        before=prior,
+    )
+    assert ok is True
+
+
 def test_component_is_calc_uses_supports_service() -> None:
     calc = SimpleNamespace(
         supportsService=lambda name: name == "com.sun.star.sheet.SpreadsheetDocument"
