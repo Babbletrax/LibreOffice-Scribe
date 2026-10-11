@@ -27,7 +27,10 @@ if _PROJECT_ROOT not in sys.path:
 from compute_service.config import DEFAULT_SETTINGS, clamp_timeout_sec
 from compute_service.json_egress import normalize_execute_response
 from compute_service.json_forward import ExecuteRequestError, canonical_execute_mode, dumps_response, require_execute_wire, validate_execute_response, validate_session_id
-from compute_service.worker_base import run_compute_worker
+from compute_service.worker_base import configure_compute_worker_env, run_compute_worker
+
+# Default math/OpenMP thread pools to 1 thread early before any heavy math imports.
+configure_compute_worker_env()
 
 # execute_code pulls in the sandbox lazily on the first execution so
 # the ready handshake is not spent on that graph with an empty stderr.

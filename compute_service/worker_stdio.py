@@ -93,6 +93,32 @@ def set_pdeathsig(sig: int | None = None) -> bool:
         return False
 
 
+COMPUTE_THREAD_ENV_VARS: tuple[str, ...] = (
+    "OPENBLAS_NUM_THREADS",
+    "OMP_NUM_THREADS",
+    "MKL_NUM_THREADS",
+    "VECLIB_MAXIMUM_THREADS",
+    "NUMEXPR_NUM_THREADS",
+)
+
+
+def configure_compute_worker_env() -> None:
+    """Set default single-threaded limits for child compute worker subprocesses.
+
+    Multi-process compute pools (such as formula and vision workers) run multiple
+    worker processes concurrently. By default, numerical libraries (OpenBLAS,
+    OpenMP, MKL, NumExpr) detect all host CPU cores and allocate thread pools
+    sized to the entire machine in each process. When multiple worker processes run
+    in parallel, this causes severe CPU core over-subscription and cache thrashing.
+
+    Limiting each worker process to 1 thread eliminates this contention and allows
+    clean linear scaling across worker processes. We use setdefault() so that any
+    explicit user or administrator override in the environment is preserved.
+    """
+    for var_name in COMPUTE_THREAD_ENV_VARS:
+        os.environ.setdefault(var_name, "1")
+
+
 def run_compute_worker(handler: Callable[[dict[str, Any]], dict[str, Any]]) -> int:
     """Stdio loop for a formula or vision child.
 
@@ -108,6 +134,7 @@ def run_compute_worker(handler: Callable[[dict[str, Any]], dict[str, Any]]) -> i
     """
     os.environ["WRITERAGENT_IS_WORKER"] = "1"
     os.environ["WRITERAGENT_COMPUTE_WORKER"] = "1"
+    configure_compute_worker_env()
     return run_worker_stdio_loop(handler, max_payload_bytes=COMPUTE_MAX_PAYLOAD_BYTES)
 
 

@@ -1425,11 +1425,11 @@ def test_shutdown_handshake_is_not_a_spawn_error(monkeypatch: pytest.MonkeyPatch
 
 
 def test_run_compute_worker_sets_identity_and_payload_cap(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Both children share the env vars and the parent pool's frame cap."""
+    """Both children share identity env vars, single-threaded math defaults, and frame cap."""
     import os
 
     from compute_service.json_forward import COMPUTE_MAX_PAYLOAD_BYTES
-    from compute_service.worker_stdio import run_compute_worker
+    from compute_service.worker_stdio import COMPUTE_THREAD_ENV_VARS, run_compute_worker
 
     seen: dict[str, object] = {}
 
@@ -1438,11 +1438,15 @@ def test_run_compute_worker_sets_identity_and_payload_cap(monkeypatch: pytest.Mo
         seen["cap"] = max_payload_bytes
         seen["is_worker"] = os.environ.get("WRITERAGENT_IS_WORKER")
         seen["compute"] = os.environ.get("WRITERAGENT_COMPUTE_WORKER")
+        for var_name in COMPUTE_THREAD_ENV_VARS:
+            seen[var_name] = os.environ.get(var_name)
         return 0
 
     monkeypatch.setattr("compute_service.worker_stdio.run_worker_stdio_loop", _loop)
     monkeypatch.delenv("WRITERAGENT_IS_WORKER", raising=False)
     monkeypatch.delenv("WRITERAGENT_COMPUTE_WORKER", raising=False)
+    for var_name in COMPUTE_THREAD_ENV_VARS:
+        monkeypatch.delenv(var_name, raising=False)
 
     def _handler(_req: dict[str, object]) -> dict[str, str]:
         return {"status": "ok"}
@@ -1452,6 +1456,23 @@ def test_run_compute_worker_sets_identity_and_payload_cap(monkeypatch: pytest.Mo
     assert seen["cap"] == COMPUTE_MAX_PAYLOAD_BYTES
     assert seen["is_worker"] == "1"
     assert seen["compute"] == "1"
+    for var_name in COMPUTE_THREAD_ENV_VARS:
+        assert seen[var_name] == "1"
+
+
+def test_configure_compute_worker_env_preserves_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pre-existing math thread environment variables are not overwritten."""
+    import os
+
+    from compute_service.worker_stdio import COMPUTE_THREAD_ENV_VARS, configure_compute_worker_env
+
+    for var_name in COMPUTE_THREAD_ENV_VARS:
+        monkeypatch.setenv(var_name, "4")
+
+    configure_compute_worker_env()
+
+    for var_name in COMPUTE_THREAD_ENV_VARS:
+        assert os.environ.get(var_name) == "4"
 
 
 def test_reap_timeout_keeps_live_pid(monkeypatch: pytest.MonkeyPatch) -> None:

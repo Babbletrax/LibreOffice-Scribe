@@ -330,8 +330,8 @@ Vision workers share the pickle framing. HTTP `image_b64` is decoded to raw `byt
 Kit-side dumb JSON contract: [`docs/scripting/numpy-jailsafe.md`](../docs/scripting/numpy-jailsafe.md).
 
 ### 2. Tier 1: Formula Compute Pool (`FormulaProcessPool`)
-- Manages persistent worker subprocesses (`workers`, default `2`).
 - **Single-Threaded Child Subprocesses**: Each worker is a dedicated, single-threaded OS process running a synchronous IPC loop with exclusive lease occupancy (0 worker threads inside the child), ensuring determinism and zero race conditions.
+- **Linear Algebra / BLAS Thread Limits**: Numerical and vector libraries (`OPENBLAS_NUM_THREADS`, `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `VECLIB_MAXIMUM_THREADS`, `NUMEXPR_NUM_THREADS`) default to `1` thread per worker process via `setdefault()`. In multi-worker server pools, allowing each child process to spawn thread pools sized to all host CPU cores causes severe CPU over-subscription and cache thrashing on rapid calculations. Restricting each worker process to 1 thread ensures clean multi-core scaling across pool processes. (Note: LibrePy desktop is unconstrained and uses full system/user multithreading for desktop Calc workbooks).
 - **GIL Elimination**: Each worker runs its own Python interpreter, achieving true parallel multi-core scaling for pure-Python and NumPy workloads.
 - **Sticky Session Affinity**: For stateful calculations (`mode="shared"`), requests with the same `session_id` are routed to the process that owns that workbook. The supervisor maps are a cache of that pid: when the process exits, every session on it is dropped, and a respawn is not the same workbook. Clean workers without shared sessions are preferred for isolated work (`mode="isolated"`); however, when all idle workers hold shared sessions, isolated work falls back to the worker with the fewest sessions to avoid starving isolated calculations while waiting for shared session TTL. Shared sessions on one process still occupy it exclusively (one cell at a time). There are no explicit per-host caps on the number of active shared sessions: only coolwsd calls this service, and container OOM kills everything if memory limits are exceeded.
 - **Stderr log**: Each worker's stderr is a file, read when spawn or a request fails and removed when the child is reaped. The host keeps the last 64 KiB after each request, on each idle-reaper scan, and when a reap leaves the child alive, so one chatty child cannot grow the file between requests. A pipe would need a drain thread so a noisy child cannot fill the kernel buffer and deadlock the handshake.
@@ -443,11 +443,12 @@ python scripts/benchmark_compute_service.py --workers 1,2,4 --concurrency 4
 # Multi-concurrency client load benchmark (1 to 32 concurrent clients)
 python scripts/benchmark_compute_service.py --concurrency 1,2,4,8,16,32 --requests 50 --threads 32
 
-# 32 threads hammering 2 workers scenario (asserts math accuracy, session monotonicity, health probe liveness, error resilience)
+# Battle-hardened stress scenario (32 clients hammering 2 workers, dual-wire peel+multipart, rapid process recycling every 25 tasks, concurrent reset traffic, and chaos hangs+crashes recovery by default)
 python scripts/benchmark_compute_service.py --stress
 
-# Stress runner with fault/chaos injection (hangs, timeouts, crashes, auto-respawns)
-python scripts/benchmark_compute_service.py --stress --chaos hangs,crashes
+# Optional overrides (e.g. custom workers, disable chaos, or adjust concurrency)
+python scripts/benchmark_compute_service.py --stress --workers 1 --concurrency 16
+python scripts/benchmark_compute_service.py --stress --chaos none
 ```
 
 #### Benchmark Archetypes & Scaling Characteristics

@@ -32,12 +32,12 @@ from typing import TYPE_CHECKING, Generic, TypeVar
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator
 
-from compute_service.worker_stdio import RestrictedUnpickler, run_compute_worker, run_worker_stdio_loop, set_pdeathsig, unpack_restricted_pickle_frame
+from compute_service.worker_stdio import COMPUTE_THREAD_ENV_VARS, RestrictedUnpickler, configure_compute_worker_env, run_compute_worker, run_worker_stdio_loop, set_pdeathsig, unpack_restricted_pickle_frame
 from plugin.framework.process_worker import MIN_REQUEST_SEC, BaseProcessWorker, Deadline, _Deadline, _SPAWN_READY_TIMEOUT_SEC, _STDERR_LOG_CAP, error_dict
 from plugin.framework.worker_pool import run_in_background
 from plugin.scripting.ipc import DEFAULT_MAX_PAYLOAD_BYTES
 
-__all__ = ["BaseProcessPool", "BaseProcessWorker", "Deadline", "MIN_REQUEST_SEC", "PoolSingleton", "RestrictedUnpickler", "_Deadline", "_SPAWN_READY_TIMEOUT_SEC", "_STDERR_LOG_CAP", "error_dict", "resolve_override", "run_compute_worker", "run_worker_stdio_loop", "set_pdeathsig", "unpack_restricted_pickle_frame"]
+__all__ = ["BaseProcessPool", "BaseProcessWorker", "COMPUTE_THREAD_ENV_VARS", "Deadline", "MIN_REQUEST_SEC", "PoolSingleton", "RestrictedUnpickler", "_Deadline", "_SPAWN_READY_TIMEOUT_SEC", "_STDERR_LOG_CAP", "configure_compute_worker_env", "error_dict", "resolve_override", "run_compute_worker", "run_worker_stdio_loop", "set_pdeathsig", "unpack_restricted_pickle_frame"]
 
 log = logging.getLogger("compute_service.worker")
 

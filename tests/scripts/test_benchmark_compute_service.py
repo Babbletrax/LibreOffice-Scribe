@@ -26,6 +26,7 @@ try:
         HealthMonitor,
         ManagedBenchmarkServer,
         StressResult,
+        execute_request_detail,
         format_results_table,
         format_stress_results,
         main,
@@ -131,6 +132,17 @@ def test_main_custom_workers_flag(mock_run: MagicMock) -> None:
     assert kwargs["requests_per_worker"] == 30
 
 
+@patch("benchmark_compute_service.run_benchmarks")
+def test_main_total_requests_flag(mock_run: MagicMock) -> None:
+    mock_run.return_value = []
+    code = main(["--total-requests", "2000", "--concurrency", "4,16"])
+    assert code == 0
+    mock_run.assert_called_once()
+    _, kwargs = mock_run.call_args
+    assert kwargs["total_requests"] == 2000
+    assert kwargs["concurrencies"] == [4, 16]
+
+
 @patch("benchmark_compute_service.execute_request")
 def test_run_benchmark_scenario_sends_warmup(mock_exec: MagicMock) -> None:
     from benchmark_compute_service import run_benchmark_scenario
@@ -221,11 +233,90 @@ def test_main_stress_flag(mock_stress: MagicMock) -> None:
     code = main(["--stress", "--chaos", "hangs", "--requests", "15"])
     assert code == 0
     mock_stress.assert_called_once()
-    _, kwargs = mock_stress.call_args
+    unused_args, kwargs = mock_stress.call_args
     assert kwargs["workers"] == 2
     assert kwargs["concurrency"] == 32
     assert kwargs["requests_per_worker"] == 15
     assert kwargs["chaos"] == ["hangs"]
+
+
+@patch("benchmark_compute_service.run_stress_suite")
+def test_main_stress_default_parameters(mock_stress: MagicMock) -> None:
+    """Bare --stress must default to enabled chaos (hangs, crashes) and rapid recycling."""
+    mock_stress.return_value = StressResult(
+        workers=2,
+        concurrency=32,
+        total_requests=640,
+        successful_requests=640,
+        failed_requests=0,
+        duration_sec=2.0,
+        rps=320.0,
+        invariants_passed=True,
+        invariant_details=["[PASS] Test invariant"],
+        health_probes=50,
+        health_failures=0,
+        health_p50_ms=1.0,
+        health_p95_ms=2.0,
+        health_max_ms=5.0,
+    )
+    code = main(["--stress"])
+    assert code == 0
+    mock_stress.assert_called_once()
+    unused_args, kwargs = mock_stress.call_args
+    assert kwargs["workers"] == 2
+    assert kwargs["concurrency"] == 32
+    assert kwargs["requests_per_worker"] == 20
+    assert kwargs["recycle_tasks"] == 25
+    assert kwargs["chaos"] == ["hangs", "crashes"]
+
+
+@patch("benchmark_compute_service.run_stress_suite")
+def test_main_stress_disable_chaos_and_custom_workers(mock_stress: MagicMock) -> None:
+    """Explicitly passing --chaos none and --workers 1 must be respected."""
+    mock_stress.return_value = StressResult(
+        workers=1,
+        concurrency=16,
+        total_requests=160,
+        successful_requests=160,
+        failed_requests=0,
+        duration_sec=1.0,
+        rps=160.0,
+        invariants_passed=True,
+        invariant_details=["[PASS] Test invariant"],
+        health_probes=20,
+        health_failures=0,
+        health_p50_ms=1.0,
+        health_p95_ms=2.0,
+        health_max_ms=5.0,
+    )
+    code = main(["--stress", "--chaos", "none", "--workers", "1", "--concurrency", "16"])
+    assert code == 0
+    mock_stress.assert_called_once()
+    unused_args, kwargs = mock_stress.call_args
+    assert kwargs["workers"] == 1
+    assert kwargs["concurrency"] == 16
+    assert kwargs["chaos"] == []
+
+
+@patch("urllib.request.urlopen")
+def test_execute_request_detail_custom_content_type(mock_urlopen: MagicMock) -> None:
+    """execute_request_detail forwards custom Content-Type (e.g. multipart/form-data)."""
+    mock_cm = MagicMock()
+    mock_resp = MagicMock()
+    mock_resp.status = 200
+    mock_resp.read.return_value = b'{"status": "ok", "result": 123}'
+    mock_cm.__enter__.return_value = mock_resp
+    mock_urlopen.return_value = mock_cm
+
+    res = execute_request_detail(
+        "http://127.0.0.1:8000/v1/execute",
+        b"--boundary...",
+        content_type="multipart/form-data; boundary=boundary",
+    )
+    assert res.success is True
+    assert res.data == {"status": "ok", "result": 123}
+    req = mock_urlopen.call_args[0][0]
+    assert req.headers["Content-type"] == "multipart/form-data; boundary=boundary"
 
 
 def test_health_monitor_metrics() -> None:
