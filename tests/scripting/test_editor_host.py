@@ -289,21 +289,23 @@ def test_launch_monaco_editor_spawns_when_not_running():
 
     with patch.object(type(pe), "is_running", new=property(lambda self: False)):
         with patch.object(launch_mod, "spawn_editor_process", return_value=mock_proc):
-            with patch.object(launch_mod, "EditorSession") as mock_session_cls:
-                session = MagicMock()
-                session.is_running = True
-                session.wait_for_ready.return_value = True
-                mock_session_cls.return_value = session
+            with patch.object(launch_mod, "run_in_background") as mock_bg:
+                with patch.object(launch_mod, "EditorSession") as mock_session_cls:
+                    session = MagicMock()
+                    session.is_running = True
+                    session.wait_for_ready.return_value = True
+                    mock_session_cls.return_value = session
 
-                load_message = {"type": "load", "mode": "run_script", "run_script_doc": mock_doc, "script_name": "demo"}
-                ok = launch_mod.launch_monaco_editor(
-                    ctx,
-                    exe="/venv/bin/python",
-                    load_message=load_message,
-                    on_save=MagicMock(),
-                )
+                    load_message = {"type": "load", "mode": "run_script", "run_script_doc": mock_doc, "script_name": "demo"}
+                    ok = launch_mod.launch_monaco_editor(
+                        ctx,
+                        exe="/venv/bin/python",
+                        load_message=load_message,
+                        on_save=MagicMock(),
+                    )
 
     assert ok is True
+    mock_bg.assert_called_once_with(launch_mod.warm_venv_worker, ctx, name="warm-venv-worker", dedicated=True)
     assert pe.run_script_doc is mock_doc
     session.start_reader.assert_called_once()
     sent = session.send.call_args[0][0]

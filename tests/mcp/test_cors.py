@@ -641,3 +641,18 @@ def test_get_configured_tunnel_host_reads_shared_tunnel_public_url(monkeypatch):
     assert get_configured_tunnel_host() == "abc.trycloudflare.com"
     monkeypatch.setattr(mcp_pkg, "_shared_tunnel", None, raising=False)
     assert get_configured_tunnel_host() is None
+
+
+def test_drain_request_body_reads_up_to_content_length():
+    from io import BytesIO
+    from plugin.mcp.cors import _drain_request_body
+
+    class _FakeHandler:
+        def __init__(self, content: bytes):
+            self.headers = {"Content-Length": str(len(content))}
+            self.rfile = BytesIO(content)
+
+    handler = _FakeHandler(b"hello world")
+    _drain_request_body(handler)
+    assert handler.rfile.read() == b""
+

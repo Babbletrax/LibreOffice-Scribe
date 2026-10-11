@@ -303,6 +303,28 @@ def origin_is_forbidden(handler: Any) -> bool:
     return not is_safe_origin(origin)
 
 
+def _drain_request_body(handler: Any) -> None:
+    """Drain any pending request body so unread bytes do not cause a TCP RST on close.
+
+    On Windows (Winsock), closing a socket with unread incoming data in the
+    receive buffer sends an immediate abortive TCP RST instead of a graceful
+    FIN, raising ConnectionAbortedError (WinError 10053) on the client before it
+    can read the 403 response line. Draining the declared Content-Length
+    (capped at 64KB) ensures a clean TCP shutdown.
+    """
+    try:
+        if not hasattr(handler, "headers") or not handler.headers:
+            return
+        raw_length = handler.headers.get("Content-Length", 0)
+        content_length = int(raw_length)
+        if 0 < content_length <= 65536:
+            rfile = getattr(handler, "rfile", None)
+            if rfile is not None and hasattr(rfile, "read"):
+                rfile.read(content_length)
+    except Exception:
+        pass
+
+
 def reject_forbidden_origin(handler: Any) -> bool:
     """If Origin is present and unsafe, write 403 and return True.
 
@@ -318,12 +340,16 @@ def reject_forbidden_origin(handler: Any) -> bool:
     from plugin.mcp.http_trace import log_forbidden_origin
 
     log_forbidden_origin(handler)
+    _drain_request_body(handler)
     # No Access-Control-* — a reflected ACAO would let the browser read the 403.
     handler._response_started = True
     handler.send_response(403)
     handler.send_header("Content-Length", "0")
+    handler.send_header("Connection", "close")
     handler.end_headers()
+    setattr(handler, "close_connection", True)
     return True
+
 
 
 def get_configured_tunnel_host() -> str | None:
@@ -397,10 +423,13 @@ def reject_forbidden_host(handler: Any) -> bool:
     if is_safe_host(host_header, bind_host=getattr(getattr(handler, "server", None), "bind_host", None)):
         return False
     log.warning("Rejecting request with forbidden Host header: %r", host_header)
+    _drain_request_body(handler)
     handler._response_started = True
     handler.send_response(403)
     handler.send_header("Content-Length", "0")
+    handler.send_header("Connection", "close")
     handler.end_headers()
+    setattr(handler, "close_connection", True)
     return True
 
 

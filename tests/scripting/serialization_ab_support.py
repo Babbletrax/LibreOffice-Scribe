@@ -121,6 +121,7 @@ VENV_TRANSFORMS: dict[str, str] = {
 }
 
 _WORKER_ENV = {"PATH": "/usr/bin:/bin"}
+_TEST_SUBPROCESS_POOL = "test_serialization_ab"
 
 
 @dataclass(frozen=True)
@@ -483,7 +484,7 @@ def run_venv_roundtrip(
     else:
         wire = host_pack_data(grid, force=pack_force)
     if use_subprocess:
-        mgr = PythonWorkerManager.get(sys.executable, _WORKER_ENV)
+        mgr = PythonWorkerManager.get(sys.executable, _WORKER_ENV, pool=_TEST_SUBPROCESS_POOL)
         response = mgr.execute(code, data=wire)
         if response.get("status") != "ok":
             raise AssertionError(f"Worker error: {response.get('message')}")
@@ -887,7 +888,7 @@ def run_multi_venv_echo(
     code = "result = [r.values for r in ranges]"
     wire = host_pack_multi_data(grids, force=pack_force)
     if use_subprocess:
-        mgr = PythonWorkerManager.get(sys.executable, _WORKER_ENV)
+        mgr = PythonWorkerManager.get(sys.executable, _WORKER_ENV, pool=_TEST_SUBPROCESS_POOL)
         response = mgr.execute(code, data=wire)
         if response.get("status") != "ok":
             raise AssertionError(f"Worker error: {response.get('message')}")
