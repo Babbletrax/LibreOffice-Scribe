@@ -2509,7 +2509,9 @@ def test_partial_bind_address_in_use_raises() -> None:
     try:
         with pytest.raises(OSError) as excinfo:
             DualStackThreadPoolHTTPServer(("127.0.0.1", port), _AcceptedConnectionHandler)
-        assert excinfo.value.errno == errno.EADDRINUSE
+        # POSIX raises EADDRINUSE; Windows Winsock raises WSAEACCES (10013 / EACCES)
+        # on port binding conflicts without SO_REUSEADDR.
+        assert excinfo.value.errno in (errno.EADDRINUSE, errno.EACCES)
         freed = socket.socket(socket.AF_INET6, socket.SOCK_STREAM)
         try:
             freed.setsockopt(socket.IPPROTO_IPV6, socket.IPV6_V6ONLY, 1)

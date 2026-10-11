@@ -397,6 +397,10 @@ def test_pickle_frame_timeout_mid_frame_is_partial():
         os.close(write_fd)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Windows joins a blocking write thread; closing an in-process pipe while blocked in CRT write crashes",
+)
 def test_pickle_frame_write_timeout_on_unread_pipe():
     """A reader that stops consuming stdin must not block the writer past the deadline."""
     read_fd, write_fd = os.pipe()

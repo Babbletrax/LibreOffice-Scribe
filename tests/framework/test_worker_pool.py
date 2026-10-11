@@ -84,8 +84,10 @@ def test_async_process_start_success():
     def on_exit(code):
         exit_codes.append(code)
 
+    # Sleep briefly after flushing output so is_running stays True deterministically
+    # across loaded CI runners before the wait thread joins.
     ap = AsyncProcess(
-        [sys.executable, "-c", "import sys; print('out'); print('err', file=sys.stderr)"],
+        [sys.executable, "-c", "import sys, time; print('out', flush=True); print('err', file=sys.stderr, flush=True); time.sleep(0.3)"],
         stdout_cb=on_stdout,
         stderr_cb=on_stderr,
         on_exit_cb=on_exit

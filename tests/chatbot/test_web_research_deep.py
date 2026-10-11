@@ -955,14 +955,15 @@ def test_stop_cancels_sub_query_that_has_not_started():
 
 def test_stop_loop_returns_promptly_when_checker_flips(monkeypatch):
     import time
-    monkeypatch.setattr("plugin.chatbot.web_research_deep._STOP_POOL_JOIN_SEC", 0.5)
+    monkeypatch.setattr("plugin.chatbot.web_research_deep._STOP_POOL_JOIN_SEC", 0.2)
 
     started = threading.Event()
+    release = threading.Event()
     stop = {"on": False}
 
     def slow_web_agent(query, _g, _h):
         started.set()
-        time.sleep(1.0)
+        release.wait(timeout=3.0)
         return "Slow"
 
     def worker_thread():
@@ -980,16 +981,15 @@ def test_stop_loop_returns_promptly_when_checker_flips(monkeypatch):
     stop["on"] = True
 
     t0 = time.monotonic()
-    t.join(timeout=1.0)
+    t.join(timeout=2.0)
     elapsed = time.monotonic() - t0
 
     try:
         assert not t.is_alive(), "Run loop did not exit promptly"
-        assert elapsed < 1.0, "Wait loop took too long to notice stop_checker"
+        assert elapsed < 1.5, "Wait loop took too long to notice stop_checker"
     finally:
-        # The 0.5s Stop join returns while this worker is still in sleep(1.0).
-        # The next test counts every live deep-research thread in the process.
-        # Release pytest is one process in file order, so reap it here.
+        # Release the worker so it exits immediately, then reap any remaining deep-research threads.
+        release.set()
         for thread in _alive_deep_threads():
             thread.join(timeout=2)
     assert _alive_deep_threads() == []

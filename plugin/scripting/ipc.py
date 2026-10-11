@@ -384,9 +384,6 @@ def write_packed_frame_with_timeout(
     A stream with no real fileno (``BytesIO``) is written without a deadline.
     """
     timeout_sec = max(0.0, float(timeout_sec))
-    if sys.platform == "win32":
-        _write_bytes_until_joined(stream, frame, timeout_sec, is_alive=is_alive)
-        return
     try:
         fd = stream.fileno()
     except (AttributeError, OSError, ValueError, io.UnsupportedOperation):
@@ -397,6 +394,9 @@ def write_packed_frame_with_timeout(
         # wedge the caller that holds the worker lock.
         log.debug("write_packed_frame_with_timeout: no int fileno; writing without a deadline")
         _write_all(stream, frame)
+        return
+    if sys.platform == "win32":
+        _write_bytes_until_joined(stream, frame, timeout_sec, is_alive=is_alive)
         return
     _write_fd_with_timeout(fd, frame, timeout_sec, is_alive=is_alive)
 
