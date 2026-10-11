@@ -782,11 +782,15 @@ def read_pickle_frame_with_timeout(
         # (CI 33453184665: gw1 died in test_pickle_frame_timeout_on_pipe — that
         # was the Windows hang). Same poll style as _readline_with_timeout_win32.
 
-        alive_fn = is_alive
-        stop_checker = (lambda: not alive_fn()) if alive_fn is not None else None
-
         def _read_exact_win32(n: int) -> bytes:
-            return _read_bytes_with_timeout_win32(stream, n, deadline, timeout_sec, cmd=frame_label, stop_checker=stop_checker)
+            return _read_bytes_with_timeout_win32(
+                stream,
+                n,
+                deadline,
+                timeout_sec,
+                cmd=frame_label,
+                is_alive=is_alive,
+            )
 
         payload = read_frame_payload(
             stream,
@@ -865,6 +869,7 @@ def _read_bytes_with_timeout_win32(
     *,
     cmd: str,
     stop_checker: Callable[[], bool] | None = None,
+    is_alive: Callable[[], bool] | None = None,
 ) -> bytes:
     """Read *n* bytes from a Windows pipe without a stuck ReadFile thread.
 
@@ -872,6 +877,8 @@ def _read_bytes_with_timeout_win32(
     available. Raises ``TimeoutExpired`` on deadline. Falls back to a blocking
     ``read`` when ``fileno()`` is not a real pipe fd (BytesIO / mocks).
     """
+    if is_alive is not None and not is_alive():
+        return b""
     try:
         fd = stream.fileno()
     except (AttributeError, OSError, ValueError):
@@ -883,6 +890,8 @@ def _read_bytes_with_timeout_win32(
     while len(buf) < n:
         if _stop_requested(stop_checker):
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=timeout_sec)
+        if is_alive is not None and not is_alive():
+            break
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             if len(buf) > 0:
@@ -901,6 +910,8 @@ def _read_bytes_with_timeout_win32(
                 return bytes(buf)
             buf.extend(chunk)
             continue
+        if is_alive is not None and not is_alive():
+            break
         # Re-read the clock: PeekNamedPipe can cross the deadline.
         time.sleep(max(0.0, min(0.001, deadline - time.monotonic())))
     return bytes(buf)

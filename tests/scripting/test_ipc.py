@@ -519,6 +519,22 @@ def test_win32_pickle_read_timeout_clamps_when_peek_crosses_deadline(monkeypatch
     stream.read.assert_not_called()
 
 
+def test_win32_pickle_read_breaks_when_child_exits_before_ready(monkeypatch):
+    """When child exits (is_alive() is False), win32 read breaks to EOF rather than timing out."""
+    from plugin.scripting import ipc
+
+    monkeypatch.setattr(ipc, "_peek_pipe_bytes_available", lambda fd: 0)
+    stream = MagicMock()
+    stream.fileno.return_value = 3
+    # Initial is_alive=False returns b"" immediately
+    assert ipc._read_bytes_with_timeout_win32(stream, 4, 10.0, 10.0, cmd="IPC frame", is_alive=lambda: False) == b""
+
+    # Becoming false inside polling loop breaks out and returns b""
+    alive_iter = iter([True, False])
+    assert ipc._read_bytes_with_timeout_win32(stream, 4, 10.0, 10.0, cmd="IPC frame", is_alive=lambda: next(alive_iter)) == b""
+
+
+
 def test_win32_readline_sleep_clamps_when_peek_crosses_deadline(monkeypatch):
     """PeekNamedPipe can finish after the deadline; sleep(negative) is ValueError."""
     from plugin.scripting import ipc
@@ -1044,16 +1060,17 @@ def test_read_pickle_frame_with_timeout_win32_is_alive_honored(monkeypatch):
     # Return valid frame size (e.g. 4 bytes length) to prevent IpcFrameError
     stream.read.side_effect = [b"\x00\x00\x00\x04", b"\x00\x00\x00\x00"]
     monkeypatch.setattr(ipc, "_peek_pipe_bytes_available", lambda fd: 4)
-    monkeypatch.setattr(ipc, "_decode_pickle_payload", lambda *args, **kwargs: {"ok": 1})
+    monkeypatch.setattr(ipc, "_decode_pickle_payload", lambda p, *args, **kwargs: None if p is None else {"ok": 1})
+
 
     # is_alive returning True should NOT cause TimeoutExpired
     res = ipc.read_pickle_frame_with_timeout(stream, 1.0, is_alive=lambda: True)
     assert res == {"ok": 1}
 
-    # is_alive returning False SHOULD cause TimeoutExpired
+    # is_alive returning False should return None (EOF), matching POSIX behavior
     stream.read.side_effect = [b"\x00\x00\x00\x04", b"\x00\x00\x00\x00"]
-    with pytest.raises(subprocess.TimeoutExpired):
-        ipc.read_pickle_frame_with_timeout(stream, 1.0, is_alive=lambda: False)
+    assert ipc.read_pickle_frame_with_timeout(stream, 1.0, is_alive=lambda: False) is None
+
 
 
 def test_claim_ipc_channel_redirects_stdout_and_preserves_framing():
