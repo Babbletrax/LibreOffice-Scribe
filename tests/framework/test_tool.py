@@ -676,6 +676,64 @@ class TestManageChartsSpecializedTier:
         assert "get_sheet_summary" in names
         assert "read_cell_range" in names
 
+    def test_required_core_tools_includes_one_specialized_peer(self):
+        """A domain may name one specialized tool from another domain."""
+        from plugin.writer.specialized_base import ToolWriterSpecialBase
+
+        def _ok(self, ctx, **kwargs):
+            return {"status": "ok"}
+
+        class PageTool(ToolWriterSpecialBase):
+            name = "page_example"
+            description = "page tool"
+            parameters = {"type": "object", "properties": {}}
+            specialized_domain = "page_peer_test"
+            required_core_tools = frozenset(["style_peer", "get_document_content", "finish_control"])
+            execute = _ok
+
+        class StylePeer(ToolWriterSpecialBase):
+            name = "style_peer"
+            description = "styles peer"
+            parameters = {"type": "object", "properties": {}}
+            specialized_domain = "styles_peer_test"
+            execute = _ok
+
+        class StyleSibling(ToolWriterSpecialBase):
+            name = "style_sibling"
+            description = "styles sibling"
+            parameters = {"type": "object", "properties": {}}
+            specialized_domain = "styles_peer_test"
+            execute = _ok
+
+        class CoreReader(ToolBase):
+            name = "get_document_content"
+            description = "read"
+            parameters = {"type": "object", "properties": {}}
+            tier = "core"
+            requires_document = False
+            execute = _ok
+
+        class FinishControl(ToolBase):
+            name = "finish_control"
+            description = "not a peer tool"
+            parameters = {"type": "object", "properties": {}}
+            tier = "specialized_control"
+            requires_document = False
+            execute = _ok
+
+        reg = _make_registry(PageTool(), StylePeer(), StyleSibling(), CoreReader(), FinishControl())
+        hidden = {t.name for t in reg.get_tools(filter_doc_type=False)}
+        assert "style_peer" not in hidden
+        assert "style_sibling" not in hidden
+        assert "page_example" not in hidden
+
+        names = {t.name for t in reg.get_tools(active_domain="page_peer_test", filter_doc_type=False)}
+        assert "page_example" in names
+        assert "style_peer" in names
+        assert "get_document_content" in names
+        assert "style_sibling" not in names
+        assert "finish_control" not in names
+
     def test_manage_charts_still_dispatches_to_dummy_backends(self):
         from plugin.calc.charts import ManageCharts
 

@@ -266,6 +266,9 @@ class ToolBase(ABC):
     # When False, the MCP executor runs the tool even with no document open (e.g. the
     # find_tools discovery meta-tool); the default requires an open document.
     requires_document: bool = True
+    # Extra tools this domain's sub-agent should see, by name. Core readers
+    # (get_document_content) or one specialized tool from another domain
+    # (style_list on the page domain). Same list; get_tools admits both tiers.
     required_core_tools: ClassVar[frozenset[str] | None] = None
 
     def detects_mutation(self) -> bool:
@@ -606,8 +609,9 @@ class ToolRegistry:
                 ``specialized``, ``specialized_control``, and ``mcp`` so nested
                 Writer tools and MCP-only helpers stay off the main tool list.
                 Pass ``()`` or ``frozenset()`` to include all tiers.
-            active_domain: If provided, dynamically includes specialized tools for this domain
-                and the specialized_workflow_finished tool.
+            active_domain: If provided, dynamically includes specialized tools for this domain,
+                the specialized_workflow_finished tool, and names listed in
+                ``required_core_tools`` whose tier is ``core`` or ``specialized``.
         """
         # crosshair: off
         tools: Any = self._tools.values()
@@ -638,11 +642,12 @@ class ToolRegistry:
             to_exclude = frozenset(exclude_tiers) if exclude_tiers else frozenset()
 
         if active_domain:
-            # If an active domain is set, restrict the list ONLY to the specialized tools
-            # for that domain and the finish tool. Do not include normal default-tier tools.
-            # However, we also include any core tools explicitly requested by the domain.
+            # Restrict the list to this domain, the finish tool, and names the
+            # domain listed in required_core_tools. Those names may be core
+            # readers or one specialized tool from another domain. A listed
+            # specialized name does not pull that domain's siblings.
+            # specialized_control stays on the finish-tool branch only.
 
-            # First, find which core tools are required by any tool in this domain
             required_core: set[str] = set()
             for t in tools:
                 if _is_specialized_domain_tool(t, active_domain):
@@ -659,8 +664,7 @@ class ToolRegistry:
                 elif t.name == "specialized_workflow_finished" and active_domain not in WRITER_SIDEBAR_ONLY_DOMAINS:
                     # Sidebar-only domains (brainstorming, writing_plan) use bespoke finish tools.
                     filtered_tools.append(t)
-                # Dynamically include core tools required for this domain
-                elif getattr(t, "tier", None) == "core" and t.name in required_core:
+                elif getattr(t, "tier", None) in ("core", "specialized") and t.name in required_core:
                     filtered_tools.append(t)
             tools = filtered_tools
         else:

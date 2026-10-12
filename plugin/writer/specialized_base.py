@@ -89,6 +89,10 @@ class ToolWriterStyleBase(ToolWriterSpecialBase):
 class ToolWriterPageBase(ToolWriterSpecialBase):
     specialized_domain: ClassVar[str | None] = "page"
     specialized_domain_description: ClassVar[str | None] = "Page layout, margins, columns, headers, footers, and page breaks."
+    # Temporary proof that required_core_tools can name a specialized tool from
+    # another domain. style_list already documents family=PageStyles. Remove
+    # when a real page/styles peer tool is chosen.
+    required_core_tools: ClassVar[frozenset[str] | None] = (ToolWriterSpecialBase.required_core_tools or frozenset()) | frozenset(["style_list"])
     intent: str | None = "edit"
 
 
