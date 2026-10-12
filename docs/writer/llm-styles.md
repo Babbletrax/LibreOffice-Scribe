@@ -131,6 +131,17 @@ reach PyUNO unconverted and fail with `'dict' object has no attribute 'getTypes'
 additionally needs the typed `[]com.sun.star.style.TabStop` sequence, set through `uno.invoke`
 ([`styles.py`](../../plugin/writer/styles.py) `_set_style_property`).
 
+### The `style_clone` Tool
+
+Clones an existing style under a new name. `family` is `ParagraphStyles` (default), `CharacterStyles`, or `PageStyles`.
+
+Paragraph and character clones share the source parent and copy only properties that style sets directly. Paragraph clones also copy `FollowStyle`. A page clone copies direct page properties (not `FollowStyle` — a new page style already points at itself), then the header and footer content, including fields, and floating graphics anchored in those regions. The new style is not applied to a page. The page sub-agent can call `style_list` and `style_clone` without switching to the styles domain.
+
+**Tool Parameters:**
+* `style`: Source style name.
+* `new_style`: Name of the new style. Must not already exist.
+* `family`: `ParagraphStyles`, `CharacterStyles`, or `PageStyles`.
+
 ### The `style_import` Tool
 
 If the user has a preferred template file (.ott or .odt), the agent can import all its styles at once to ensure branding consistency.

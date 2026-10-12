@@ -379,6 +379,120 @@ def _set_style_property(style: Any, prop_name: str, value: Any) -> None:
     style.setPropertyValue(prop_name, value)
 
 
+# Metadata, plus read-only diffs that fail or change value when copied (probe C9).
+# FollowStyle is not in the direct-value walk: paragraph clones set it explicitly
+# (even when inherited), and a new page style's FollowStyle must stay itself
+# (probe C3 — copying the source chains the clone into the old next style).
+_CLONE_SKIP_PROPS = frozenset({
+    "Name", "DisplayName", "IsPhysical", "IsUserDefined", "Category",
+    "ParentStyle", "FollowStyle", "IsInUse", "UserDefinedAttributes",
+    "CharDiffHeight", "CharDiffHeightAsian", "CharDiffHeightComplex",
+})
+
+_CLONE_FAMILIES = ("ParagraphStyles", "PageStyles", "CharacterStyles")
+
+_CLONE_TEXT_SERVICES = {
+    "ParagraphStyles": "com.sun.star.style.ParagraphStyle",
+    "CharacterStyles": "com.sun.star.style.CharacterStyle",
+}
+
+
+def _readonly_attribute() -> int:
+    """com.sun.star.beans.PropertyAttribute.READONLY. IDL value is 16."""
+    try:
+        import uno
+
+        flag = cast("Any", uno).getConstantByName("com.sun.star.beans.PropertyAttribute.READONLY")
+        if isinstance(flag, int) and not isinstance(flag, bool):
+            return flag
+    except Exception:
+        pass
+    return 16
+
+
+def _is_direct_property_state(state: Any) -> bool:
+    """True for PropertyState.DIRECT_VALUE.
+
+    The enum's integer is 0 (first enumerator). Comparing against 1 would copy
+    inherited defaults and skip real overrides.
+    """
+    return getattr(state, "value", None) == "DIRECT_VALUE"
+
+
+def _copy_direct_style_properties(source: Any, dest: Any) -> tuple[list[str], list[str]]:
+    """Copy DIRECT_VALUE properties. Inherited defaults stay inherited.
+
+    Returns (copied names, names that were direct but could not be set).
+    page.copy_page_style imports this at call time: this module already imports page.
+    """
+    readonly = _readonly_attribute()
+    try:
+        props = source.getPropertySetInfo().getProperties()
+    except Exception as e:
+        raise RuntimeError("Could not read style properties: %s" % e) from e
+    copied: list[str] = []
+    skipped: list[str] = []
+    for prop in props:
+        name = getattr(prop, "Name", None)
+        if not isinstance(name, str) or name in _CLONE_SKIP_PROPS:
+            continue
+        try:
+            attrs = int(getattr(prop, "Attributes", 0) or 0)
+        except (TypeError, ValueError):
+            attrs = 0
+        if attrs & readonly:
+            continue
+        try:
+            state = source.getPropertyState(name)
+        except Exception:
+            skipped.append(name)
+            continue
+        if not _is_direct_property_state(state):
+            continue
+        try:
+            dest.setPropertyValue(name, source.getPropertyValue(name))
+        except Exception:
+            log.warning("style clone: could not copy property %s", name, exc_info=True)
+            skipped.append(name)
+            continue
+        copied.append(name)
+    return copied, skipped
+
+
+def _clone_text_style(
+    doc: Any,
+    family: str,
+    source: Any,
+    new_name: str,
+    style_family: Any,
+) -> dict[str, Any]:
+    """Paragraph or character sibling: same parent, direct overrides, paragraph FollowStyle."""
+    service = _CLONE_TEXT_SERVICES[family]
+    clone = doc.createInstance(service)
+    if not clone:
+        raise RuntimeError("Failed to create style instance for %s" % service)
+    try:
+        parent = str(source.getParentStyle() or "")
+    except Exception:
+        parent = ""
+    if parent:
+        clone.setParentStyle(parent)
+    if family == "ParagraphStyles":
+        # Set even when FollowStyle is only inherited, so the sibling continues
+        # into the same next style instead of the new style's own default.
+        follow = source.getPropertyValue("FollowStyle")
+        if follow:
+            clone.setPropertyValue("FollowStyle", follow)
+    copied, skipped = _copy_direct_style_properties(source, clone)
+    style_family.insertByName(new_name, clone)
+    return {
+        "properties_copied": len(copied),
+        "skipped_properties": skipped,
+        "shapes_copied": 0,
+        "skipped_shapes": [],
+    }
+
+
 def _normalize_property_updates(property_updates: Any) -> tuple[dict[str, Any], str | None]:
     """Copy updates and translate ParaAdjust and UNO structs. Returns (dict, error_message)."""
     if not isinstance(property_updates, dict):
@@ -1101,6 +1215,98 @@ class StyleCreate(ToolWriterStyleBase):
         # Style changes aren't reviewable as tracked changes -- flag it for the agent (matches ApplyStyle).
         from plugin.writer.edit_review import review_recording_enabled
 
+        if review_recording_enabled(ctx.ctx):
+            result["style_unreviewed"] = True
+        return result
+
+
+class StyleClone(ToolWriterStyleBase):
+    """Clone a paragraph, character, or page style under a new name."""
+
+    name: str | None = "style_clone"
+    intent: str | None = "edit"
+    description: str = (
+        "Clone a paragraph, character, or page style into a new name. "
+        "Paragraph and character clones share the source parent and copy direct "
+        "property overrides; paragraph clones also copy FollowStyle. "
+        "family=PageStyles copies direct page properties, in-flow header/footer "
+        "content (including fields), and floating graphics anchored in those "
+        "regions. The new style is not assigned to any page."
+    )
+    parameters: dict[str, Any] | None = {
+        "type": "object",
+        "properties": {
+            "style": {"type": "string", "description": "Name of the style to copy."},
+            "new_style": {"type": "string", "description": "Name of the new style. Must not already exist."},
+            "family": {
+                "type": "string",
+                "enum": list(_CLONE_FAMILIES),
+                "description": "Style family. Default: ParagraphStyles.",
+            },
+        },
+        "required": ["style", "new_style"],
+    }
+    uno_services: list[str] | None = ["com.sun.star.text.TextDocument"]
+    is_mutation: bool | None = True
+
+    def execute(self, ctx: ToolContext, **kwargs: Any) -> dict[str, Any]:
+        style_name = str(kwargs.get("style") or "").strip()
+        new_name = str(kwargs.get("new_style") or "").strip()
+        if not style_name:
+            return self._tool_error("style is required.")
+        if not new_name:
+            return self._tool_error("new_style is required.")
+        if style_name == new_name:
+            return self._tool_error("new_style must be a different name from style.")
+
+        family = kwargs.get("family") or "ParagraphStyles"
+        if family not in _CLONE_FAMILIES:
+            return self._tool_error("family must be one of %s." % ", ".join(_CLONE_FAMILIES))
+
+        doc = ctx.doc
+        try:
+            style_families = doc.getStyleFamilies()
+        except Exception as e:
+            return self._tool_error("Could not read style families: %s" % e)
+        if not style_families.hasByName(family):
+            return self._tool_error("Document does not support style family: %s" % family)
+        style_family = style_families.getByName(family)
+        if not style_family.hasByName(style_name):
+            return _missing_style_error(self, style_name, family, style_family)
+        if style_family.hasByName(new_name):
+            return self._tool_error("Style '%s' already exists in %s." % (new_name, family))
+
+        from plugin.writer.edit_review import WriterCompoundUndo, review_recording_enabled
+
+        try:
+            with WriterCompoundUndo(doc, "WriterAgent: Clone style"):
+                if family == "PageStyles":
+                    # Local import: page.copy_page_style imports this module at call time.
+                    from .page import copy_page_style
+
+                    stats = copy_page_style(
+                        doc, style_name, new_name,
+                        uno_ctx=ctx.ctx, services=getattr(ctx, "services", None),
+                    )
+                else:
+                    stats = _clone_text_style(
+                        doc, family, style_family.getByName(style_name), new_name, style_family,
+                    )
+        except Exception as e:
+            log.exception("Failed to clone style '%s' to '%s' in %s", style_name, new_name, family)
+            msg = getattr(e, "Message", str(e))
+            return self._tool_error("Failed to clone style: %s" % msg)
+
+        result = {
+            "status": "ok",
+            "family": family,
+            "source_style": style_name,
+            "new_style": new_name,
+            "properties_copied": stats["properties_copied"],
+            "skipped_properties": stats["skipped_properties"],
+            "shapes_copied": stats["shapes_copied"],
+            "skipped_shapes": stats["skipped_shapes"],
+        }
         if review_recording_enabled(ctx.ctx):
             result["style_unreviewed"] = True
         return result

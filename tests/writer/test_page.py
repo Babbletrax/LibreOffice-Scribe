@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 from plugin.tests.testing_utils import TestingFactory
 
@@ -16,10 +16,12 @@ from plugin.writer.page import (
     PageSetHeaderFooterText,
     PageSetColumns,
     PageInsertBreak,
+    _copy_region_graphics,
     _disable_blocked_by_content,
     _region_holds_content,
     _region_mirrors_shared,
     _scan_region_content,
+    copy_page_style,
 )
 
 
@@ -769,4 +771,64 @@ def test_page_break_anchor_not_found():
     # com.sun.star.style.BreakType is a mocked module; the import inside execute resolves via the uno mock.
     res = PageInsertBreak().execute(SimpleNamespace(doc=doc), before_text="Signature")
     assert res["status"] == "error" and "not found" in res["message"]
+
+
+def test_copy_region_graphics_skips_non_graphic():
+    """AT_PARAGRAPH frames are not TextGraphicObject; they are reported, not copied."""
+    src = object()
+    dest = MagicMock()
+    graphic = MagicMock()
+    graphic.supportsService.return_value = True
+    graphic.getName.return_value = "logo"
+    graphic.getAnchor.return_value.getText.return_value = src
+    graphic.getPropertyValue.side_effect = lambda name: "v-" + name
+    frame = MagicMock()
+    frame.supportsService.return_value = False
+    frame.getName.return_value = "frame"
+    frame.getAnchor.return_value.getText.return_value = src
+    elsewhere = MagicMock()
+    elsewhere.getAnchor.return_value.getText.return_value = object()
+    draw = MagicMock()
+    draw.getCount.return_value = 3
+    draw.getByIndex.side_effect = [graphic, frame, elsewhere]
+    doc = MagicMock()
+    doc.getDrawPage.return_value = draw
+    created = MagicMock()
+    doc.createInstance.return_value = created
+
+    copied, skipped = _copy_region_graphics(doc, src, dest)
+
+    assert copied == 1
+    assert skipped == ["frame"]
+    dest.insertTextContent.assert_called_once()
+    created.setPropertyValue.assert_any_call("HyperLinkURL", "v-HyperLinkURL")
+    created.setPropertyValue.assert_any_call("AnchorType", "v-AnchorType")
+
+
+def test_copy_page_style_inserts_without_touching_follow_style():
+    """Off regions are skipped. FollowStyle is left at the new style's own default."""
+    source = MagicMock()
+    source.getParentStyle.return_value = ""
+    source.getPropertyValue.return_value = False
+    family = MagicMock()
+    family.hasByName.side_effect = lambda name: name == "Src"
+    family.getByName.return_value = source
+    family.getElementNames.return_value = ("Src",)
+    doc = MagicMock()
+    doc.getStyleFamilies.return_value.getByName.return_value = family
+    clone = MagicMock()
+    doc.createInstance.return_value = clone
+
+    with patch(
+        "plugin.writer.styles._copy_direct_style_properties",
+        return_value=(["LeftMargin"], []),
+    ) as copier:
+        stats = copy_page_style(doc, "Src", "Dst")
+
+    family.insertByName.assert_called_once_with("Dst", clone)
+    copier.assert_called_once_with(source, clone)
+    assert stats["properties_copied"] == 1
+    assert stats["shapes_copied"] == 0
+    for call in clone.setPropertyValue.call_args_list:
+        assert call.args[0] != "FollowStyle"
 

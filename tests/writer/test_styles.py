@@ -20,7 +20,7 @@ import pytest
 from unittest.mock import MagicMock, patch
 from plugin.writer.page import PageGetStyleProperties
 from plugin.writer.styles import (
-    StyleList, StyleGetInfo, ApplyStyle, StyleCreate, StyleImport, StyleUpdate,
+    StyleList, StyleGetInfo, ApplyStyle, StyleCreate, StyleClone, StyleImport, StyleUpdate,
     _close_style_names,
 )
 from plugin.tests.testing_utils import TestingFactory, WriterDocStub
@@ -594,6 +594,88 @@ def test_import_styles(mock_pv, mock_uno, mock_ctx):
     url, opts = mock_ctx.doc._load_styles_calls[0]
     assert url == "file:///path/to/doc.ott"
     assert isinstance(opts, tuple)
+
+
+def test_clone_style_requires_names():
+    family = _style_family({"Src": MagicMock()})
+    mock_ctx = _ctx_with_families(ParagraphStyles=family)
+
+    missing_style = StyleClone().execute(mock_ctx, new_style="Dst")
+    assert missing_style["status"] == "error"
+    assert "style is required" in missing_style["message"]
+
+    missing_new = StyleClone().execute(mock_ctx, style="Src")
+    assert missing_new["status"] == "error"
+    assert "new_style is required" in missing_new["message"]
+
+    same = StyleClone().execute(mock_ctx, style="Src", new_style="Src")
+    assert same["status"] == "error"
+    assert "different name" in same["message"]
+    family.insertByName.assert_not_called()
+
+
+def test_clone_style_rejects_unknown_family_and_existing_name():
+    family = _style_family({"Src": MagicMock(), "Dst": MagicMock()})
+    mock_ctx = _ctx_with_families(ParagraphStyles=family)
+
+    bad_family = StyleClone().execute(mock_ctx, style="Src", new_style="Other", family="FrameStyles")
+    assert bad_family["status"] == "error"
+    assert "family must be one of" in bad_family["message"]
+
+    collision = StyleClone().execute(mock_ctx, style="Src", new_style="Dst")
+    assert collision["status"] == "error"
+    assert "already exists" in collision["message"]
+    family.insertByName.assert_not_called()
+
+
+def test_clone_style_missing_source_suggests_close_name():
+    family = _style_family({"Heading 1": MagicMock()})
+    mock_ctx = _ctx_with_families(ParagraphStyles=family)
+
+    res = StyleClone().execute(mock_ctx, style="heading 1", new_style="Dst")
+
+    assert res["status"] == "error"
+    assert "Did you mean 'Heading 1'" in res["message"]
+    family.insertByName.assert_not_called()
+
+
+def test_clone_paragraph_style_copies_parent_follow_and_direct():
+    """Sibling clone: parent, FollowStyle even if we also skip it in the direct walk, one override."""
+    from types import SimpleNamespace
+
+    source = MagicMock()
+    source.getParentStyle.return_value = "Heading"
+    values = {"FollowStyle": "Text body", "CharWeight": 150.0, "CharDiffHeight": 1}
+    source.getPropertyValue.side_effect = lambda name: values[name]
+    source.getPropertyState.return_value = SimpleNamespace(value="DIRECT_VALUE")
+    source.getPropertySetInfo.return_value.getProperties.return_value = (
+        SimpleNamespace(Name="Name", Attributes=0),
+        SimpleNamespace(Name="ParentStyle", Attributes=0),
+        SimpleNamespace(Name="FollowStyle", Attributes=0),
+        SimpleNamespace(Name="CharWeight", Attributes=0),
+        SimpleNamespace(Name="CharDiffHeight", Attributes=0),
+    )
+    family = _style_family({"Src": source})
+    mock_ctx = _ctx_with_families(ParagraphStyles=family)
+    new_style = MagicMock()
+    mock_ctx.doc._created["com.sun.star.style.ParagraphStyle"] = new_style
+
+    res = StyleClone().execute(mock_ctx, style="Src", new_style="Dst")
+
+    assert res["status"] == "ok", res
+    assert res["family"] == "ParagraphStyles"
+    assert res["source_style"] == "Src"
+    assert res["new_style"] == "Dst"
+    assert res["properties_copied"] == 1
+    assert res["shapes_copied"] == 0
+    new_style.setParentStyle.assert_called_once_with("Heading")
+    set_names = [call.args[0] for call in new_style.setPropertyValue.call_args_list]
+    assert set_names.count("FollowStyle") == 1
+    assert "CharWeight" in set_names
+    # Read-only diff height is excluded, not copied and not reported as a failed set.
+    assert "CharDiffHeight" not in set_names
+    assert "CharDiffHeight" not in res["skipped_properties"]
+    family.insertByName.assert_called_once_with("Dst", new_style)
 
 
 def test_apply_style_uno_skips_windows_leftover_origin_canary() -> None:

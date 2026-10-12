@@ -21,12 +21,15 @@ Page styles, margins, headers/footers, columns, and page breaks.
 
 from __future__ import annotations
 
+import logging
 from typing import TYPE_CHECKING, Any
 
 from plugin.framework.errors import make_tool_error
 from plugin.framework.uno_context import uno_same
 from .format import record_walk_cap
 from .specialized_base import ToolWriterPageBase
+
+log = logging.getLogger("writeragent.writer")
 
 if TYPE_CHECKING:
     from plugin.framework.tool import ToolContext
@@ -49,6 +52,15 @@ _REGION_PROPS = {
 }
 
 _REGIONS = tuple(_REGION_PROPS)
+
+# In-flow header/footer HTML does not carry draw-page shapes. Probe C4: a new
+# TextGraphicObject with these props keeps a floating hyperlink in the clone.
+_PAGE_GRAPHIC_PROPS = (
+    "AnchorType", "Graphic", "Width", "Height",
+    "HoriOrient", "HoriOrientPosition", "HoriOrientRelation",
+    "VertOrient", "VertOrientPosition", "VertOrientRelation",
+    "HyperLinkURL", "HyperLinkTarget", "Title", "Description",
+)
 
 # Walk caps for _scan_region_content. A header/footer is small; these only bound a runaway.
 _SCAN_PARA_LIMIT = 5000
@@ -277,6 +289,207 @@ def resolve_page_style(doc: Any, style_name: str = "Standard") -> tuple[Any, str
         available = list(styles.getElementNames())
         raise ValueError("No page style named '%s'. Available: %s" % (style_name, ", ".join(available)))
     return styles.getByName(style_name), style_name
+
+
+def _shape_name(shape: Any) -> str:
+    try:
+        name = shape.getName()
+    except Exception:
+        return "unnamed"
+    text = str(name or "").strip()
+    return text or "unnamed"
+
+
+def _copy_region_graphics(doc: Any, src_text: Any, dest_text: Any) -> tuple[int, list[str]]:
+    """Re-create floating graphics anchored in src_text inside dest_text.
+
+    Shapes live on the draw page, matched with uno_same the same way as
+    _scan_region_content. The walk snapshots the page first: insertTextContent
+    adds the clone, and continuing over getCount() would copy that clone too.
+    Non-graphic shapes are reported, not copied.
+    """
+    copied = 0
+    skipped: list[str] = []
+    try:
+        draw_page = doc.getDrawPage()
+        count = int(draw_page.getCount())
+    except Exception:
+        return 0, []
+    shapes: list[Any] = []
+    for i in range(min(count, _SCAN_SHAPE_LIMIT)):
+        try:
+            shapes.append(draw_page.getByIndex(i))
+        except Exception:
+            break
+    for shape in shapes:
+        try:
+            if not uno_same(shape.getAnchor().getText(), src_text):
+                continue
+        except Exception:
+            continue
+        label = _shape_name(shape)
+        try:
+            # `is True`: MagicMock supportsService() is truthy and would copy a frame.
+            if shape.supportsService("com.sun.star.text.TextGraphicObject") is not True:
+                skipped.append(label)
+                continue
+        except Exception:
+            skipped.append(label)
+            continue
+        try:
+            clone = doc.createInstance("com.sun.star.text.TextGraphicObject")
+            if not clone:
+                skipped.append(label)
+                continue
+            for prop in _PAGE_GRAPHIC_PROPS:
+                try:
+                    clone.setPropertyValue(prop, shape.getPropertyValue(prop))
+                except Exception:
+                    log.debug("page style clone: graphic %s has no %s", label, prop)
+            cursor = dest_text.createTextCursor()
+            cursor.gotoEnd(False)
+            dest_text.insertTextContent(cursor, clone, False)
+            copied += 1
+        except Exception:
+            log.warning("page style clone: could not copy graphic %s", label, exc_info=True)
+            skipped.append(label)
+    return copied, skipped
+
+
+def _region_has_flow_content(doc: Any, text_obj: Any) -> bool:
+    """True when the region has text, fields, or a table the HTML round-trip must keep.
+
+    A floating graphic alone is not flow content: xtext export does not carry it,
+    and _copy_region_graphics copies it after the HTML import.
+    """
+    try:
+        plain = text_obj.getString()
+    except Exception:
+        plain = ""
+    if isinstance(plain, str) and plain.strip():
+        return True
+    if _scan_region_content(doc, text_obj)["fields"]:
+        return True
+    return _region_has_table(text_obj)
+
+
+def _copy_page_regions(
+    doc: Any,
+    source: Any,
+    clone: Any,
+    *,
+    uno_ctx: Any,
+    services: Any,
+) -> tuple[int, list[str]]:
+    """Copy on, non-mirror header/footer regions onto the clone."""
+    from .html_export import xtext_to_content
+    from .html_import import replace_xtext_with_html
+
+    config_svc = None
+    if services is not None:
+        try:
+            config_svc = services.get("config")
+        except Exception:
+            config_svc = None
+    shapes_copied = 0
+    skipped_shapes: list[str] = []
+    for region, (is_on_prop, text_prop) in _REGION_PROPS.items():
+        # First/left variants that only mirror the shared region would duplicate it.
+        if _region_mirrors_shared(source, region):
+            continue
+        try:
+            if source.getPropertyValue(is_on_prop) is not True:
+                continue
+        except Exception:
+            continue
+        try:
+            src_text = source.getPropertyValue(text_prop)
+        except Exception:
+            src_text = None
+        if src_text is None:
+            continue
+        clone.setPropertyValue(is_on_prop, True)
+        dest_text = clone.getPropertyValue(text_prop)
+        if dest_text is None:
+            raise RuntimeError("Page style clone: no %s text on the new style." % region)
+        if _region_has_flow_content(doc, src_text):
+            html = xtext_to_content(
+                src_text, doc, uno_ctx, services, include_images=True,
+            )
+            # xtext_to_content swallows export errors and returns "". A footer
+            # that had text or a field must not become an empty clone.
+            if not (html or "").strip():
+                raise RuntimeError(
+                    "Page style clone: could not export %s content from the source style." % region
+                )
+            replace_xtext_with_html(dest_text, html, config_svc=config_svc, model=doc)
+        copied, skipped = _copy_region_graphics(doc, src_text, dest_text)
+        shapes_copied += copied
+        skipped_shapes.extend(skipped)
+    return shapes_copied, skipped_shapes
+
+
+def copy_page_style(
+    doc: Any,
+    source_name: str,
+    new_name: str,
+    *,
+    uno_ctx: Any = None,
+    services: Any = None,
+) -> dict[str, Any]:
+    """Clone a page style: direct properties, header/footer flow, floating graphics.
+
+    FollowStyle is not copied. A new page style's FollowStyle defaults to itself
+    (probe C3); copying the source's would chain the clone into the old next style.
+    Called by style_clone. Not a tool of its own.
+
+    The direct-property helper lives in styles.py. This function imports it at
+    call time because styles.py already imports this module at load.
+    """
+    from .styles import _copy_direct_style_properties
+
+    styles = doc.getStyleFamilies().getByName("PageStyles")
+    if not styles.hasByName(source_name):
+        available = list(styles.getElementNames())
+        raise ValueError(
+            "No page style named '%s'. Available: %s" % (source_name, ", ".join(available))
+        )
+    if styles.hasByName(new_name):
+        raise ValueError("Style '%s' already exists in PageStyles." % new_name)
+    source = styles.getByName(source_name)
+    clone = doc.createInstance("com.sun.star.style.PageStyle")
+    if not clone:
+        raise RuntimeError("Failed to create a page style instance.")
+    try:
+        parent = str(source.getParentStyle() or "")
+    except Exception:
+        parent = ""
+    if parent:
+        clone.setParentStyle(parent)
+    # Insert before header/footer copy: those XText objects exist once the style
+    # is in the family. Direct props are copied after insert so FollowStyle has
+    # already defaulted to the new name and the skip list can leave it there.
+    styles.insertByName(new_name, clone)
+    try:
+        copied, skipped = _copy_direct_style_properties(source, clone)
+        shapes_copied, skipped_shapes = _copy_page_regions(
+            doc, source, clone, uno_ctx=uno_ctx, services=services,
+        )
+    except Exception:
+        try:
+            if styles.hasByName(new_name):
+                styles.removeByName(new_name)
+        except Exception:
+            log.warning(
+                "page style clone: could not remove half-created '%s'", new_name, exc_info=True,
+            )
+        raise
+    return {
+        "properties_copied": len(copied),
+        "skipped_properties": skipped,
+        "shapes_copied": shapes_copied,
+        "skipped_shapes": skipped_shapes,
+    }
 
 
 def _mm(style: Any, name: str) -> float | None:

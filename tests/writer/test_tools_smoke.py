@@ -154,16 +154,18 @@ class TestWriterToolsSmoke:
         ):
             assert (name) not in (bib_domain)
 
-    def test_page_domain_reuses_style_list(self):
-        """Temporary: page sub-agent sees style_list, not the rest of styles."""
+    def test_page_domain_reuses_style_list_and_style_clone(self):
+        """Page sub-agent can list page styles and clone one; the rest of styles stays hidden."""
         registry = get_tools()
         doc = WriterDocStub()
         names = {t.name for t in registry.get_tools(doc=doc, active_domain="page", exclude_tiers=())}
         assert ("style_list") in (names)
+        assert ("style_clone") in (names)
         for leftover in ("style_get_info", "style_update", "style_create", "style_import"):
             assert (leftover) not in (names), f"page domain must not pull {leftover!r}"
         default_names = {t.name for t in registry.get_tools(doc=doc)}
         assert ("style_list") not in (default_names)
+        assert ("style_clone") not in (default_names)
 
     def test_mail_merge_domain_tools(self):
         registry = get_tools()

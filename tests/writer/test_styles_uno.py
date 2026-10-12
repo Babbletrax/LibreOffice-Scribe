@@ -14,7 +14,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 from plugin.testing_runner import native_test
-from plugin.writer.styles import StyleCreate, StyleList, StyleUpdate
+from plugin.writer.styles import StyleClone, StyleCreate, StyleList, StyleUpdate
 from plugin.tests.testing_utils import TestingFactory, with_native_doc
 
 
@@ -112,3 +112,80 @@ def test_list_styles_uno(ctx, doc):
     names = [s["name"] for s in res["styles"]]
     assert "Heading 1" in names
     assert "Text body" in names
+
+
+def _drop_style(family, name):
+    """Pooled native docs keep user styles across tests. Drop leftovers first."""
+    if family.hasByName(name):
+        family.removeByName(name)
+
+
+@native_test
+@with_native_doc("writer")
+def test_clone_paragraph_style_uno(ctx, doc):
+    """Sibling paragraph clone keeps parent, FollowStyle, and a direct override (probe C9)."""
+    tool_ctx = TestingFactory.create_context(doc=doc, ctx=ctx, env="native")
+    para = doc.getStyleFamilies().getByName("ParagraphStyles")
+    _drop_style(para, "CloneSrcPara")
+    _drop_style(para, "CloneDstPara")
+    src = doc.createInstance("com.sun.star.style.ParagraphStyle")
+    src.setParentStyle("Heading 1")
+    para.insertByName("CloneSrcPara", src)
+    src.setPropertyValue("FollowStyle", "Text body")
+    src.setPropertyValue("CharWeight", 150.0)
+    src.setPropertyValue("ParaTopMargin", 400)
+
+    res = StyleClone().execute(tool_ctx, style="CloneSrcPara", new_style="CloneDstPara")
+
+    assert res["status"] == "ok", res
+    assert res["properties_copied"] >= 1
+    dst = para.getByName("CloneDstPara")
+    assert dst.getParentStyle() == "Heading 1"
+    assert dst.getPropertyValue("FollowStyle") == "Text body"
+    assert float(dst.getPropertyValue("CharWeight")) == 150.0
+    assert int(dst.getPropertyValue("ParaTopMargin")) == 400
+
+
+@native_test
+@with_native_doc("writer")
+def test_clone_character_style_uno(ctx, doc):
+    tool_ctx = TestingFactory.create_context(doc=doc, ctx=ctx, env="native")
+    fam = doc.getStyleFamilies().getByName("CharacterStyles")
+    _drop_style(fam, "CloneSrcChar")
+    _drop_style(fam, "CloneDstChar")
+    src = doc.createInstance("com.sun.star.style.CharacterStyle")
+    fam.insertByName("CloneSrcChar", src)
+    src.setPropertyValue("CharWeight", 150.0)
+    parent = src.getParentStyle()
+
+    res = StyleClone().execute(
+        tool_ctx, style="CloneSrcChar", new_style="CloneDstChar", family="CharacterStyles",
+    )
+
+    assert res["status"] == "ok", res
+    dst = fam.getByName("CloneDstChar")
+    assert dst.getParentStyle() == parent
+    assert float(dst.getPropertyValue("CharWeight")) == 150.0
+
+
+@native_test
+@with_native_doc("writer")
+def test_clone_page_style_uno(ctx, doc):
+    """Page clone is an independent style. FollowStyle stays the clone's own name (probe C3)."""
+    tool_ctx = TestingFactory.create_context(doc=doc, ctx=ctx, env="native")
+    pages = doc.getStyleFamilies().getByName("PageStyles")
+    _drop_style(pages, "ClonePageSrc")
+    _drop_style(pages, "ClonePageDst")
+    src = doc.createInstance("com.sun.star.style.PageStyle")
+    pages.insertByName("ClonePageSrc", src)
+    src.setPropertyValue("LeftMargin", 1234)
+
+    res = StyleClone().execute(
+        tool_ctx, style="ClonePageSrc", new_style="ClonePageDst", family="PageStyles",
+    )
+
+    assert res["status"] == "ok", res
+    dst = pages.getByName("ClonePageDst")
+    assert dst.getPropertyValue("FollowStyle") == "ClonePageDst"
+    # Twip rounding: 1234 can read back as 1235 (probe C3). Compare to the source read-back.
+    assert abs(int(dst.getPropertyValue("LeftMargin")) - int(src.getPropertyValue("LeftMargin"))) <= 2

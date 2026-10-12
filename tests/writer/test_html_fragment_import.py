@@ -268,3 +268,61 @@ def test_restore_field_placeholders_scopes_region_with_uno_same():
     ):
         assert hi._restore_field_placeholders(model, header) == 0
         insert.assert_not_called()
+
+
+def test_restore_fields_in_region_without_document_search():
+    """A footer on an unused page style is invisible to findFirst. Walk that XText."""
+    needle = "[[WA-FIELD:page-number]]"
+
+    class _Portion:
+        def getPropertyValue(self, name):
+            assert name == "TextPortionType"
+            return "Text"
+
+        def getString(self):
+            return text.plain
+
+    class _Enum:
+        def __init__(self, items):
+            self._items = list(items)
+
+        def hasMoreElements(self):
+            return bool(self._items)
+
+        def nextElement(self):
+            return self._items.pop(0)
+
+    class _Para:
+        def createEnumeration(self):
+            return _Enum([_Portion()])
+
+    class _Text:
+        def __init__(self):
+            self.plain = "Annex " + needle
+
+        def getString(self):
+            return self.plain
+
+        def createEnumeration(self):
+            return _Enum([_Para()])
+
+        def createTextCursor(self):
+            cursor = MagicMock()
+            cursor.goRight.return_value = True
+            cursor.getString.return_value = needle
+            return cursor
+
+    text = _Text()
+    model = MagicMock()
+    model.findFirst.side_effect = AssertionError("findFirst should not run")
+
+    def _inserted(unused_model, unused_cursor, title):
+        assert title == "page-number"
+        text.plain = "Annex 1"
+        return True
+
+    with patch("plugin.writer.html_import._insert_restored_field", side_effect=_inserted):
+        restored = _restore_field_placeholders(model, text)
+
+    assert restored == 1
+    model.findFirst.assert_not_called()

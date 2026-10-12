@@ -22,12 +22,19 @@ from plugin.tests.testing_utils import (
     with_native_doc,
     writer_services_tool_context,
 )
-from plugin.writer.images.image_tools import insert_image_into_header_footer
+from com.sun.star.text.TextContentAnchorType import AT_PARAGRAPH
+
+from plugin.writer.images.image_tools import (
+    _file_url_for_path,
+    _graphic_from_provider,
+    insert_image_into_header_footer,
+)
 from plugin.writer.page import (
     PageGetHeaderFooterText,
     PageSetHeaderFooterText,
     PageSetStyleProperties,
     _scan_region_content,
+    copy_page_style,
     resolve_page_style,
 )
 
@@ -286,3 +293,78 @@ def test_page_insert_break_no_anchor(ctx, doc):
     from com.sun.star.style.BreakType import PAGE_BEFORE
     assert para.getPropertyValue("BreakType") == PAGE_BEFORE
     assert view_cursor.getString() == "This is a "
+
+
+def _shapes_anchored_in(doc, text_obj):
+    found = []
+    draw_page = doc.getDrawPage()
+    for i in range(int(draw_page.getCount())):
+        shape = draw_page.getByIndex(i)
+        try:
+            if uno_same(shape.getAnchor().getText(), text_obj):
+                found.append(shape)
+        except Exception:
+            continue
+    return found
+
+
+@native_test
+@with_native_doc("writer")
+def test_copy_page_style_keeps_footer_field_and_graphic(ctx, doc):
+    """Direct margin, footer field, and a floating hyperlink survive; the source shape stays.
+
+    Probes C1, C3, C4. HTML import does not carry AT_PARAGRAPH graphics, so the
+    cloner re-creates them on the draw page.
+    """
+    logo = _header_logo_path()
+    assert os.path.isfile(logo), "fixture image missing: %s" % logo
+    graphic = _graphic_from_provider(ctx, _file_url_for_path(logo))
+    assert graphic is not None, "GraphicProvider could not load the fixture"
+
+    pages = doc.getStyleFamilies().getByName("PageStyles")
+    if pages.hasByName("AnnexFooterClone"):
+        pages.removeByName("AnnexFooterClone")
+
+    style, name = _style(doc)
+    style.setPropertyValue("FooterIsOn", True)
+    style.setPropertyValue("LeftMargin", 1234)
+    footer = style.getPropertyValue("FooterText")
+    footer.setString("Annex 1 ")
+    cursor = footer.createTextCursor()
+    cursor.gotoEnd(False)
+    field = doc.createInstance("com.sun.star.text.textfield.PageNumber")
+    footer.insertTextContent(cursor, field, False)
+
+    shape = doc.createInstance("com.sun.star.text.TextGraphicObject")
+    shape.setPropertyValue("Graphic", graphic)
+    shape.setPropertyValue("AnchorType", AT_PARAGRAPH)
+    shape.setPropertyValue("Width", 1500)
+    shape.setPropertyValue("Height", 1500)
+    shape.setPropertyValue("HyperLinkURL", "https://example.com/index")
+    shape.setPropertyValue("Title", "back-to-index")
+    cursor.gotoEnd(False)
+    footer.insertTextContent(cursor, shape, False)
+    source_url = shape.getPropertyValue("HyperLinkURL")
+    source_scan = _scan_region_content(doc, footer)
+    assert source_scan["fields"], source_scan
+
+    stats = copy_page_style(doc, name, "AnnexFooterClone", uno_ctx=ctx)
+
+    assert stats["shapes_copied"] >= 1, stats
+    clone = pages.getByName("AnnexFooterClone")
+    assert clone.getPropertyValue("FollowStyle") == "AnnexFooterClone"
+    assert abs(int(clone.getPropertyValue("LeftMargin")) - int(style.getPropertyValue("LeftMargin"))) <= 2
+
+    clone_footer = clone.getPropertyValue("FooterText")
+    assert "Annex" in clone_footer.getString(), clone_footer.getString()
+    scan = _scan_region_content(doc, clone_footer)
+    assert scan["fields"], (scan, clone_footer.getString())
+
+    clones = _shapes_anchored_in(doc, clone_footer)
+    linked = [s for s in clones if s.getPropertyValue("HyperLinkURL") == "https://example.com/index"]
+    assert linked, "clone footer lost the floating hyperlink"
+    assert linked[0].getPropertyValue("Title") == "back-to-index"
+
+    sources = _shapes_anchored_in(doc, footer)
+    assert sources, "source footer graphic was moved instead of copied"
+    assert any(s.getPropertyValue("HyperLinkURL") == source_url for s in sources)

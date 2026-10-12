@@ -195,7 +195,7 @@ DOMAIN_TOOLS = {   'bookmark': [   'bookmark_cleanup',
                       'nav_surroundings',
                       'section_list',
                       'section_read'],
-    'styles': ['style_create', 'style_get_info', 'style_import', 'style_list', 'style_update'],
+    'styles': ['style_clone', 'style_create', 'style_get_info', 'style_import', 'style_list', 'style_update'],
     'table': [   'manage_table_structure',
                  'table_delete',
                  'table_get_cells',
@@ -379,6 +379,7 @@ TOOL_METHODS = {   'add_cell_comment': ('comment', 'add_cell_comment'),
     'shape_summary': ('shape', 'summary'),
     'shape_upsert': ('shape', 'upsert'),
     'sort_range': ('range', 'sort_range'),
+    'style_clone': ('styles', 'clone'),
     'style_create': ('styles', 'create'),
     'style_get_info': ('styles', 'get_info'),
     'style_import': ('styles', 'import'),
@@ -2108,6 +2109,16 @@ structural = _StructuralProxy()
 
 class _StylesProxy:
     """Proxy for styles tools."""
+
+    def clone(self, style: str, new_style: str, *, family: str | None = None) -> dict[str, Any]:
+        """Clone a paragraph, character, or page style into a new name. Paragraph and character clones share the source parent and copy direct property overrides; paragraph clones also copy FollowStyle. family=PageStyles copies direct page properties, in-flow header/footer content (including fields), and floating graphics anchored in those regions. The new style is not assigned to any page.
+
+        Args:
+            style (required): Name of the style to copy.
+            new_style (required): Name of the new style. Must not already exist.
+            family (optional): Style family. Default: ParagraphStyles. One of: ParagraphStyles, PageStyles, CharacterStyles.
+        """
+        return _rpc_call("style_clone", style=style, new_style=new_style, family=family)
 
     def create(self, style: str, *, family: str | None = None, parent_style: str | None = None, property_updates: dict[str, Any] | None = None, conditional_rules: list[Any] | None = None) -> dict[str, Any]:
         """Create a new paragraph or character style with optional inheritance and property settings. For paragraph styles, you can also define conditional rules mapping contexts (like Table or Header) to other styles.

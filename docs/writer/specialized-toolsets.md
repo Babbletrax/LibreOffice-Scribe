@@ -221,7 +221,7 @@ flowchart LR
 
 `get_schemas` forwards `**kwargs` to `get_tools`. Chat uses the default exclusion; MCP passes an explicit set (see below).
 
-When `active_domain` is set, the list is that domain's specialized tools, `specialized_workflow_finished`, and any names in those tools' `required_core_tools` whose tier is `core` or `specialized`. A specialized name pulls that one tool from another domain; the rest of that domain stays hidden. `specialized_control` is not pulled this way. The page domain temporarily lists `style_list` so a page sub-agent can list page styles without switching to the styles domain.
+When `active_domain` is set, the list is that domain's specialized tools, `specialized_workflow_finished`, and any names in those tools' `required_core_tools` whose tier is `core` or `specialized`. A specialized name pulls that one tool from another domain; the rest of that domain stays hidden. `specialized_control` is not pulled this way. The page domain lists `style_list` and `style_clone` so a page sub-agent can list page styles and clone one without switching to the styles domain.
 
 **Call sites (default listing):**
 

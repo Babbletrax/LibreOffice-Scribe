@@ -1420,12 +1420,108 @@ def _insert_restored_field(model: Any, text_range: Any, title: str) -> bool:
         return False
 
 
+def _select_placeholder(text_obj: Any, needle: str) -> Any | None:
+    """Cursor covering the first plain-text *needle* in *text_obj*.
+
+    A document ``findFirst`` does not see a header or footer on a page style
+    that no page uses. That is the footer of a page style just created by
+    ``style_clone``. Walking portions addresses that text directly. A text
+    field counts as one cursor step (probe A'); ``getString()`` expands it,
+    so the index has to come from the portion walk, not from ``getString()``.
+    """
+    try:
+        enum = text_obj.createEnumeration()
+    except Exception:
+        return None
+    steps = 0
+    paras = 0
+    while enum.hasMoreElements() is True and paras < 5000:
+        paras += 1
+        try:
+            para = enum.nextElement()
+        except Exception:
+            break
+        try:
+            portions = para.createEnumeration()
+        except Exception:
+            continue
+        seen = 0
+        while portions.hasMoreElements() is True and seen < 5000:
+            seen += 1
+            try:
+                portion = portions.nextElement()
+                kind = portion.getPropertyValue("TextPortionType")
+            except Exception:
+                break
+            if kind == "TextField":
+                steps += 1
+                continue
+            try:
+                chunk = portion.getString() or ""
+            except Exception:
+                chunk = ""
+            if not isinstance(chunk, str):
+                chunk = str(chunk)
+            pos = chunk.find(needle)
+            if pos < 0:
+                steps += len(chunk)
+                continue
+            try:
+                cursor = text_obj.createTextCursor()
+                cursor.gotoStart(False)
+                offset = steps + pos
+                if offset and cursor.goRight(offset, False) is False:
+                    return None
+                if cursor.goRight(len(needle), True) is False:
+                    return None
+                if cursor.getString() != needle:
+                    return None
+                return cursor
+            except Exception:
+                return None
+    return None
+
+
+def _restore_fields_by_cursor(model: Any, text_obj: Any) -> int:
+    """Replace ``[[WA-FIELD:…]]`` tokens inside *text_obj* without document search."""
+    restored = 0
+    for _unused in range(50):
+        try:
+            plain = text_obj.getString() or ""
+        except Exception:
+            return restored
+        if "[[WA-FIELD:" not in plain:
+            return restored
+        cursor = None
+        title = None
+        for candidate in _EXPORTED_FIELD_TITLES:
+            needle = _FIELD_PLACEHOLDER_FMT % candidate
+            if needle not in plain:
+                continue
+            cursor = _select_placeholder(text_obj, needle)
+            if cursor is not None:
+                title = candidate
+                break
+        if cursor is None or title is None:
+            return restored
+        if not _insert_restored_field(model, cursor, title):
+            return restored
+        restored += 1
+    return restored
+
+
 def _restore_field_placeholders(model: Any, text_obj: Any = None) -> int:
     """Turn ``[[WA-FIELD:…]]`` tokens back into UNO fields.
 
-    Uses document ``findFirst`` (same reach as body search: headers included).
-    When *text_obj* is set, only matches in that ``XText`` are replaced.
+    When *text_obj* is set, walk that XText first. ``findFirst`` misses a
+    header/footer on a page style no page is using (a cloned page style).
+    The document search remains the path for body text, and the fallback
+    when the cursor walk cannot see the token.
     """
+    if text_obj is not None:
+        walked = _restore_fields_by_cursor(model, text_obj)
+        if walked:
+            return walked
     if model is None or not hasattr(model, "createSearchDescriptor"):
         return 0
     restored = 0
