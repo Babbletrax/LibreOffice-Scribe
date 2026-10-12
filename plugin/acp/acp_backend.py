@@ -22,32 +22,25 @@ notification processing, and prompt formatting.
 
 from __future__ import annotations
 
+import glob
 import logging
 import os
 import shlex
 import shutil
 import threading
-import time
 from typing import Any, Optional, Dict, List, Tuple
 
 from plugin.acp.base import AgentBackend
 from plugin.acp.acp_connection import ACPConnection
 from plugin.framework.async_stream import StreamQueueKind
 from plugin.framework.errors import format_error_payload
+from plugin.framework.worker_pool import run_in_background
 from plugin.version import EXTENSION_VERSION
 
 log = logging.getLogger(__name__)
 
 # ACP protocol version (integer per SDK)
 _ACP_PROTOCOL_VERSION = 1
-# After spawn, wait this long before initialize so a process that exits
-# immediately is reported as a start failure. The wait is polled so Stop
-# during it does not continue into the handshake.
-_STARTUP_WAIT_S = 0.5
-_STARTUP_POLL_S = 0.05
-# Slice count for the grace period. Not ``int(wait / poll)``: 0.05 is not
-# an exact binary fraction, and truncating a 9.999 result would shorten it.
-_STARTUP_POLLS = round(_STARTUP_WAIT_S / _STARTUP_POLL_S)
 
 # PermissionOption.kind values from the ACP schema. Prefer the "_once"
 # choice so Approve does not permanently allow later tool calls.
@@ -59,6 +52,78 @@ _TERMINAL_TOOL_STATUSES = frozenset({"completed", "failed"})
 # shutil.which on Windows returns the PATHEXT hit (hermes.exe, hermes.cmd,
 # hermes.bat). Those stems are the same CLI as the POSIX basename.
 _WINDOWS_CLI_SUFFIXES = frozenset({".exe", ".cmd", ".bat"})
+
+
+def _split_cli_args(args_str: str, *, posix: bool) -> list[str]:
+    """Split settings args. Windows keeps backslashes, then drops wrapping quotes.
+
+    ``posix=True`` treats ``\\`` as an escape, so ``C:\\new\\tmp`` becomes
+    ``C:newtmp``. ``posix=False`` keeps the backslashes and also keeps the
+    quote characters, so ``Popen`` would look for a file whose name contains
+    a literal quote.
+    """
+    tokens = shlex.split(args_str, posix=posix)
+    if posix:
+        return tokens
+    stripped: list[str] = []
+    for token in tokens:
+        if len(token) >= 2 and token[0] == token[-1] and token[0] in ('"', "'"):
+            stripped.append(token[1:-1])
+        else:
+            stripped.append(token)
+    return stripped
+
+
+def _directory_from_document_url(document_url: str | None) -> str | None:
+    """Parent directory of a ``file://`` document, or None when it is not a local file."""
+    from urllib.parse import unquote, urlparse
+
+    text = str(document_url or "").strip()
+    if text.startswith("file:/") and not text.startswith("file://"):
+        text = "file://" + text[len("file:") :]
+    if not text.startswith("file://"):
+        return None
+    parsed = urlparse(text)
+    if parsed.scheme != "file":
+        return None
+    path = unquote(parsed.path)
+    if os.name == "nt" and len(path) >= 3 and path[0] == "/" and path[2] == ":":
+        path = path[1:].replace("/", "\\")
+    if not path:
+        return None
+    if os.path.isdir(path):
+        return path
+    parent = os.path.dirname(path)
+    if parent and os.path.isdir(parent):
+        return parent
+    return None
+
+
+def _session_cwd(document_url: str | None) -> str:
+    """Directory the agent should treat as the project root.
+
+    ``os.getcwd()`` is LibreOffice's launch directory. A saved document's
+    folder is the root. An unsaved document has no folder, so use home.
+    """
+    found = _directory_from_document_url(document_url)
+    if found:
+        return found
+    return os.path.expanduser("~")
+
+
+_LIMIT_STOP_STATUS = {
+    "max_tokens": "Stopped: maximum tokens",
+    "max_turn_requests": "Stopped: turn request limit",
+}
+# session/prompt dies after this long with no accepted stdout line.
+_PROMPT_IDLE_SEC = 600
+# Stop sends session/cancel and keeps the CLI. If the prompt has not
+# returned by then, the agent ignored cancel and the tree is killed.
+_CANCEL_GRACE_SEC = 3.0
+
+
+class _TurnStopped(Exception):
+    """This turn was stopped before its JSON-RPC request was sent."""
 
 
 def _cli_basename_matches(path: str, binary_name: str) -> bool:
@@ -78,6 +143,30 @@ def _cli_basename_matches(path: str, binary_name: str) -> bool:
         return True
     stem, ext = os.path.splitext(name)
     return stem == expected and ext in _WINDOWS_CLI_SUFFIXES
+
+
+def _binary_candidates(binary_name: str) -> list[str]:
+    """Executable paths outside a short desktop PATH, in search order."""
+    home = os.path.expanduser("~")
+    names: tuple[str, ...] = (binary_name,)
+    if os.name == "nt":
+        names = (binary_name, f"{binary_name}.cmd", f"{binary_name}.exe", f"{binary_name}.bat")
+    directories = [
+        "/usr/local/bin",
+        "/opt/homebrew/bin",
+        os.path.join(home, ".local", "bin"),
+        os.path.join(home, ".cargo", "bin"),
+        os.path.join(home, ".npm-global", "bin"),
+        os.path.join(home, ".opencode", "bin"),
+    ]
+    # Any nvm install is enough. Sorted so the choice does not depend on glob order.
+    nvm_bins = os.path.join(home, ".nvm", "versions", "node", "*", "bin")
+    directories.extend(sorted(glob.glob(nvm_bins)))
+    if os.name == "nt":
+        appdata = os.environ.get("APPDATA", "")
+        if appdata:
+            directories.append(os.path.join(appdata, "npm"))
+    return [os.path.join(directory, name) for directory in directories for name in names]
 
 
 def _cancelled_permission() -> dict[str, Any]:
@@ -184,9 +273,20 @@ def _tool_activity_payload(update: dict[str, Any]) -> dict[str, Any]:
 
 
 def _tool_stream_kind(update: dict[str, Any]) -> StreamQueueKind:
+    """``TOOL_RESULT`` only for a finished call.
+
+    What was wrong: any update that carried ``content`` or ``rawOutput``
+    was a result, including ``status: in_progress``. A streaming tool
+    then showed several "[Tool result]" lines for one call. The status
+    comment already said in_progress is not a result. Why: pending and
+    in_progress stay activity. A terminal status, or content with no
+    status, is the result.
+    """
     if update.get("sessionUpdate") != "tool_call_update":
         return StreamQueueKind.TOOL_CALL
     status = update.get("status")
+    if status in ("pending", "in_progress"):
+        return StreamQueueKind.TOOL_CALL
     if status in _TERMINAL_TOOL_STATUSES or "content" in update or "rawOutput" in update:
         return StreamQueueKind.TOOL_RESULT
     return StreamQueueKind.TOOL_CALL
@@ -205,29 +305,48 @@ class ACPBackend(AgentBackend):
     ``agent_backend.args`` is empty (Hermes/OpenCode ``acp``, Grok
     ``--no-auto-update agent stdio``):
     - default_extra_args: immutable tuple; ``get_default_extra_args()``
-      copies it onto ``_extra_args`` when the resolved basename equals
-      ``get_binary_name()``, or that name plus ``.exe`` / ``.cmd`` / ``.bat``.
-      Grok overrides ``_apply_default_extra_args`` for prefix matching.
+      copies it onto ``_extra_args`` when ``_binary_matches`` is true.
+      The base match is the basename, including ``.exe`` / ``.cmd`` / ``.bat``.
+      Grok overrides ``_binary_matches`` for a ``grok`` prefix.
     """
 
     default_extra_args: Tuple[str, ...] = ()
     _ctx: Any | None
     _stop_requested: bool
-    _prompt_done: threading.Event
-    _permission_lock: threading.Lock
+    _state_lock: threading.Lock
     _pending_permissions: dict[Any, list[Any]]
+    _turn: int
+    _turn_pending: bool
+    _stop_turn: int
+    _ready: bool
+    _session_url: str | None
+    _session_prompted: bool
+    _prompt_inflight: bool
+    _prompt_done: threading.Event
 
     def __init__(self, ctx: Any | None = None) -> None:
         self._ctx = ctx
         self._conn: ACPConnection | None = None
         self._session_id: str | None = None
+        self._session_url = None
+        self._session_prompted = False
+        self._ready = False
         self._stop_requested = False
+        # prepare_turn publishes _turn before Stop is registered. send()
+        # consumes that publication. A send that was not prepared opens a
+        # new turn, so a Stop from the previous message cannot stick.
+        self._turn = 0
+        self._turn_pending = False
+        self._stop_turn = 0
+        self._prompt_inflight = False
+        self._prompt_done = threading.Event()
+        self._prompt_done.set()
         self._binary_path: Optional[str] = None
         self._extra_args: List[str] = []
-        self._prompt_done = threading.Event()
-        # request id -> options from session/request_permission. Stop and
-        # submit_approval both answer these; the lock is the only guard.
-        self._permission_lock = threading.Lock()
+        # request id -> options from session/request_permission. The same
+        # lock guards the stop latch so send() cannot clear a Stop that
+        # landed as this turn began.
+        self._state_lock = threading.Lock()
         self._pending_permissions = {}
         self._load_config()
 
@@ -240,12 +359,16 @@ class ACPBackend(AgentBackend):
             if path and os.path.isfile(path):
                 self._binary_path = path
             else:
+                # An empty setting means "search PATH". A path that is not a
+                # file is a typo, and falling through with no log hid it.
+                if path:
+                    log.warning("ACP agent_backend.path is not a file (%s); searching PATH", path)
                 self._binary_path = self._find_binary()
 
             args_str = str(get_config("agent_backend.args") or "").strip()
             # str.split() breaks a quoted path into several argv entries.
             # posix=False on Windows so backslashes in paths stay literal.
-            self._extra_args = shlex.split(args_str, posix=(os.name != "nt")) if args_str else []
+            self._extra_args = _split_cli_args(args_str, posix=(os.name != "nt")) if args_str else []
         except Exception:
             # A failed reload used to keep the previous argv, and the
             # exception was swallowed so a broken config looked like a
@@ -266,24 +389,27 @@ class ACPBackend(AgentBackend):
         defaults = self.get_default_extra_args()
         if not defaults or not self._binary_path:
             return
-        if _cli_basename_matches(self._binary_path, self.get_binary_name()):
+        if self._binary_matches(self._binary_path):
             self._extra_args = list(defaults)
 
+    def _binary_matches(self, path: str) -> bool:
+        """True when ``path`` is this backend's CLI, including Windows launcher suffixes."""
+        return _cli_basename_matches(path, self.get_binary_name())
+
     def _find_binary(self) -> str | None:
-        """Find the binary in PATH or common locations."""
+        """Find the binary in PATH or install dirs a short desktop PATH misses.
+
+        A GUI-launched LibreOffice often has ``/usr/bin:/bin`` only. npm,
+        nvm, Homebrew, and OpenCode installs live outside that. One list
+        serves every backend: the file name is the discriminant.
+        """
         binary_name = self.get_binary_name()
-
-        # Try the binary name directly
-        path = shutil.which(binary_name)
-        if path:
-            return path
-
-        # Check common install locations
-        home = os.path.expanduser("~")
-        for candidate in (os.path.join(home, ".local", "bin", binary_name), os.path.join(home, ".cargo", "bin", binary_name)):
+        found = shutil.which(binary_name)
+        if found:
+            return found
+        for candidate in _binary_candidates(binary_name):
             if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
                 return candidate
-
         return None
 
     def get_binary_name(self) -> str:
@@ -304,19 +430,13 @@ class ACPBackend(AgentBackend):
 
     def is_available(self, ctx: Any) -> bool:
         """Check if binary is installed."""
+        # _load_config already ran _find_binary, which searches PATH and the
+        # home install dirs. A second which() only ran when isfile() disagreed.
         self._load_config()
-        if self._binary_path and os.path.isfile(self._binary_path):
-            log.info(f"{self.get_display_name()} binary found: {self._binary_path}")
+        if self._binary_path:
+            log.info("%s binary found: %s", self.get_display_name(), self._binary_path)
             return True
-        # Fallback: search PATH
-        binary_name = self.get_binary_name()
-        path = shutil.which(binary_name)
-        if path:
-            self._binary_path = path
-            self._apply_default_extra_args()
-            log.info(f"{self.get_display_name()} found via PATH: {path}")
-            return True
-        log.info(f"{self.get_display_name()} binary not found")
+        log.info("%s binary not found", self.get_display_name())
         return False
 
     def _startup_stopped(self, stop_checker: Any) -> bool:
@@ -334,72 +454,98 @@ class ACPBackend(AgentBackend):
         return False
 
     def _ensure_connection(self, stop_checker: Any = None) -> None:
-        """Start the ACP subprocess if not already running."""
-        if self._conn and self._conn.is_alive:
+        """Start the ACP subprocess, or keep the one this sidebar already has.
+
+        A live initialized child is the slot. A live child that never
+        finished ``initialize`` (Stop during the startup wait) is reused
+        for the handshake. A dead child is dropped here, not left on the slot.
+        """
+        existing = self._conn
+        if existing is not None and existing.is_alive and self._ready:
             return
-        if not self._binary_path:
-            raise RuntimeError(f"{self.get_display_name()} binary not found. Install {self.get_binary_name()} and ensure it's in PATH.")
+        if existing is not None and existing.is_alive:
+            conn = existing
+        else:
+            if existing is not None:
+                self.shutdown()
+            if self._stop_requested:
+                return
+            if not self._binary_path:
+                raise RuntimeError(f"{self.get_display_name()} binary not found. Install {self.get_binary_name()} and ensure it's in PATH.")
 
-        cmd_line = [self._binary_path]
-        cmd_line.extend(self._extra_args)
+            cmd_line = [self._binary_path]
+            cmd_line.extend(self._extra_args)
 
-        env = dict(os.environ)
-        env.update(self.get_env_vars())
+            # ACPConnection.start merges os.environ itself. Passing a full copy
+            # here merged the process environment twice.
+            conn = ACPConnection(cmd_line=cmd_line, env=self.get_env_vars() or None)
+            self._conn = conn
+            self._ready = False
+            conn.start()
 
-        conn = ACPConnection(cmd_line=cmd_line, env=env)
-        self._conn = conn
-        conn.start()
-
-        # time.sleep(0.5) after start() never looked at Stop. stop() or a
-        # true stop_checker during that half-second was ignored, and this
-        # method continued into initialize. Poll the same grace period in
-        # short slices and return as soon as the stop latch or stop_checker()
-        # says so, before the handshake.
-        # Keep the connection created above. stop() sets self._conn to None,
-        # so re-reading it for the handshake raises AttributeError.
-        polls_left = _STARTUP_POLLS
-        while True:
+            # What was wrong: a half-second poll after every spawn delayed the
+            # first message so an instant crash could be named before
+            # initialize, and so Stop during that sleep skipped the handshake.
+            # Why: initialize fails on its own when the reader wakes the
+            # waiter. One liveness check still reports a child that is already
+            # dead, with its stderr. A Stop that landed during spawn is
+            # honored here, before the request is sent. Keep this local:
+            # shutdown can set self._conn to None.
             if self._startup_stopped(stop_checker):
                 return
             if not conn.is_alive:
-                if self._startup_stopped(stop_checker):
-                    return
                 detail = conn.stderr_text().strip()
                 message = f"{self.get_display_name()} ACP process failed to start."
                 if detail:
                     message = f"{message} {detail[:500]}"
                 raise RuntimeError(message)
-            if polls_left <= 0:
-                break
-            polls_left -= 1
-            time.sleep(_STARTUP_POLL_S)
 
         # Initialize handshake. ACP fs capability names are camelCase;
         # snake_case keys are ignored and do not turn the features off.
         try:
-            result = conn.send_request(
+            result = self._request(
+                conn,
                 "initialize",
                 {
                     "protocolVersion": _ACP_PROTOCOL_VERSION,
                     "clientCapabilities": {"fs": {"readTextFile": False, "writeTextFile": False}, "terminal": False},
                     "clientInfo": {"name": "WriterAgent", "version": EXTENSION_VERSION},
                 },
-                timeout=15,
+                15,
             )
+            self._ready = True
             log.info(f"ACP initialized: {result}")
-        except Exception:
+        except _TurnStopped:
+            # Stop won before initialize was sent. Leave the child so the
+            # next message can finish the handshake. _ready stays false.
+            return
+        except Exception as exc:
             log.exception("ACP initialize failed")
-            try:
-                conn.stop()
-            finally:
-                if self._conn is conn:
-                    self._conn = None
+            # A crash during the handshake used to say only "process
+            # terminated". The stderr tail is the CLI's own reason.
+            detail = conn.stderr_text().strip() if not conn.is_alive else ""
+            self._release_connection(conn)
+            if detail:
+                raise RuntimeError(f"{self.get_display_name()} ACP process failed to start. {detail[:500]}") from exc
             raise
 
-    def _ensure_session(self, mcp_url: str | None = None) -> None:
-        """Create a new ACP session if needed."""
-        if self._session_id:
+    def _ensure_session(self, mcp_url: str | None = None, document_url: str | None = None) -> None:
+        """Open an ACP session for this document, or keep the one it already has.
+
+        The same document URL reuses ``sessionId``. A different URL, including
+        the first save, starts another session on this process.
+        """
+        url_key = document_url or ""
+        if self._session_id and self._session_url == url_key:
             return
+        # What was wrong: ``if self._conn`` then ``self._conn.send_request``
+        # loaded the connection twice. stop() sets it to None between those
+        # loads. A missing connection also returned without a session id, and
+        # the later check reported Stopped. Why: one local, and raise when
+        # there is no process.
+        conn = self._conn
+        if conn is None:
+            raise RuntimeError(f"{self.get_display_name()} ACP process is not running.")
 
         # mcp_servers is required by the ACP schema
         # Attach mcp_servers only when MCP is enabled. A disabled server must
@@ -411,23 +557,36 @@ class ACPBackend(AgentBackend):
         if mcp_url and as_bool(get_config("mcp.mcp_enabled")):
             mcp_servers.append({"url": mcp_url, "name": "writeragent", "type": "http", "headers": []})
 
-        params = {"cwd": os.getcwd(), "mcpServers": mcp_servers}
+        params = {"cwd": _session_cwd(document_url), "mcpServers": mcp_servers}
 
         try:
-            if self._conn:
-                result = self._conn.send_request("session/new", params, timeout=30)
-                session_id = result.get("sessionId") if isinstance(result, dict) else None
-                # An empty id used to be stored and sent on session/prompt.
-                if not isinstance(session_id, str) or not session_id.strip():
-                    raise RuntimeError(f"{self.get_display_name()} ACP session/new returned no sessionId.")
-                self._session_id = session_id
-                log.debug(f"ACP session created: {self._session_id}")
+            result = self._request(conn, "session/new", params, 30)
+            session_id = result.get("sessionId") if isinstance(result, dict) else None
+            # An empty id used to be stored and sent on session/prompt.
+            if not isinstance(session_id, str) or not session_id.strip():
+                raise RuntimeError(f"{self.get_display_name()} ACP session/new returned no sessionId.")
+            self._session_id = session_id
+            self._session_url = url_key
+            self._session_prompted = False
+            log.debug(f"ACP session created: {self._session_id}")
+        except _TurnStopped:
+            # Stop won before session/new was sent. Not a session failure,
+            # and the process is still the one the next message should use.
+            raise
         except Exception:
             log.exception("ACP session creation failed")
+            # The process can retry session/new. Drop it only when it has died.
+            if self._conn is conn and not conn.is_alive:
+                self.shutdown()
             raise
 
-    def _build_prompt_blocks(self, user_message: str, document_context: Optional[str] = None, system_prompt: Optional[str] = None, selection_text: Optional[str] = None, document_url: Optional[str] = None) -> list[dict[str, Any]]:
-        """Build ACP prompt content blocks."""
+    def _build_prompt_blocks(self, user_message: str, document_context: Optional[str] = None, system_prompt: Optional[str] = None, selection_text: Optional[str] = None, document_url: Optional[str] = None, *, include_system: bool = True) -> list[dict[str, Any]]:
+        """Build ACP prompt content blocks.
+
+        The first prompt of a session carries the manual. Later prompts do
+        not: the CLI already has it. The document snapshot is sent every
+        time, because the file changes between messages.
+        """
         prompt_blocks = []
         is_slash_command = user_message.strip().startswith("/")
 
@@ -435,8 +594,7 @@ class ACPBackend(AgentBackend):
             # For slash commands, only send the command itself
             prompt_blocks.append({"type": "text", "text": user_message})
         else:
-            # Add system prompt if provided
-            if system_prompt:
+            if include_system and system_prompt:
                 prompt_blocks.append({"type": "text", "text": system_prompt})
             # Add document context if provided
             if document_context:
@@ -545,15 +703,30 @@ class ACPBackend(AgentBackend):
         # have no id and are not replies.
         if msg_id is not None and not handled:
             self._reject_unknown_request(msg_id, method)
+        elif msg_id is not None:
+            # session/update is a notification and usually has no id. One
+            # sent as a request was marked handled and never answered, so
+            # the agent blocked. An empty result unblocks it.
+            self._ack_request(msg_id)
 
-    def _reject_unknown_request(self, msg_id: Any, method: str) -> None:
+    def _reply(self, msg_id: Any, *, result: Any = None, error: Any = None, what: str) -> None:
+        """Send one JSON-RPC response. A missing connection is a no-op."""
         conn = self._conn
         if conn is None:
             return
         try:
-            conn.send_response(msg_id, error={"code": -32601, "message": f"Method not found: {method}"})
+            if error is not None:
+                conn.send_response(msg_id, error=error)
+            else:
+                conn.send_response(msg_id, result=result if result is not None else {})
         except Exception:
-            log.exception("Failed to reject ACP method %s", method)
+            log.exception("Failed to %s", what)
+
+    def _reject_unknown_request(self, msg_id: Any, method: str) -> None:
+        self._reply(msg_id, error={"code": -32601, "message": f"Method not found: {method}"}, what=f"reject ACP method {method}")
+
+    def _ack_request(self, msg_id: Any) -> None:
+        self._reply(msg_id, result={}, what=f"acknowledge ACP request {msg_id}")
 
     def _queue_permission_request(self, params: dict[str, Any], msg_id: Any, queue: Any) -> None:
         tool_call = params.get("toolCall")
@@ -566,7 +739,7 @@ class ACPBackend(AgentBackend):
         # The stop flag is read under the same lock stop() clears, so a
         # request that arrives as Stop runs is cancelled instead of stored
         # after the pending map was already swept.
-        with self._permission_lock:
+        with self._state_lock:
             if self._stop_requested:
                 reply_cancelled = msg_id is not None
             else:
@@ -576,15 +749,31 @@ class ACPBackend(AgentBackend):
                 else:
                     log.warning("ACP permission request missing id; cannot answer it")
         if reply_cancelled:
-            if self._conn is not None:
-                try:
-                    self._conn.send_response(msg_id, result=_cancelled_permission())
-                except Exception:
-                    log.exception("Failed to cancel ACP permission %s", msg_id)
+            self._reply(msg_id, result=_cancelled_permission(), what=f"cancel ACP permission {msg_id}")
             return
         description = _permission_description(params)
         tool_name = _permission_tool_name(tool_call)
         queue.put((StreamQueueKind.APPROVAL_REQUIRED, description, tool_name, tool_call, msg_id))
+
+    def _pop_pending_permission_ids(self) -> list[Any]:
+        """Drop the pending map. Caller holds ``_state_lock``."""
+        pending_ids = list(self._pending_permissions)
+        self._pending_permissions.clear()
+        return pending_ids
+
+    def _clear_slot_locked(self, conn: ACPConnection | None) -> None:
+        """Forget ``conn`` and its session. Caller holds ``_state_lock``.
+
+        A different connection already in the slot is left alone, including
+        its session. ``conn`` None clears whatever the slot holds.
+        """
+        if conn is not None and self._conn is not conn:
+            return
+        self._conn = None
+        self._ready = False
+        self._session_id = None
+        self._session_url = None
+        self._session_prompted = False
 
     def _cancel_pending_permissions(self) -> None:
         """Answer every outstanding permission with the ACP ``cancelled`` outcome.
@@ -594,49 +783,144 @@ class ACPBackend(AgentBackend):
         requires ``cancelled`` when the client sends ``session/cancel``.
         Pop under the lock so a concurrent Approve cannot answer twice.
         """
-        lock = getattr(self, "_permission_lock", None)
-        pending_map = getattr(self, "_pending_permissions", None)
-        if lock is None or not isinstance(pending_map, dict):
-            return
-        with lock:
-            pending_ids = list(pending_map)
-            pending_map.clear()
-        conn = self._conn
-        if conn is None:
-            return
+        with self._state_lock:
+            pending_ids = self._pop_pending_permission_ids()
         for request_id in pending_ids:
-            try:
-                conn.send_response(request_id, result=_cancelled_permission())
-            except Exception:
-                log.exception("Failed to cancel ACP permission %s", request_id)
+            self._reply(request_id, result=_cancelled_permission(), what=f"cancel ACP permission {request_id}")
 
     def _finish_stopped(self, queue: Any) -> None:
         queue.put((StreamQueueKind.STOPPED, None))
 
-    def send(self, queue: Any, user_message: str, document_context: str | None, document_url: str | None, system_prompt: str | None = None, mcp_url: str | None = None, selection_text: str | None = None, stop_checker: Any = None, **kwargs: Any) -> None:
-        """Send a message via ACP stdio. The subprocess is shut down before return."""
-        # ``register_on_cancel(adapter.stop)`` can run before this worker
-        # enters ``send()``. Clearing ``_stop_requested`` and ``_prompt_done``
-        # on entry, and never reading ``stop_checker``, wiped that latch. The
-        # UI showed Stopped while the CLI, session, and prompt still started.
-        # Under the same lock ``stop()`` sets, honor an already-latched stop
-        # or a true ``stop_checker`` and return without starting the process.
-        # The latch is cleared only when this turn is not already stopped.
-        checker_hit = callable(stop_checker) and bool(stop_checker())
-        with self._permission_lock:
-            if checker_hit or self._stop_requested:
-                self._stop_requested = True
-                already_stopped = True
-            else:
-                self._stop_requested = False
-                already_stopped = False
-        if already_stopped:
+    def _report_failure(self, queue: Any, payload: Any) -> None:
+        """Stopped when this turn was cancelled. Otherwise queue ``payload``."""
+        if self._stop_requested:
             self._finish_stopped(queue)
-            self.shutdown()
-            self._prompt_done.set()
             return
+        queue.put((StreamQueueKind.ERROR, payload))
 
-        self._prompt_done.clear()
+    def prepare_turn(self) -> None:
+        """Publish a turn id before Stop can be registered.
+
+        ``send_handlers`` calls this, then ``register_on_cancel(stop)``.
+        A Stop that lands before ``send()`` records this id. ``send()``
+        consumes the publication. A Stop from the previous turn recorded
+        an older id and does not abort this one.
+        """
+        with self._state_lock:
+            self._turn += 1
+            self._turn_pending = True
+            self._stop_turn = 0
+            self._stop_requested = False
+
+    def _turn_already_stopped(self, stop_checker: Any) -> bool:
+        """True when this send must return Stopped without starting work.
+
+        What was wrong: the first ``send()`` with no ``prepare_turn`` set
+        the published id equal to ``_turn``. A Stop on that turn then
+        matched every later send, which returned Stopped forever. Why:
+        ``prepare_turn`` publishes an id that this send consumes. A send
+        that was not published opens a new turn and drops the previous
+        Stop. Only a Stop for the consumed id, or a true ``stop_checker``,
+        aborts.
+        """
+        checker_hit = callable(stop_checker) and bool(stop_checker())
+        with self._state_lock:
+            if self._turn_pending:
+                self._turn_pending = False
+            else:
+                self._turn += 1
+                self._stop_turn = 0
+                self._stop_requested = False
+            if checker_hit or self._stop_turn == self._turn:
+                self._stop_turn = self._turn
+                self._stop_requested = True
+                return True
+            self._stop_requested = False
+            return False
+
+    def _request(self, conn: ACPConnection, method: str, params: Any, timeout: float) -> Any:
+        """``send_request`` marked in flight so Stop can bound it.
+
+        What was wrong: ``send()`` checked ``_stop_requested``, then this set
+        ``_prompt_inflight``. ``stop()`` in that gap saw inflight false, so
+        it sent no ``session/cancel`` and armed no grace. The prompt ran to
+        completion and the UI only said Stopped afterwards. Why: the stop
+        latch and the inflight flag share ``_state_lock``. A Stop that
+        already won this turn never reaches ``send_request``. The fresh
+        adapter has ``_stop_turn == _turn == 0`` with the latch clear, so
+        the latch has to be set too: equality alone is the unset pair.
+        """
+        with self._state_lock:
+            if self._stop_requested and self._stop_turn == self._turn:
+                raise _TurnStopped()
+            self._prompt_done.clear()
+            self._prompt_inflight = True
+        try:
+            return conn.send_request(method, params, timeout=timeout)
+        finally:
+            with self._state_lock:
+                self._prompt_inflight = False
+            self._prompt_done.set()
+
+    def _arm_cancel_grace(self, turn: int) -> None:
+        """Kill the CLI if this turn's request is still waiting after the grace."""
+
+        def _watch() -> None:
+            # Activity after Stop does not extend this. The idle prompt
+            # clock would, and a wedged agent would keep editing.
+            if self._prompt_done.wait(_CANCEL_GRACE_SEC):
+                return
+            self._kill_turn_if_still_inflight(turn)
+
+        run_in_background(_watch, name="acp-cancel-grace", dedicated=True)
+
+    def _kill_turn_if_still_inflight(self, turn: int) -> None:
+        """Stop the CLI captured for ``turn`` when that request is still in flight.
+
+        What was wrong: the turn check and ``shutdown()`` were not one
+        critical section. ``prepare_turn`` could publish the next turn, and
+        that send could adopt the same child, before ``shutdown()`` ran.
+        Why: the slot is cleared under the same lock as the check. The
+        captured connection is the one that is stopped. ``shutdown()`` reads
+        ``self._conn``, so calling it after the slot is cleared would skip
+        the kill. The lock is not held across ``stop()``.
+        """
+        with self._state_lock:
+            if self._turn != turn or not self._prompt_inflight:
+                return
+            conn = self._conn
+            pending_ids = self._pop_pending_permission_ids()
+            self._clear_slot_locked(conn)
+        log.info("ACP cancel was not answered within %ss; killing the CLI", _CANCEL_GRACE_SEC)
+        for request_id in pending_ids:
+            if conn is None:
+                break
+            try:
+                conn.send_response(request_id, result=_cancelled_permission())
+            except Exception:
+                log.exception("Failed to cancel ACP permission %s", request_id)
+        if conn is None:
+            return
+        try:
+            conn.set_notification_callback(None)
+        except Exception:
+            log.exception("Failed to clear ACP notification callback")
+        try:
+            conn.stop()
+        except Exception:
+            log.exception("ACP shutdown failed")
+
+    def send(self, queue: Any, user_message: str, document_context: str | None, document_url: str | None, system_prompt: str | None = None, mcp_url: str | None = None, selection_text: str | None = None, stop_checker: Any = None, **kwargs: Any) -> None:
+        """Send one prompt. The CLI stays up for the next message on this sidebar."""
+        # ``register_on_cancel(adapter.stop)`` can run before this worker
+        # enters ``send()``. Clearing ``_stop_requested`` on entry, and never
+        # reading ``stop_checker``, wiped that latch. The UI showed Stopped
+        # while the CLI, session, and prompt still started. Under the same
+        # lock ``stop()`` sets, honor a Stop for this turn or a true
+        # ``stop_checker`` and return without starting a new process.
+        if self._turn_already_stopped(stop_checker):
+            self._finish_stopped(queue)
+            return
 
         queue.put((StreamQueueKind.STATUS, f"Starting {self.get_display_name()}..."))
 
@@ -644,10 +928,7 @@ class ACPBackend(AgentBackend):
             try:
                 self._ensure_connection(stop_checker)
             except Exception as e:
-                if self._stop_requested:
-                    self._finish_stopped(queue)
-                else:
-                    queue.put((StreamQueueKind.ERROR, format_error_payload(RuntimeError(f"Cannot start {self.get_display_name()} ACP. Is {self.get_binary_name()} installed? Error: {e}"))))
+                self._report_failure(queue, format_error_payload(RuntimeError(f"Cannot start {self.get_display_name()} ACP. Is {self.get_binary_name()} installed? Error: {e}")))
                 return
 
             if self._stop_requested:
@@ -661,16 +942,14 @@ class ACPBackend(AgentBackend):
             # session/new is in flight. Installing this callback afterwards
             # leaves _notify_callback None, and the reader drops them.
             # Register as soon as the process is up, before session/new.
-            if self._conn:
-                self._conn.set_notification_callback(on_notification)
+            conn = self._conn
+            if conn is not None:
+                conn.set_notification_callback(on_notification)
 
             try:
-                self._ensure_session(mcp_url=mcp_url)
+                self._ensure_session(mcp_url=mcp_url, document_url=document_url)
             except Exception as e:
-                if self._stop_requested:
-                    self._finish_stopped(queue)
-                else:
-                    queue.put((StreamQueueKind.ERROR, format_error_payload(RuntimeError(f"Session creation failed: {e}"))))
+                self._report_failure(queue, format_error_payload(RuntimeError(f"Session creation failed: {e}")))
                 return
 
             if self._stop_requested:
@@ -679,73 +958,125 @@ class ACPBackend(AgentBackend):
 
             queue.put((StreamQueueKind.STATUS, f"Sending to {self.get_display_name()}..."))
 
-            prompt_blocks = self._build_prompt_blocks(user_message=user_message, document_context=document_context, system_prompt=system_prompt, selection_text=selection_text, document_url=document_url)
+            prompt_blocks = self._build_prompt_blocks(user_message=user_message, document_context=document_context, system_prompt=system_prompt, selection_text=selection_text, document_url=document_url, include_system=not self._session_prompted)
 
             try:
-                if self._stop_requested or not self._conn:
+                # What was wrong: ``not self._conn`` then ``self._conn.send_request``
+                # loaded the connection twice. stop() sets it to None in
+                # between, and None.send_request raised AttributeError, which
+                # the generic handler reported as Stopped. A missing process
+                # with no Stop took that same Stopped path. Why: one local.
+                # No process and no Stop is an error.
+                conn = self._conn
+                if self._stop_requested:
                     self._finish_stopped(queue)
                     return
+                if conn is None:
+                    self._report_failure(queue, format_error_payload(RuntimeError(f"{self.get_display_name()} ACP process is not running.")))
+                    return
 
-                result = self._conn.send_request("session/prompt", {"sessionId": self._session_id, "prompt": prompt_blocks}, timeout=600)
+                result = self._request(conn, "session/prompt", {"sessionId": self._session_id, "prompt": prompt_blocks}, _PROMPT_IDLE_SEC)
+                self._session_prompted = True
 
                 if self._stop_requested:
                     self._finish_stopped(queue)
                     return
 
-                # Process the final response
-                if result:
-                    stop_reason = result.get("stopReason", result.get("stop_reason", ""))
-                    log.info(f"Prompt completed: stop_reason={stop_reason}")
-                    # Some ACP agents (Vibe) put final text in the prompt result.
-                    # Same block types as the legacy content path; drain if present.
-                    content_blocks = result.get("contentBlocks") or []
-                    if content_blocks:
-                        self._handle_acp_update({"content": content_blocks}, queue)
+                self._finish_prompt_result(result, queue)
 
-                queue.put((StreamQueueKind.STREAM_DONE, None))
-
+            except _TurnStopped:
+                self._finish_stopped(queue)
             except TimeoutError:
-                if self._stop_requested:
-                    self._finish_stopped(queue)
-                else:
-                    queue.put((StreamQueueKind.ERROR, format_error_payload(RuntimeError(f"{self.get_display_name()} prompt timed out"))))
+                # No accepted stdout for the idle window. The CLI is wedged.
+                self._report_failure(queue, format_error_payload(RuntimeError(f"{self.get_display_name()} prompt timed out")))
+                if not self._stop_requested:
+                    self.shutdown()
             except Exception as e:
                 if self._stop_requested:
                     self._finish_stopped(queue)
                 else:
                     log.exception("Prompt execution failed")
-                    queue.put((StreamQueueKind.ERROR, format_error_payload(e)))
+                    self._report_failure(queue, format_error_payload(e))
+                    # The exception can land before ``conn`` is known to be
+                    # live. A dead child is dropped. A JSON-RPC error on a
+                    # live child keeps the process for the next message.
+                    if conn is not None and not conn.is_alive:
+                        self.shutdown()
         finally:
-            # Every send must stop the connection on success, error, and
-            # cancel. Leaving the child and its reader alive leaks another
-            # agent that can still edit the document on the next message.
-            # stop() may already have killed it; ACPConnection.stop() is safe
-            # to call again.
-            self.shutdown()
-            self._prompt_done.set()
+            # The process stays. Drop the callback so a late notification
+            # does not write into this turn's queue. The next send installs
+            # its own. shutdown() may already have cleared the connection.
+            conn = self._conn
+            if conn is not None:
+                try:
+                    conn.set_notification_callback(None)
+                except Exception:
+                    log.exception("Failed to clear ACP notification callback")
+
+    def _finish_prompt_result(self, result: Any, queue: Any) -> None:
+        """Queue the terminal event for a ``session/prompt`` result.
+
+        What was wrong: every result, including ``refusal``, was logged and
+        then ``STREAM_DONE``. An empty refusal looked like a successful
+        answer. A non-dict result raised ``AttributeError`` on ``.get``.
+        Why: ACP says a refusal should show in the UI. A token or turn
+        limit still keeps the partial answer: the chat drain's error path
+        stores only the banner and drops text already streamed.
+        """
+        if not isinstance(result, dict):
+            if result:
+                queue.put((StreamQueueKind.ERROR, format_error_payload(RuntimeError(f"{self.get_display_name()} returned an unexpected prompt result."))))
+            else:
+                queue.put((StreamQueueKind.STREAM_DONE, None))
+            return
+        stop_reason = str(result.get("stopReason") or result.get("stop_reason") or "")
+        log.info("Prompt completed: stop_reason=%s", stop_reason)
+        # Some ACP agents (Vibe) put final text in the prompt result.
+        # Same block types as the legacy content path; drain if present.
+        content_blocks = result.get("contentBlocks") or []
+        if content_blocks:
+            self._handle_acp_update({"content": content_blocks}, queue)
+        if stop_reason == "cancelled" or self._stop_requested:
+            self._finish_stopped(queue)
+            return
+        if stop_reason == "refusal":
+            queue.put((StreamQueueKind.ERROR, format_error_payload(RuntimeError(f"{self.get_display_name()} refused the prompt."))))
+            return
+        limit = _LIMIT_STOP_STATUS.get(stop_reason)
+        if limit:
+            queue.put((StreamQueueKind.STATUS, limit))
+        queue.put((StreamQueueKind.STREAM_DONE, None))
 
     def stop(self) -> None:
-        """Cancel the prompt turn and terminate the ACP subprocess.
+        """Cancel the in-flight prompt and keep a healthy CLI.
 
         ACP does not define ``session/interrupt``. Cancellation is the
-        ``session/cancel`` notification, every outstanding permission must
-        be ``cancelled``, and the subprocess has to be terminated. Otherwise
-        the UI shows Stopped while the agent keeps editing.
+        ``session/cancel`` notification, and every outstanding permission
+        must be ``cancelled``. Killing here threw away the session on every
+        Stop. The process dies only if the request is still in flight after
+        ``_CANCEL_GRACE_SEC``, or when the sidebar calls ``shutdown``.
+
+        The cancel bytes are queued ahead of any later kill. This does not
+        wait on the success path. Stop waits up to the grace for the prompt
+        result. Activity after Stop does not extend that wait.
         """
         # Same lock send() holds while it decides whether to clear the latch,
         # so a Stop that lands as send() begins cannot be wiped by that reset.
-        with self._permission_lock:
+        with self._state_lock:
+            self._stop_turn = self._turn
             self._stop_requested = True
+            inflight = self._prompt_inflight
+            turn = self._turn
         conn = self._conn
-        if conn is not None and conn.is_alive and self._session_id:
+        if inflight and conn is not None and conn.is_alive and self._session_id:
             try:
                 conn.send_notification("session/cancel", {"sessionId": self._session_id})
             except Exception:
                 log.exception("ACP session/cancel failed")
-        # Reply while stdin is still open. shutdown() closes it.
+        # Reply while stdin is still open. A later shutdown closes it.
         self._cancel_pending_permissions()
-        self.shutdown()
-        self._prompt_done.set()
+        if inflight:
+            self._arm_cancel_grace(turn)
 
     def submit_approval(self, request_id: Any, approved: bool) -> None:
         """Submit a schema-valid permission result for one HITL dialog choice.
@@ -755,41 +1086,49 @@ class ACPBackend(AgentBackend):
         ``outcome.cancelled``. The options were stored when the request
         arrived so this can echo one of those ids.
         """
-        if not self._conn or not self._conn.is_alive:
+        conn = self._conn
+        if conn is None or not conn.is_alive:
             log.warning("Cannot submit approval, ACP connection is dead")
             return
 
-        with self._permission_lock:
+        with self._state_lock:
             options = self._pending_permissions.pop(request_id, None)
         if options is None:
             # Stop already answered with cancelled, or the id is unknown.
             log.warning("No pending ACP permission for id=%s", request_id)
             return
 
-        try:
-            self._conn.send_response(request_id, result=_permission_result(options, approved))
-        except Exception:
-            log.exception("Failed to submit approval")
+        self._reply(request_id, result=_permission_result(options, approved), what="submit ACP approval")
 
     def shutdown(self) -> None:
-        """Stop the ACP subprocess and drop the session.
+        """Kill the CLI and drop the session.
 
-        Called at the end of every ``send`` and from ``stop``. Pending
-        permissions are cancelled first so a turn that errors while a
-        dialog is open still answers the agent before stdin closes.
+        The sidebar calls this when the panel closes or the backend id
+        changes. A cancel that the agent does not answer, a silent prompt,
+        and a dead child call it too. A finished ``send`` does not.
         """
         conn = self._conn
+        self._cancel_pending_permissions()
+        self._release_connection(conn)
+
+    def _release_connection(self, conn: ACPConnection | None) -> None:
+        """Reap ``conn`` and forget its session when it is still the slot.
+
+        What was wrong: ``_ready`` and the session fields were cleared
+        even after ``self._conn`` had moved to another process, and the
+        write sat outside ``_state_lock`` while the cancel grace wrote
+        the same fields under it. Why: stop the captured process first.
+        Under the lock, drop the slot only when it is still this
+        connection. A replacement keeps its session.
+        """
         if conn is not None:
             try:
                 conn.set_notification_callback(None)
             except Exception:
                 log.exception("Failed to clear ACP notification callback")
-        self._cancel_pending_permissions()
-        if conn is not None:
             try:
                 conn.stop()
             except Exception:
                 log.exception("ACP shutdown failed")
-            if self._conn is conn:
-                self._conn = None
-        self._session_id = None
+        with self._state_lock:
+            self._clear_slot_locked(conn)

@@ -334,6 +334,19 @@ class TestEndpointImageProvider:
                 client.make_image_request("make it dusk", model="dall-e-3", source_image="b64data")
         assert ("dall-e-3") in (str(raised.value).lower())
         assert ("cannot edit") in (str(raised.value).lower())
+        assert ("or dall-e-2") not in (str(raised.value).lower())
+
+    @patch('plugin.framework.client.llm_client.init_logging')
+    def test_openai_dalle2_rejects_edit(self, mock_init):
+        """dall-e-2 edits were multipart. This client sends JSON, so refuse."""
+        config = {"endpoint": "https://api.openai.com", "model": "dall-e-2", "api_key": "sk-test"}
+        client = LlmClient(config, MockContext())
+        with patch.object(client, "_resolve_auth", return_value={"provider": "openai"}):
+            with pytest.raises(ValueError) as raised:
+                client.make_image_request("make it dusk", model="dall-e-2", source_image="b64data")
+        assert ("dall-e-2") in (str(raised.value).lower())
+        assert ("cannot edit") in (str(raised.value).lower())
+        assert ("or dall-e-2") not in (str(raised.value).lower())
 
     @patch('plugin.framework.client.llm_client.init_logging')
     def test_together_image_request_uses_reference_images_for_edit(self, mock_init):
@@ -562,6 +575,10 @@ class TestCanonicalAspectRatio:
         assert (canonical_aspect_ratio(1024, 1024)) == ("1:1")
         assert (canonical_aspect_ratio(1024, 576)) == ("16:9")
         assert (canonical_aspect_ratio(896, 512)) == ("16:9")
+        # 1:2 is within an absolute 0.12 of 9:16, but 2:1 is not within 0.12
+        # of 16:9. Both stay unmapped so the caller sends the pixel size.
+        assert (canonical_aspect_ratio(512, 1024)) is None
+        assert (canonical_aspect_ratio(1024, 512)) is None
         assert (canonical_aspect_ratio(1024, 768)) == ("4:3")
         assert (canonical_aspect_ratio(768, 1024)) == ("3:4")
 

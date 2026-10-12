@@ -35,18 +35,12 @@ class GrokBackend(ACPBackend):
 
     def get_display_name(self) -> str:
         """Return display name for UI."""
-        return "Grok Build (ACP)"
+        return "Grok Build"
 
     def get_agent_name(self) -> str:
         """Return ACP agent name."""
         return "grok"
 
-    def _apply_default_extra_args(self) -> None:
-        """Official and versioned names (grok, grok-cli, …) all take the same ACP args."""
-        if self._extra_args:
-            return
-        defaults = self.get_default_extra_args()
-        if not defaults or not self._binary_path:
-            return
-        if os.path.basename(self._binary_path).lower().startswith("grok"):
-            self._extra_args = list(defaults)
+    def _binary_matches(self, path: str) -> bool:
+        """Official and versioned names (grok, grok-cli, grok.exe) share these args."""
+        return os.path.basename(path).lower().startswith("grok")

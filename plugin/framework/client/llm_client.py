@@ -40,7 +40,6 @@ hung stream is aborted, not a race to mutex away.
 from __future__ import annotations
 
 import collections
-import copy
 import json
 import logging
 import re
@@ -55,27 +54,13 @@ if TYPE_CHECKING:
 # LiteLLM: streaming_handler.py ~L198 safety_checker(), issue #5158
 REPEATED_STREAMING_CHUNK_LIMIT = 20
 
+# Defined in base_provider_shim so that module does not import this one.
+# The redundant alias is the re-export: callers and the lazy client package
+# attribute still import these names from llm_client. A plain import is
+# unused in this module and gets deleted.
+from .base_provider_shim import OPENROUTER_CHAT_EXTRA_BLOCKLIST as OPENROUTER_CHAT_EXTRA_BLOCKLIST
+from .base_provider_shim import merge_openrouter_chat_extra as merge_openrouter_chat_extra
 from .response_normalizers import prepare_chat_messages, strip_leaked_chat_template_control_tokens
-
-
-# Keys WriterAgent builds; openrouter_chat_extra must not replace these.
-OPENROUTER_CHAT_EXTRA_BLOCKLIST: frozenset[str] = frozenset({"messages", "tools", "tool_choice", "stream"})
-
-
-def merge_openrouter_chat_extra(base: dict[str, Any], extra: dict[str, Any] | None) -> None:
-    """Merge *extra* into *base* in place. Skips blocklisted keys; recurses into dict values."""
-    if not extra:
-        return
-    for key, val in extra.items():
-        if key in OPENROUTER_CHAT_EXTRA_BLOCKLIST:
-            continue
-        if key in base and isinstance(base[key], dict) and isinstance(val, dict):
-            merge_openrouter_chat_extra(base[key], val)
-        elif isinstance(val, dict):
-            base[key] = copy.deepcopy(val)
-        else:
-            base[key] = val
-
 
 # accumulate_delta merges streaming deltas into message_snapshot; coalesce_split_tool_calls repairs OpenRouter empty-name split tool_calls.
 from plugin.framework.async_stream import accumulate_delta, coalesce_split_tool_calls
@@ -96,8 +81,9 @@ from .provider_detection import is_openrouter_endpoint
 log = logging.getLogger(__name__)
 
 # Anthropic Messages SSE has no OpenAI ``choices`` array. These event types
-# still carry text, tool_use, or stop_reason.
-_ANTHROPIC_STREAM_TYPES = frozenset({"content_block_start", "content_block_delta", "message_delta", "message_stop", "message"})
+# still carry text, tool_use, stop_reason, or usage. message_start nests
+# input-token usage under message.usage; the shim reads it. ping is keepalive.
+_ANTHROPIC_STREAM_TYPES = frozenset({"message_start", "content_block_start", "content_block_delta", "message_delta", "message_stop", "message"})
 
 
 def _chunk_should_parse(chunk: dict[str, Any]) -> bool:
@@ -1060,7 +1046,13 @@ class LlmClient:
                             # snapshot; callbacks have already run.
                             emitted_any = True
                         outgoing: dict[str, Any] | None = delta if isinstance(delta, dict) else None
-                        if usage_obj:
+                        # The Anthropic shim already put normalized usage on the
+                        # delta (input_tokens → prompt_tokens). Raw chunk usage
+                        # on message_delta used to overwrite those aliases.
+                        # OpenAI and Grok put usage only on the chunk, and their
+                        # delta has no usage key, so this still fills it.
+                        shim_usage = outgoing.get("usage") if isinstance(outgoing, dict) else None
+                        if usage_obj and not (isinstance(shim_usage, dict) and shim_usage):
                             outgoing = dict(outgoing or {})
                             outgoing["usage"] = usage_obj
                         if outgoing and on_delta:
@@ -1223,7 +1215,18 @@ class LlmClient:
                 _normalize_delta(d)
                 accumulate_streaming_thinking(thinking_parts, thinking_meta, cast("dict[str, Any]", d))
                 d_for_snapshot = {k: v for k, v in d.items() if k not in THINKING_DELTA_KEYS}
+                # Anthropic message_delta.usage is a cumulative total (platform
+                # streaming docs: message_start.output_tokens is 1, the final
+                # event is 15). accumulate_delta adds numbers, so those became
+                # 16. Replace each usage key instead of summing it. One OpenAI
+                # usage chunk still lands unchanged.
+                usage_update = d_for_snapshot.pop("usage", None)
                 accumulate_delta(message_snapshot, d_for_snapshot)
+                if isinstance(usage_update, dict) and usage_update:
+                    prev_usage = message_snapshot.get("usage")
+                    merged_usage = dict(prev_usage) if isinstance(prev_usage, dict) else {}
+                    merged_usage.update(cast("dict[str, Any]", usage_update))
+                    message_snapshot["usage"] = merged_usage
                 if "model" in d and "model" not in message_snapshot:
                     message_snapshot["model"] = d["model"]
 

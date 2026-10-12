@@ -28,7 +28,6 @@ __all__ = [
     "_clean_paired_arrays",
     "_collect_a_values",
     "_complex_coeff",
-    "_coup_days_in_period",
     "_criteria_numbers",
     "_date_to_serial",
     "_days360",
@@ -46,11 +45,11 @@ __all__ = [
     "_is_calc_error",
     "_multi_criteria_mask",
     "_npf_result",
+    "_parse_complex",
     "_parse_weekend",
     "_round_half_up",
     "_scipy_stats",
     "_serial_to_date",
-    "_simple_accrual",
     "_to_complex",
     "_to_float_a",
     "_wildcard_fullmatch",
@@ -167,13 +166,19 @@ def _build_holiday_set(holidays: Any | None = None) -> set[dt.date]:
 
 
 def _parse_weekend(weekend: Any = 1) -> set[int] | float:
-    """Parse Excel weekend parameter into a set of weekday integers, or NaN if invalid."""
+    """Parse a Calc weekend argument into weekday integers, or NaN if invalid.
+
+    GetWeekendAndHolidayMasks_MS (interpr2.cxx) accepts a string only when it
+    is exactly seven characters of ``0`` or ``1``. ``"abc"`` and ``"1"`` used
+    to become a mask (empty, or Monday) because any other character was
+    ignored and the string was truncated to seven. The string is Monday-first,
+    matching the masks workday tests already build. Numeric codes 1–7 and
+    11–17 stay in ``_WEEKEND_MAPPING``.
+    """
     if isinstance(weekend, str):
-        wk_days: set[int] = set()
-        for i, char in enumerate(weekend[:7]):
-            if char == "1":
-                wk_days.add(i)
-        return wk_days
+        if len(weekend) != 7 or any(ch not in "01" for ch in weekend):
+            return float("nan")
+        return {i for i, ch in enumerate(weekend) if ch == "1"}
     try:
         w_idx = int(float(weekend))
     except (ValueError, TypeError, OverflowError):
@@ -552,7 +557,9 @@ def _find_text_cut(
     """Shared delimiter search for textbefore and textafter.
 
     Returns (text_str, delim_str, instance_int, cut_idx, match_end_miss).
-    When the instance is within bounds, cut_idx is an integer index and match_end_miss is False.
+    When the instance is within bounds, cut_idx is an index into the original
+    text and match_end_miss is False. ``after=False`` is the start of that
+    delimiter. ``after=True`` is the end, where the remainder starts.
     When the instance lands on the boundary, cut_idx is None and match_end_miss is True.
     On a real miss, cut_idx is None and match_end_miss is False.
     Raises ValueError or TypeError if instance_num is invalid or zero.
@@ -562,36 +569,42 @@ def _find_text_cut(
     inst = int(float(instance_num))
     if inst == 0:
         raise ValueError("instance_num cannot be 0")
+    # "".split("") raises. re.finditer("") matches at every position, so a
+    # blank delimiter would look like a hit. TEXTBEFORE / TEXTAFTER turn
+    # this ValueError into NaN.
+    if not delim:
+        raise ValueError("empty separator")
 
+    # ScTextBeforeOrAfter (interpr1.cxx) walks left to right and steps
+    # past each delimiter. lower() of İ is i + combining dot, so an index
+    # into the lowered string no longer lines up with s: textbefore of
+    # "aİb" on "b" included the b. rfind also sees overlapping matches
+    # ("aaa" / "aa" at 1) that the split count above it did not.
     if match_mode == 1:
-        s_search = s.lower()
-        delim_search = delim.lower()
+        spans = [(m.start(), m.end()) for m in re.finditer(re.escape(delim), s, flags=re.IGNORECASE)]
     else:
-        s_search = s
-        delim_search = delim
+        spans = []
+        start = 0
+        while True:
+            found = s.find(delim, start)
+            if found < 0:
+                break
+            spans.append((found, found + len(delim)))
+            start = found + len(delim)
 
+    n_matches = len(spans)
     abs_inst = abs(inst)
-    parts = s_search.split(delim_search)
-    if len(parts) <= abs_inst:
-        match_end_miss = len(parts) == abs_inst
-        return s, delim, inst, None, match_end_miss
+    # One past the last real match is the match_end boundary.
+    if abs_inst > n_matches:
+        return s, delim, inst, None, abs_inst == n_matches + 1
 
-    if inst > 0:
-        idx = 0
-        if after:
-            for _unused in range(inst):
-                idx = s_search.find(delim_search, idx) + len(delim_search)
-        else:
-            for i in range(inst):
-                idx = s_search.find(delim_search, idx)
-                if i < inst - 1:
-                    idx += len(delim_search)
-        return s, delim, inst, idx, False
-    else:
-        idx = len(s)
-        for _unused in range(abs_inst):
-            idx = s_search.rfind(delim_search, 0, idx)
-        return s, delim, inst, idx, False
+    # A negative instance counts from the end of that same list.
+    chosen = spans[inst - 1] if inst > 0 else spans[inst]
+    # after=True used to return the start for a negative instance and let
+    # TEXTAFTER add len(delim). A case-folded match can be a different
+    # length than the delimiter, so the cut is the span's own end.
+    idx = chosen[1] if after else chosen[0]
+    return s, delim, inst, idx, False
 
 
 _MAX_BIT_VALUE: int = (1 << 48) - 1
@@ -650,34 +663,22 @@ def _bessel_kn_yn(scipy_fn: Any, x: Any, n: Any) -> float:
         return float("nan")
 
 
-def _simple_accrual(
-    issue: Any, settlement: Any, rate: Any, par: Any, basis: Any = 0
-) -> float:
-    """Simple accrual interest calculation for accrint and accrintm."""
-    from .calc_functions_t_z import yearfrac
-
-    try:
-        r = float(rate)
-        p = float(par)
-        yf = yearfrac(issue, settlement, basis)
-        if math.isnan(yf):
-            return float("nan")
-        return float(p * r * yf)
-    except Exception:
-        return float("nan")
-
-
 def _criteria_numbers(r: Any, crit: Any, val_range: Any | None = None) -> list[float]:
     """Collect matching numeric values for criteria-based functions (averageif, sumif)."""
     # dtype=object keeps cell types. A huge int raises OverflowError, which is
-    # the same failure as a bad number.
+    # the same failure as a bad number. Text and bools are not numbers:
+    # float("5") and float(True) used to count them. Calc AVERAGEIF and
+    # SUMIF ignore both in the value range.
     r_flat = np.asarray(r, dtype=object).ravel()
     v_flat = np.asarray(val_range, dtype=object).ravel() if val_range is not None else r_flat
     vals: list[float] = []
     for i in range(min(len(r_flat), len(v_flat))):
         if match_criteria(r_flat[i], crit):
+            cell = v_flat[i]
+            if isinstance(cell, (bool, np.bool_, str)):
+                continue
             try:
-                val = float(v_flat[i])
+                val = float(cell)
                 if not np.isnan(val):
                     vals.append(val)
             except (ValueError, TypeError, OverflowError):
@@ -723,7 +724,16 @@ def _complex_coeff(n: float) -> str:
 
 
 def _from_complex(c: builtins.complex, suffix: str = "i") -> str:
-    """Convert Python complex to Calc string."""
+    """Convert Python complex to Calc string.
+
+    ``Complex::GetString`` (``analysishelper.cxx``) calls ``finiteOrThrow``
+    on both parts. A non-finite value used to be printed (``"inf"``,
+    ``"nannani"``). macOS libm returns a non-finite complex for
+    ``(1+1j)**inf`` and does not raise. Linux raises ``OverflowError``.
+    Callers map this ``ValueError`` to ``#VALUE!``.
+    """
+    if not (math.isfinite(c.real) and math.isfinite(c.imag)):
+        raise ValueError("non-finite complex")
     real = c.real
     imag = c.imag
     if imag == 0:
@@ -746,15 +756,37 @@ def _from_complex(c: builtins.complex, suffix: str = "i") -> str:
     return res
 
 
-def _to_complex(val: Any) -> builtins.complex:
-    """Convert Calc complex string (e.g. '1+2i') to Python complex."""
+def _parse_complex(val: Any) -> tuple[builtins.complex, str]:
+    """Parse a Calc complex into ``(number, suffix)``.
+
+    ``suffix`` is ``"i"``, ``"j"``, or ``""`` when the text has no imaginary
+    unit. ``Complex::Add`` / ``Mult`` (``analysishelper.hxx``) keep the first
+    non-empty unit: a real number stores ``c == '\\0'`` and does not override
+    a later ``j``. Rewriting every ``i`` to ``j`` before parsing used to drop
+    that unit, so ``IMSUM("1+2j","3+j")`` came back as ``"4+3i"``.
+
+    A bool is a number. It is an ``int`` subclass, and ``str(True)`` is not
+    a complex literal.
+    """
+    if isinstance(val, (bool, np.bool_)):
+        return builtins.complex(float(val)), ""
     if isinstance(val, (int, float, builtins.complex)):
-        return builtins.complex(val)
-    s = str(val).replace("i", "j").replace("I", "j").replace(" ", "")
+        return builtins.complex(val), ""
+    text = str(val).replace(" ", "")
+    suffix = ""
+    if text and text[-1] in "ijIJ":
+        suffix = "j" if text[-1] in "jJ" else "i"
+    py_text = text.replace("i", "j").replace("I", "j").replace("J", "j")
     try:
-        return builtins.complex(s)
+        return builtins.complex(py_text), suffix
     except ValueError:
         raise TypeError("Invalid complex string")
+
+
+def _to_complex(val: Any) -> builtins.complex:
+    """Convert Calc complex string (e.g. '1+2i') to Python complex."""
+    number, _suffix = _parse_complex(val)
+    return number
 
 
 def _eval_d_criteria(db: Any, field: Any, criteria: Any, as_float: bool = True) -> list[Any] | None:
@@ -763,12 +795,19 @@ def _eval_d_criteria(db: Any, field: Any, criteria: Any, as_float: bool = True) 
     if db_arr.ndim != 2:
         return None
     headers = [header_label(h).upper() for h in db_arr[0]]
+    # First duplicate header wins, same as findFieldColumn (doubleref.cxx)
+    # walking the header row left to right.
+    header_index: dict[str, int] = {}
+    for idx, name in enumerate(headers):
+        header_index.setdefault(name, idx)
 
     f_idx = -1
     if isinstance(field, str) or isinstance(field, bool):
+        # bool is an int subclass. int(True) - 1 would select column 0 when
+        # the label "TRUE" is missing. A bool field is the header text.
         f_name = header_label(field).upper()
-        if f_name in headers:
-            f_idx = headers.index(f_name)
+        if f_name in header_index:
+            f_idx = header_index[f_name]
     elif isinstance(field, (int, float)):
         try:
             f_idx = int(field) - 1
@@ -776,8 +815,8 @@ def _eval_d_criteria(db: Any, field: Any, criteria: Any, as_float: bool = True) 
             f_idx = -1
     elif field is not None and field != "":
         f_name = header_label(field).upper()
-        if f_name in headers:
-            f_idx = headers.index(f_name)
+        if f_name in header_index:
+            f_idx = header_index[f_name]
         else:
             try:
                 f_idx = int(float(field)) - 1
@@ -792,23 +831,30 @@ def _eval_d_criteria(db: Any, field: Any, criteria: Any, as_float: bool = True) 
         return None
     crit_headers = [header_label(h).upper() for h in crit_arr[0]]
 
-    matching_vals = []
+    # lcl_createExcelQuery (doubleref.cxx) requires every criteria header
+    # to name a database column. A miss makes createQueryParam return
+    # nullptr, and DBIterator sets IllegalParameter. Skipping the column
+    # used to match every row.
+    crit_cols: list[int] = []
+    for c_header in crit_headers:
+        col = header_index.get(c_header)
+        if col is None:
+            return None
+        crit_cols.append(col)
+
+    matching_vals: list[Any] = []
     for r_idx in range(1, db_arr.shape[0]):
         row = db_arr[r_idx]
         match_any_row = False
         for c_row_idx in range(1, crit_arr.shape[0]):
             match_all_cols = True
             for c_col_idx in range(crit_arr.shape[1]):
-                c_header = crit_headers[c_col_idx]
                 c_val = crit_arr[c_row_idx, c_col_idx]
                 if is_missing_value(c_val):
                     continue
-
-                if c_header in headers:
-                    db_col_idx = headers.index(c_header)
-                    if not match_criteria(row[db_col_idx], c_val):
-                        match_all_cols = False
-                        break
+                if not match_criteria(row[crit_cols[c_col_idx]], c_val):
+                    match_all_cols = False
+                    break
             if match_all_cols:
                 match_any_row = True
                 break
@@ -816,31 +862,55 @@ def _eval_d_criteria(db: Any, field: Any, criteria: Any, as_float: bool = True) 
         if match_any_row:
             val = row[f_idx]
             if as_float:
+                # Strings are not numbers. ScDBQueryParamBase starts with
+                # mbSkipString true (queryparam.cxx). DSUM uses that iterator.
+                # DCOUNTA sets the flag false and calls this with
+                # as_float=False, so text still counts there. float("5") used
+                # to add the text. A bool stays: Calc stores TRUE as a numeric
+                # cell, so float(True) is 1. NaN is missing (is_missing_value)
+                # and must not poison the aggregate.
+                if isinstance(val, str):
+                    continue
                 try:
-                    matching_vals.append(float(val))
+                    num = float(val)
                 except (ValueError, TypeError, OverflowError):
-                    pass
+                    continue
+                if math.isnan(num):
+                    continue
+                matching_vals.append(num)
             else:
                 matching_vals.append(val)
     return matching_vals
 
 
-def _multi_criteria_mask(pairs: Sequence[tuple[Any, Any]], base_len: int | None = None) -> np.ndarray | None:
-    """Evaluate multiple (criteria_range, criterion) pairs, ensuring all ranges have matching lengths.
+def _multi_criteria_mask(
+    pairs: Sequence[tuple[Any, Any]],
+    base_len: int | None = None,
+    base_shape: tuple[int, ...] | None = None,
+) -> np.ndarray | None:
+    """Evaluate multiple (criteria_range, criterion) pairs.
 
-    Returns a 1D boolean numpy array mask, or None if lengths mismatch or pairs are empty.
+    Returns a 1D boolean mask, or None when a range differs in shape or
+    length. Excel COUNTIFS / AVERAGEIFS / SUMIFS need the same number of
+    rows and columns. Ravelling first made a 2x3 range and a 3x2 range look
+    equal. None tells the caller to return #VALUE! instead of truncating.
     """
-    # Every criteria range must match the base length. None tells the caller
-    # to return #VALUE! instead of truncating.
     if not pairs:
         return np.ones(base_len, dtype=bool) if base_len is not None else np.array([], dtype=bool)
 
     cond_ranges: list[np.ndarray] = []
     criteria: list[Any] = []
+    shapes: list[tuple[int, ...]] = []
     for r, c in pairs:
-        r_flat = np.asarray(r, dtype=object).ravel()
-        cond_ranges.append(r_flat)
+        arr = np.asarray(r, dtype=object)
+        shapes.append(arr.shape)
+        cond_ranges.append(arr.ravel())
         criteria.append(c)
+
+    if base_shape is not None and any(shape != base_shape for shape in shapes):
+        return None
+    if any(shape != shapes[0] for shape in shapes):
+        return None
 
     expected_len = base_len if base_len is not None else len(cond_ranges[0])
     for cr in cond_ranges:
@@ -904,21 +974,5 @@ def _get_coupon_dates(
         days_in_per = float((curr - prev).days)
 
     return p_ser, c_ser, days_in_per, float(k)
-
-
-def _coup_days_in_period(frequency: Any, basis: Any = 0) -> float:
-    """Days in coupon period for given frequency and basis."""
-    try:
-        freq = int(float(frequency))
-        b = int(float(basis))
-        if freq not in (1, 2, 4) or b not in (0, 1, 2, 3, 4):
-            return float("nan")
-        if b in (0, 2, 4):
-            return 360.0 / freq
-        if b == 3:
-            return 365.0 / freq
-        return 365.25 / freq
-    except (ValueError, TypeError, OverflowError):
-        return float("nan")
 
 

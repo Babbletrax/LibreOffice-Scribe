@@ -486,6 +486,8 @@ Optional second table `all_scores` (truncated) for debugging — keep behind `pa
 
 **Tests:** [`test_symbolic.py`](../../tests/scripting/test_symbolic.py), [`test_symbolic_templates.py`](../../tests/scripting/test_symbolic_templates.py), [`test_python_runner_symbolic.py`](../../tests/scripting/test_python_runner_symbolic.py), [`test_symbolic_tool.py`](../../tests/scripting/test_symbolic_tool.py).
 
+**Parser limits:** `e` is Euler's number unless it is the variable being differentiated or solved. Dunder names and non-decimal dots are rejected before parsing, because `parse_expr` uses `eval`. An integral SymPy leaves as `Integral(...)` returns `NO_CLOSED_FORM`. `solve_equation` rejects `!=`, `==`, and inequalities. Factorial equations need a space before `=` (`n! = 720`); SymPy may still have no algorithm for them. These helpers already use the 300s long trusted worker timeout (`LONG_TRUSTED_WORKER_TIMEOUT_SEC`).
+
 **Out of scope (deferred):** SageMath backend, `sage` sandbox whitelist — [sagemath-integration-dev-plan.md](../archive/sagemath-integration-dev-plan.md).
 
 ---
@@ -546,7 +548,8 @@ Units helpers (`convert_quantity`, `parse_quantity`, `format_quantity`) accept e
 ```
 
 - **Shape preservation:** $N \times 1$ column in $\to$ $N \times 1$ column out; $1 \times N$ row in $\to$ $1 \times N$ row out; 1×1 single cell $\to$ scalar float.
-- **Blanks & Errors:** Missing/blank cells produce empty cells; individual invalid units emit `"#VALUE!"` without aborting the rest of the column.
+- **Blanks & Errors:** Missing/blank cells produce empty cells; individual invalid units emit `"#VALUE!"` without aborting the rest of the column. An RPC blank value or magnitude is `PARSE_ERROR`, not a successful `0`. Numeric `0` is zero. Direct `NaN` stays blank; a non-finite magnitude is an error.
+- **Display:** `format_quantity` and `parse_quantity` use Pint's compact unit (`m`, `km / h`). `convert_quantity` keeps the caller's `to` text (`km/h`). The `units` field stays the long name (`meter`, `kilometer / hour`). Unknown unit text is `PARSE_ERROR`. A dimension mismatch or a range shape mismatch is `UNITS_ERROR`. A non-dict `params` is `INVALID_SPEC`.
 - **Dual returns:** Direct `=PY()` calls return numeric magnitudes/lists for native Calc matrix spilling; RPC calls (`run_units`) return a single compact vector payload.
 
 **Tests:** [`test_units.py`](../../tests/scripting/test_units.py), [`test_units_templates.py`](../../tests/scripting/test_units_templates.py), [`test_python_runner_units.py`](../../tests/scripting/test_python_runner_units.py), [`test_map_range.py`](../../tests/scripting/test_map_range.py).
@@ -637,7 +640,7 @@ Results are inserted as compact tables and usable from scripts.
 
 **`linear_programming` layout:** Each row is a variable (`c` is that variable's objective coefficient). Each `a*` column is one `<=` constraint. `b` is one bound per constraint column. The template default `a_cols: ["a1"]` is a single constraint; repeat that same bound on every variable row. If `b` cannot be aligned to the constraint columns, the helper returns `SHAPE_MISMATCH` and does not replace `b` with zeros.
 
-**Quant returns:** `efficient_frontier` reads the sheet as a returns grid, the same contract as `portfolio_tearsheet` and `optimize_portfolio`. PyPortfolioOpt's `mean_historical_return` and `CovarianceShrinkage` default `returns_data=False` (prices, then percent-change). The helper passes `returns_data=True` so a returns sheet does not come back `status: ok` with a corner portfolio.
+**Quant returns:** `efficient_frontier` reads the sheet as a returns grid, the same contract as `portfolio_tearsheet` and `optimize_portfolio`. PyPortfolioOpt's `mean_historical_return` and `CovarianceShrinkage` default `returns_data=False` (prices, then percent-change). The helper passes `returns_data=True` so a returns sheet does not come back `status: ok` with a corner portfolio. Annualization stays 252 trading days. `technical_analysis` and `portfolio_tearsheet` sort a `date` / `datetime` / `timestamp` column ascending before path-dependent indicators and drawdown; duplicate tearsheet dates are averaged. `fetch_historical_data` stringifies every datetime column, and a multi-ticker download labels columns `Close / AAPL`. A comma-separated ticker string is several symbols. `weight_bounds` must be a pair or omitted, and a non-finite `risk_free_rate` is `INVALID_PARAMS`. Incomplete frontier rows are dropped before the optimizer, because Ledoit-Wolf turns NaN into 0. `fetch_historical_data` passes `auto_adjust=True`, so Close is split-adjusted on every yfinance version.
 
 ---
 

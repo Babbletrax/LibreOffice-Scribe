@@ -17,7 +17,7 @@ from compute_service.worker_base import BaseProcessPool
 
 
 class _Slot:
-    """Stand-in worker. kill() runs the pool's process-exit callback."""
+    """Stand-in worker. kill() can re-enter the pool condition."""
 
     def __init__(self) -> None:
         self.tasks_executed = 0
@@ -32,17 +32,12 @@ class _Slot:
         self.killed += 1
         self._on_kill()
 
-    def cap_stderr_log(self) -> None:
-        """Idle eviction caps real workers. This stand-in has no log file."""
-        return None
-
 
 def test_finish_release_kills_after_releasing_pool_lock() -> None:
     """Shutdown between the unlocked check and the locked block must not kill under _cond.
 
-    _cond wraps an RLock, so on_process_exit can re-enter it. kill() still
-    runs outside that lock: the reap can take seconds, and holding _cond
-    across it would stall every lease and release.
+    kill() runs outside that lock: the reap can take seconds, and holding
+    _cond across it would stall every lease and release.
     """
     dropped: list[int] = []
     pool = BaseProcessPool(script_path="unused.py", num_workers=0, idle_worker_ttl_sec=None)
@@ -506,12 +501,11 @@ def test_respawn_discards_child_when_shutdown_wins_during_popen(monkeypatch: pyt
     """Shutdown during Popen must not leave an unpublished child running.
 
     What was wrong: kill() landed after the second _shutting_down check and
-    before self.process = proc. Reap saw None, and the new interpreter
-    survived until the parent exited. Unlink also ran while the parent
-    stderr handle was still open. Windows will not delete that file, and
-    the error was swallowed.
+    before the child was published. Reap saw None, and the new interpreter
+    survived until the parent exited. Adopt now refuses that child, and
+    only that child is signaled.
     """
-    import os
+    import subprocess
 
     from compute_service.worker_base import BaseProcessWorker
 
@@ -539,55 +533,27 @@ def test_respawn_discards_child_when_shutdown_wins_during_popen(monkeypatch: pyt
             return 0
 
     proc = _Proc()
-
-    seen: list[str] = []
-    opened: list[tuple[object, str]] = []
-    real_open = worker._open_stderr_log
-
-    def _open() -> tuple[object, str]:
-        handle, path = real_open()
-        opened.append((handle, path))
-        return handle, path
-
-    worker._open_stderr_log = _open  # type: ignore[method-assign]
+    saw_pipe: list[bool] = []
 
     def _popen(*_args: object, **kwargs: object) -> _Proc:
         # The window after the unlocked check: shutdown sets the flag and
-        # kill() reaps whatever is published. The stderr path is not
-        # published until Popen returns, so this kill must not unlink it.
-        # The parent handle stays open until Popen returns: the child has
-        # to inherit it.
-        handle = kwargs["stderr"]
-        assert opened
-        logged, path = opened[-1]
-        assert handle is logged
-        assert getattr(handle, "closed", True) is False
-        assert Path(path).exists()
-        seen.append(path)
+        # kill() reaps whatever is published. This child is not published
+        # until Popen returns, so that kill must not see it.
+        saw_pipe.append(kwargs.get("stderr") is subprocess.PIPE)
         worker._shutting_down = True
-        worker.kill()
-        assert Path(path).exists()
+        assert worker.kill() is True
+        assert worker.process is None
         return proc
 
-    real_unlink = os.unlink
-
-    def _unlink(path: str) -> None:
-        assert opened
-        assert getattr(opened[-1][0], "closed", False) is True
-        real_unlink(path)
-
-    monkeypatch.setattr("plugin.framework.process_worker.os.unlink", _unlink)
     monkeypatch.setattr("plugin.framework.process_worker.subprocess.Popen", _popen)
     worker.respawn()
     assert worker.process is None
     assert proc.killed
-    assert worker._stderr_path is None
-    assert seen
-    assert not Path(seen[0]).exists()
+    assert saw_pipe == [True]
 
 
 def test_execute_respawn_respects_request_deadline() -> None:
-    from compute_service.worker_base import BaseProcessWorker, _Deadline
+    from compute_service.worker_base import BaseProcessWorker, Deadline
 
     worker = BaseProcessWorker(1, "unused.py")
     # Simulate dead process
@@ -596,7 +562,7 @@ def test_execute_respawn_respects_request_deadline() -> None:
 
     respawn_left: list[float] = []
 
-    def mock_respawn(timeout_sec: float = 15.0, deadline: _Deadline | None = None) -> None:
+    def mock_respawn(timeout_sec: float = 15.0, deadline: Deadline | None = None) -> None:
         # timeout_sec is the 15s startup default. execute passes the request
         # clock, and respawn takes the handshake budget from that clock
         # after Popen. Leave the child dead so execute returns
@@ -848,7 +814,7 @@ def test_expired_budget_does_not_spawn(monkeypatch: pytest.MonkeyPatch) -> None:
     the deadline existed, so timeout_sec <= 0 still spawned and then
     SIGKILL'd the child when the handshake could not finish.
     """
-    from compute_service.worker_base import BaseProcessWorker, _Deadline
+    from compute_service.worker_base import BaseProcessWorker, Deadline
 
     spawned: list[float] = []
 
@@ -879,10 +845,10 @@ def test_expired_budget_does_not_spawn(monkeypatch: pytest.MonkeyPatch) -> None:
 
     # The dead-child branch has its own check. execute() returns before
     # that branch when the budget is already spent at entry.
-    ensured = worker._ensure_live_process(_Deadline(0))
+    ensured = worker._ensure_live_process(Deadline(0))
     assert isinstance(ensured, dict)
     assert ensured.get("code") == "EXECUTION_TIMEOUT"
-    ensured_short = worker._ensure_live_process(_Deadline(0.5))
+    ensured_short = worker._ensure_live_process(Deadline(0.5))
     assert isinstance(ensured_short, dict)
     assert ensured_short.get("code") == "EXECUTION_TIMEOUT"
     assert spawned == []
@@ -897,7 +863,7 @@ def test_expired_deadline_does_not_write_or_kill(monkeypatch: pytest.MonkeyPatch
     """
     from unittest.mock import MagicMock
 
-    from compute_service.worker_base import BaseProcessWorker, _Deadline
+    from compute_service.worker_base import BaseProcessWorker, Deadline
 
     monkeypatch.setattr(BaseProcessWorker, "respawn", lambda self, timeout_sec=0.0, deadline=None: None)
     worker = BaseProcessWorker(1, "unused.py")
@@ -913,7 +879,7 @@ def test_expired_deadline_does_not_write_or_kill(monkeypatch: pytest.MonkeyPatch
     # The entry check still sees time left, so the live child is kept.
     # The check before the write is the one that must stop.
     answers = iter((30.0, None))
-    monkeypatch.setattr(_Deadline, "usable", lambda self: next(answers))
+    monkeypatch.setattr(Deadline, "usable", lambda self: next(answers))
 
     res = worker.execute({"code": "result = 1"}, timeout_sec=30.0)
     assert res.get("code") == "EXECUTION_TIMEOUT"
@@ -1088,6 +1054,222 @@ def test_write_broken_during_shutdown_is_service_shutdown(monkeypatch: pytest.Mo
     assert killed == []
 
 
+@pytest.mark.parametrize("kind", ["value", "reset", "timeout"])
+def test_read_error_during_shutdown_is_service_shutdown(monkeypatch: pytest.MonkeyPatch, kind: str) -> None:
+    """A read failure while the pool is stopping is SERVICE_SHUTDOWN, not a crash.
+
+    What was wrong: ValueError was WORKER_IPC_ERROR, ConnectionResetError
+    was WORKER_CRASHED, and TimeoutExpired was EXECUTION_TIMEOUT. Windows
+    raises that timeout from is_alive before the read sees EOF. The child
+    is already being reaped, so this must not kill again.
+    """
+    import subprocess
+    from unittest.mock import MagicMock
+
+    from compute_service.worker_base import BaseProcessWorker
+
+    monkeypatch.setattr(BaseProcessWorker, "respawn", lambda self, timeout_sec=0.0, deadline=None: None)
+    worker = BaseProcessWorker(1, "unused.py")
+    worker.process = MagicMock()
+    worker.process.poll.return_value = None
+    worker.process.pid = 3
+    worker.process.stdin = MagicMock()
+    worker.process.stdout = MagicMock()
+    worker._shutting_down = True
+    killed: list[bool] = []
+    worker.kill = lambda: killed.append(True)  # type: ignore[method-assign]
+    monkeypatch.setattr("plugin.framework.process_worker.write_packed_frame_with_timeout", lambda *_args, **_kwargs: None)
+    if kind == "value":
+        exc: BaseException = ValueError("I/O operation on closed file")
+    elif kind == "reset":
+        exc = ConnectionResetError("reset")
+    else:
+        exc = subprocess.TimeoutExpired(cmd="IPC frame", timeout=1)
+    monkeypatch.setattr("plugin.framework.process_worker.read_pickle_frame_with_timeout", MagicMock(side_effect=exc))
+
+    res = worker.execute({"code": "result = 1"}, timeout_sec=1.0)
+    assert res.get("code") == "SERVICE_SHUTDOWN"
+    assert worker.tasks_executed == 0
+    assert killed == []
+
+
+def test_other_thread_kill_leaves_pipes_until_the_owner_leaves(monkeypatch: pytest.MonkeyPatch) -> None:
+    """kill() from another thread only signals while this thread owns the pipes.
+
+    What was wrong: the shutdown thread closed stdin and stdout while
+    execute was between select and read. The read then raised, or could
+    hit a reused fd number. The owner closes them when it leaves.
+    """
+    worker = _worker_without_spawn(monkeypatch)
+
+    class _Reaped:
+        def __init__(self) -> None:
+            self.pid = 3
+            self.stdin = _PipeEnd()
+            self.stdout = _PipeEnd()
+            self.returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def kill(self) -> None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            self.returncode = 0
+            return 0
+
+    proc = _Reaped()
+    worker.process = proc  # type: ignore[assignment]
+    child = worker.child
+    assert child is not None
+    child.begin_io()
+    result: dict[str, bool] = {}
+
+    def _kill() -> None:
+        result["dropped"] = worker.kill()
+
+    killer = threading.Thread(target=_kill)
+    killer.start()
+    killer.join(timeout=2)
+    assert not killer.is_alive()
+    assert result["dropped"] is False
+    assert proc.stdin.closed is False
+    assert proc.stdout.closed is False
+    assert worker.process is proc
+    worker._end_child_io(child)
+    assert proc.stdin.closed is True
+    assert proc.stdout.closed is True
+    assert worker.process is None
+
+
+def test_signal_from_rereads_the_owner(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The second ``_io_owner`` load is a new read.
+
+    The first look can still see another thread. The owner clears before
+    the second look, and this thread reaps. Two looks that both see
+    another thread leave the pipes open for that thread's ``end_io``.
+    """
+    from plugin.framework.process_worker import Child
+
+    other = threading.get_ident() + 1
+
+    class _Loads:
+        def __init__(self) -> None:
+            self.values: list[int | None] = []
+            self.seen: list[int | None] = []
+
+        def __set__(self, obj: object, value: object) -> None:
+            del obj, value
+
+        def __get__(self, obj: object, objtype: type | None = None) -> int | None:
+            if obj is None:
+                return None
+            value = self.values[min(len(self.seen), len(self.values) - 1)]
+            self.seen.append(value)
+            return value
+
+    class _Proc:
+        def __init__(self) -> None:
+            self.pid = 7
+            self.stdin = _PipeEnd()
+            self.stdout = _PipeEnd()
+            self.returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def kill(self) -> None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            self.returncode = 0
+            return 0
+
+    loads = _Loads()
+    # _io_owner is set on the instance. The descriptor has to live on the
+    # class, and it is not there until this test installs it.
+    monkeypatch.setattr(Child, "_io_owner", loads, raising=False)
+    loads.values = [other, None]
+    reaped = _Proc()
+    child = Child(reaped, None, worker_name="Worker", worker_id=1)
+    assert child.signal_from() is True
+    assert loads.seen[:2] == [other, None]
+    assert reaped.stdin.closed is True
+    assert reaped.stdout.closed is True
+
+    loads.values = [other, other]
+    loads.seen.clear()
+    held = _Proc()
+    owner = Child(held, None, worker_name="Worker", worker_id=1)
+    assert owner.signal_from() is False
+    assert loads.seen == [other, other]
+    assert held.stdin.closed is False
+    assert held.stdout.closed is False
+
+
+def test_abandoned_child_is_not_written_and_a_later_spawn_may_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A child that survives the reap is not sent a request, and the slot may spawn.
+
+    What was wrong: poll() was still None, so execute wrote to a process
+    that had never said ready, and the next call refused to spawn forever.
+    kill() drops that child. The next execute may call respawn again.
+    """
+    import subprocess
+
+    from plugin.framework import process_worker as worker_mod
+
+    enqueued: list[object] = []
+    monkeypatch.setattr(worker_mod, "_enqueue_abandoned", lambda child: enqueued.append(child))
+    worker = _worker_without_spawn(monkeypatch)
+
+    class _Stuck:
+        def __init__(self) -> None:
+            self.pid = 4
+            self.stdin = _PipeEnd()
+            self.stdout = _PipeEnd()
+            self.killed = False
+
+        def poll(self) -> None:
+            return None
+
+        def kill(self) -> None:
+            self.killed = True
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            raise subprocess.TimeoutExpired(cmd="stuck", timeout=1)
+
+    stuck = _Stuck()
+    worker.process = stuck  # type: ignore[assignment]
+    assert worker.kill() is True
+    assert stuck.killed
+    assert stuck.stdin.closed is True
+    assert stuck.stdout.closed is True
+    assert worker.process is None
+    assert len(enqueued) == 1
+
+    spawned: list[bool] = []
+    written: list[bool] = []
+
+    def _respawn(timeout_sec: float | None = None, deadline: object | None = None) -> None:
+        del timeout_sec, deadline
+        spawned.append(True)
+
+    worker.respawn = _respawn  # type: ignore[method-assign]
+    monkeypatch.setattr("plugin.framework.process_worker.write_packed_frame_with_timeout", lambda *_args, **_kwargs: written.append(True))
+    res = worker.execute({"code": "result = 1"}, timeout_sec=1.0)
+    assert res.get("code") == "WORKER_SPAWN_FAILED"
+    assert spawned == [True]
+    assert written == []
+    again = worker.execute({"code": "result = 1"}, timeout_sec=1.0)
+    assert again.get("code") == "WORKER_SPAWN_FAILED"
+    assert spawned == [True, True]
+    assert written == []
+
+
 def test_subsecond_timeout_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     """A budget under one second is refused and is not reported as 0 seconds."""
     from unittest.mock import MagicMock
@@ -1176,7 +1358,7 @@ def test_reap_past_deadline_does_not_spawn(monkeypatch: pytest.MonkeyPatch) -> N
 def test_handshake_budget_is_time_left_after_reap(monkeypatch: pytest.MonkeyPatch) -> None:
     """The ready-frame read uses the time left after the previous child is reaped."""
     from plugin.framework import process_worker as worker_base
-    from compute_service.worker_base import _Deadline
+    from compute_service.worker_base import Deadline
 
     clock = {"t": 1000.0}
     monkeypatch.setattr(worker_base.time, "monotonic", lambda: clock["t"])
@@ -1218,7 +1400,7 @@ def test_handshake_budget_is_time_left_after_reap(monkeypatch: pytest.MonkeyPatc
         clock["t"] += 0.4
 
     worker.process = _DeadChild(_spend)  # type: ignore[assignment]
-    deadline = _Deadline(5.0)
+    deadline = Deadline(5.0)
     try:
         worker.respawn(deadline=deadline)
         assert len(seen) == 1
@@ -1234,7 +1416,7 @@ def test_respawn_rejects_timeout_and_deadline(monkeypatch: pytest.MonkeyPatch) -
     caller that passed both thought the cap was in force.
     """
     from plugin.framework import process_worker as worker_base
-    from compute_service.worker_base import _Deadline
+    from compute_service.worker_base import Deadline
 
     popen_calls: list[object] = []
 
@@ -1245,39 +1427,26 @@ def test_respawn_rejects_timeout_and_deadline(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(worker_base.subprocess, "Popen", _popen)
     worker = worker_base.BaseProcessWorker(1, "unused.py", worker_name="Budget", start=False)
     with pytest.raises(ValueError, match="not both"):
-        worker.respawn(timeout_sec=1.0, deadline=_Deadline(5.0))
+        worker.respawn(timeout_sec=1.0, deadline=Deadline(5.0))
     assert popen_calls == []
 
 
-def test_stderr_log_name_uses_worker_name() -> None:
-    """The temp file names the pool, not a generic compute worker.
+def test_stderr_drain_name_uses_worker_name() -> None:
+    """The drain thread names the pool, not a generic compute worker.
 
-    What was wrong: Kokoro and vision used ``wa-compute-w{id}-``, so a
-    leaked file in ``/tmp`` looked like a formula worker.
+    What was wrong: Kokoro and vision used a generic compute prefix, so a
+    stuck drain could not be told apart from a formula worker.
     """
-    import os
-    from typing import IO
-
     from plugin.framework.process_worker import BaseProcessWorker
 
     cases = (
-        ("Kokoro", 1, "wa-kokoro-w1-"),
-        ("Formula worker", 2, "wa-formula-worker-w2-"),
-        ("---", 3, "wa-worker-w3-"),
+        ("Kokoro", 1, "wa-kokoro-w1-stderr"),
+        ("Formula worker", 2, "wa-formula-worker-w2-stderr"),
+        ("---", 3, "wa-worker-w3-stderr"),
     )
-    opened: list[tuple[IO[bytes], str]] = []
-    try:
-        for name, worker_id, prefix in cases:
-            worker = BaseProcessWorker(worker_id, "unused.py", worker_name=name, start=False)
-            handle, path = worker._open_stderr_log()
-            opened.append((handle, path))
-            base = os.path.basename(path)
-            assert base.startswith(prefix), base
-            assert base.endswith(".stderr")
-    finally:
-        for handle, path in opened:
-            handle.close()
-            os.unlink(path)
+    for name, worker_id, expected in cases:
+        worker = BaseProcessWorker(worker_id, "unused.py", worker_name=name, start=False)
+        assert worker._drain_name() == expected
 
 
 def test_popen_past_deadline_skips_handshake(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1475,20 +1644,26 @@ def test_configure_compute_worker_env_preserves_overrides(monkeypatch: pytest.Mo
         assert os.environ.get(var_name) == "4"
 
 
-def test_reap_timeout_keeps_live_pid(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A child still alive after the reap wait is not reported as exited.
+def test_reap_timeout_abandons_and_allows_another_spawn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A child still alive after the reap wait is dropped, and the slot may spawn.
 
-    What was wrong: wait()'s timeout was swallowed, the slot was cleared, and
-    on_process_exit dropped every session on a pid SIGKILL had not reaped.
+    The survivor is handed to the module reaper. It is not this slot's child,
+    so the next respawn may Popen.
     """
     import subprocess
 
-    from plugin.framework import process_worker as worker_base
+    from plugin.framework import process_worker as worker_mod
+
+    enqueued: list[object] = []
+    monkeypatch.setattr(worker_mod, "_enqueue_abandoned", lambda child: enqueued.append(child))
 
     class _Stuck:
         def __init__(self) -> None:
             self.pid = 42
             self.killed = False
+            self.stdin = None
+            self.stdout = None
+            self.stderr = None
 
         def poll(self) -> None:
             return None
@@ -1500,37 +1675,57 @@ def test_reap_timeout_keeps_live_pid(monkeypatch: pytest.MonkeyPatch) -> None:
             del timeout
             raise subprocess.TimeoutExpired(cmd="stuck", timeout=1)
 
+    class _Ready:
+        def __init__(self) -> None:
+            self.pid = 43
+            self.stdin = object()
+            self.stdout = object()
+            self.stderr = None
+            self.returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            self.returncode = -9
+            return -9
+
     worker = _worker_without_spawn(monkeypatch)
-    child = _Stuck()
-    exited: list[int] = []
-    worker.on_process_exit = lambda _slot, pid: exited.append(pid)
-    worker.process = child  # type: ignore[assignment]
-    popped: list[object] = []
+    stuck = _Stuck()
+    worker.process = stuck  # type: ignore[assignment]
+    ready = _Ready()
 
-    def _popen(*_args: object, **_kwargs: object) -> object:
-        popped.append(_args)
-        raise AssertionError("Popen while the previous pid is still alive")
+    def _popen(*_args: object, **_kwargs: object) -> _Ready:
+        return ready
 
-    monkeypatch.setattr(worker_base.subprocess, "Popen", _popen)
+    monkeypatch.setattr(worker_mod.subprocess, "Popen", _popen)
+    monkeypatch.setattr(worker_mod, "read_pickle_frame_with_timeout", lambda *_args, **_kwargs: {"status": "ready", "pid": 43})
+    monkeypatch.setattr(worker_mod, "optimize_popen_pipes", lambda _proc: None)
     worker.respawn()
-    assert exited == []
-    assert worker.process is child
-    assert worker.reap_incomplete()
-    assert child.killed
-    assert popped == []
+    assert stuck.killed
+    assert len(enqueued) == 1
+    assert worker.process is ready
+    assert worker.child is not None
+    assert worker.child.proc is ready
 
 
-def test_reap_reports_exit_after_wait(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The exit callback runs once wait() has reaped the pid, still holding the lifecycle lock.
+def test_reap_clears_the_slot_after_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    """wait() that reaps the child clears the slot.
 
-    The callback must not call kill, respawn, or request_shutdown. That lock
-    is not re-entrant, and dropping it would let the callback start a second child.
+    There is no exit callback under the lifecycle lock. The session scan
+    sees the child pointer change.
     """
     worker = _worker_without_spawn(monkeypatch)
 
     class _Exited:
         def __init__(self) -> None:
             self.pid = 7
+            self.stdin = None
+            self.stdout = None
             self.returncode: int | None = None
 
         def poll(self) -> int | None:
@@ -1545,143 +1740,742 @@ def test_reap_reports_exit_after_wait(monkeypatch: pytest.MonkeyPatch) -> None:
             return 0
 
     child = _Exited()
-    exited: list[tuple[int, int]] = []
-    held: list[bool] = []
-
-    def _on_exit(slot: object, pid: int) -> None:
-        del slot
-        held.append(worker._lifecycle_lock.locked())
-        exited.append((worker.worker_id, pid))
-
-    worker.on_process_exit = _on_exit
     worker.process = child  # type: ignore[assignment]
-    assert worker._reap_previous_process() is True
-    assert exited == [(worker.worker_id, 7)]
-    assert held == [True]
+    assert worker.kill() is True
     assert worker.process is None
-    assert not worker.reap_incomplete()
+    assert worker.child is None
 
 
-def test_stderr_log_fd_is_append_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The spawn log is the exclusive-create fd, opened append-only.
+class _PipeEnd:
+    def __init__(self) -> None:
+        self.closed = False
 
-    What was wrong: mkstemp's fd was closed and the path reopened. A name
-    swap could replace the file, and only the second open set O_APPEND.
-    Capping truncates; the child has to inherit append mode.
+    def close(self) -> None:
+        self.closed = True
+
+
+def test_kill_closes_stdio_then_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The caller with no pipe owner closes stdin and stdout, then waits.
+
+    What was wrong: kill() left those fds on the Popen until collection.
+    On Windows that also keeps the child's ends open. A child still alive
+    after the wait is abandoned with those pipes already closed, and the
+    slot is empty. stderr stays with the drain.
+    """
+    import subprocess
+
+    from plugin.framework import process_worker as worker_mod
+
+    enqueued: list[object] = []
+    monkeypatch.setattr(worker_mod, "_enqueue_abandoned", lambda child: enqueued.append(child))
+    worker = _worker_without_spawn(monkeypatch)
+
+    class _Reaped:
+        def __init__(self) -> None:
+            self.pid = 3
+            self.stdin = _PipeEnd()
+            self.stdout = _PipeEnd()
+            self.stderr = _PipeEnd()
+            self.returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def kill(self) -> None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            self.returncode = 0
+            return 0
+
+    reaped = _Reaped()
+    worker.process = reaped  # type: ignore[assignment]
+    assert worker.kill() is True
+    assert reaped.stdin.closed
+    assert reaped.stdout.closed
+    assert reaped.stderr.closed is False
+    assert worker.process is None
+
+    class _Stuck:
+        def __init__(self) -> None:
+            self.pid = 4
+            self.stdin = _PipeEnd()
+            self.stdout = _PipeEnd()
+            self.stderr = _PipeEnd()
+
+        def poll(self) -> None:
+            return None
+
+        def kill(self) -> None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            raise subprocess.TimeoutExpired(cmd="stuck", timeout=1)
+
+    stuck = _Stuck()
+    worker.process = stuck  # type: ignore[assignment]
+    assert worker.kill() is True
+    assert stuck.stdin.closed
+    assert stuck.stdout.closed
+    assert stuck.stderr.closed is False
+    assert worker.process is None
+    assert len(enqueued) == 1
+
+
+def test_short_one_second_remainder_does_not_spawn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 1s budget with ~20ms left does not Popen. usable() still returns it.
+
+    What was wrong: usable() lets a one-second budget start after the clock
+    has moved, so the pool can lift that remainder. respawn used the same
+    check, spawned, and the handshake was given the leftover.
+    """
+    from plugin.framework import process_worker as worker_mod
+
+    monkeypatch.setattr(worker_mod.time, "monotonic", lambda: 1000.0)
+    popen_calls: list[object] = []
+
+    def _popen(*_args: object, **_kwargs: object) -> object:
+        popen_calls.append(_args)
+        raise AssertionError("Popen with nothing left for the handshake")
+
+    monkeypatch.setattr(worker_mod.subprocess, "Popen", _popen)
+    worker = _worker_without_spawn(monkeypatch)
+    clock = worker_mod.Deadline.from_absolute(1.0, 1000.02)
+    assert clock.usable() == pytest.approx(0.02)
+    worker.respawn(deadline=clock)
+    assert popen_calls == []
+
+    calls = {"n": 0}
+
+    def _moved() -> float:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return 1000.0
+        return 1000.98
+
+    monkeypatch.setattr(worker_mod.time, "monotonic", _moved)
+    res = worker.execute({"code": "result = 1"}, timeout_sec=1.0)
+    assert res.get("code") == "EXECUTION_TIMEOUT"
+    assert popen_calls == []
+    assert worker.tasks_executed == 0
+
+
+def test_one_second_budget_above_spawn_floor_still_spawns(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A 1s budget with 0.5s left still reaches Popen. That case stays usable."""
+    from plugin.framework import process_worker as worker_mod
+
+    calls = {"n": 0}
+
+    def _moved() -> float:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return 1000.0
+        return 1000.5
+
+    monkeypatch.setattr(worker_mod.time, "monotonic", _moved)
+    popen_calls: list[object] = []
+
+    def _popen(*_args: object, **_kwargs: object) -> object:
+        popen_calls.append(_args)
+        raise OSError("stop after Popen")
+
+    monkeypatch.setattr(worker_mod.subprocess, "Popen", _popen)
+    worker = _worker_without_spawn(monkeypatch)
+    res = worker.execute({"code": "result = 1"}, timeout_sec=1.0)
+    assert popen_calls
+    assert res.get("code") == "WORKER_SPAWN_FAILED"
+
+
+def test_popen_failure_leaves_the_slot_empty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Popen raising leaves no child. Stderr is a pipe, not a file to unlink."""
+    import subprocess
+
+    from plugin.framework import process_worker as worker_mod
+
+    worker = _worker_without_spawn(monkeypatch)
+    saw_pipe: list[bool] = []
+
+    def _popen(*_args: object, **kwargs: object) -> object:
+        saw_pipe.append(kwargs.get("stderr") is subprocess.PIPE)
+        raise OSError("spawn failed")
+
+    monkeypatch.setattr(worker_mod.subprocess, "Popen", _popen)
+    worker.respawn()
+    assert saw_pipe == [True]
+    assert worker.process is None
+    assert worker.child is None
+
+
+def test_adopt_publishes_one_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Adopt stores the Child in one lock hold. Shutdown and a live child refuse.
+
+    What was wrong: the stderr path was published first. kill() in that gap
+    unlinked the file, then adopt stored a live child whose diagnostics
+    read as empty. A second adopt also overwrote the published process.
+    """
+    from plugin.framework.process_worker import Child
+
+    worker = _worker_without_spawn(monkeypatch)
+    first_proc = object()
+    first = Child(first_proc, None, worker_name=worker.worker_name, worker_id=worker.worker_id)
+    assert worker._adopt(first) is True
+    assert worker.process is first_proc
+    assert worker.child is first
+
+    worker.request_shutdown()
+    refused = Child(object(), None, worker_name=worker.worker_name, worker_id=worker.worker_id)
+    # Shutdown refuses a new child. The one already published stays until kill.
+    assert worker._adopt(refused) is False
+    assert worker.child is first
+
+    fresh = _worker_without_spawn(monkeypatch)
+    published = object()
+    fresh.process = published  # type: ignore[assignment]
+    second = Child(object(), None, worker_name=fresh.worker_name, worker_id=fresh.worker_id)
+    assert fresh._adopt(second) is False
+    assert fresh.process is published
+    assert fresh.child is not second
+
+
+def test_concurrent_respawn_keeps_one_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Two overlapping respawns publish one child and kill the other.
+
+    What was wrong: both threads passed the reap before either adopt, so
+    the second assignment leaked the first Popen.
+    """
+    from plugin.framework import process_worker as worker_mod
+
+    worker = _worker_without_spawn(monkeypatch)
+    both_in_popen = threading.Event()
+    release = threading.Event()
+    children: list[object] = []
+    children_lock = threading.Lock()
+
+    class _Proc:
+        def __init__(self) -> None:
+            self.pid = id(self) & 0x7FFFFFFF
+            self.stdin = None
+            self.stdout = object()
+            self.stderr = None
+            self.killed = False
+            self.returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -9
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            if self.returncode is None:
+                self.returncode = -9
+            return self.returncode
+
+    def _popen(*_args: object, **_kwargs: object) -> _Proc:
+        proc = _Proc()
+        with children_lock:
+            children.append(proc)
+            if len(children) == 2:
+                both_in_popen.set()
+        assert both_in_popen.wait(timeout=2)
+        assert release.wait(timeout=2)
+        return proc
+
+    def _read(_stdout: object, _timeout_sec: float, **_kwargs: object) -> dict[str, object]:
+        return {"status": "ready", "pid": 1}
+
+    monkeypatch.setattr(worker_mod.subprocess, "Popen", _popen)
+    monkeypatch.setattr(worker_mod, "read_pickle_frame_with_timeout", _read)
+    monkeypatch.setattr(worker_mod, "optimize_popen_pipes", lambda _proc: None)
+    errors: list[BaseException] = []
+
+    def _run() -> None:
+        try:
+            worker.respawn()
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_run) for _idx in range(2)]
+    for thread in threads:
+        thread.start()
+    assert both_in_popen.wait(timeout=2)
+    release.set()
+    try:
+        for thread in threads:
+            thread.join(timeout=5)
+            assert not thread.is_alive()
+        assert errors == []
+        assert len(children) == 2
+        published = worker.process
+        assert published in children
+        losers = [child for child in children if child is not published]
+        assert len(losers) == 1
+        assert losers[0].killed  # type: ignore[attr-defined]
+        assert published.killed is False  # type: ignore[attr-defined]
+    finally:
+        worker.kill()
+
+
+def test_handshake_crash_logs_the_drain_tail(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    """A dead child during the ready read still logs the stderr drain.
+
+    What was wrong: respawn passes is_alive into the handshake. On Windows
+    that runs before EOF, and the failure logged stderr=<empty>. The drain
+    keeps the text. POSIX calls is_alive only when select times out.
+    """
+    import logging
+
+    from plugin.framework import process_worker as worker_mod
+    from plugin.framework.worker_pool import StderrTail
+
+    worker = _worker_without_spawn(monkeypatch)
+    tail = StderrTail()
+
+    class _Dead:
+        def __init__(self) -> None:
+            self.pid = 41
+            self.stdin = None
+            self.stdout = object()
+            self.stderr = object()
+            self.returncode: int | None = 1
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def kill(self) -> None:
+            self.returncode = -9
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            if self.returncode is None:
+                self.returncode = -9
+            return self.returncode
+
+    def _popen(*_args: object, **_kwargs: object) -> _Dead:
+        return _Dead()
+
+    def _drain(_stream: object, **_kwargs: object) -> StderrTail:
+        return tail
+
+    def _read(_stdout: object, _timeout_sec: float, **kwargs: object) -> None:
+        tail._append("startup-crash-traceback\n")
+        alive = kwargs["is_alive"]
+        assert callable(alive)
+        alive()
+        return None
+
+    monkeypatch.setattr(worker_mod.subprocess, "Popen", _popen)
+    monkeypatch.setattr(worker_mod, "start_stderr_drain", _drain)
+    monkeypatch.setattr(worker_mod, "read_pickle_frame_with_timeout", _read)
+    monkeypatch.setattr(worker_mod, "optimize_popen_pipes", lambda _proc: None)
+    with caplog.at_level(logging.ERROR, logger="compute_service.worker"):
+        worker.respawn()
+    joined = "\n".join(record.getMessage() for record in caplog.records)
+    assert "startup-crash-traceback" in joined
+    assert "stderr=<empty>" not in joined
+    assert worker.process is None
+
+
+def test_respawn_failure_before_adopt_leaves_the_other_child(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    """A respawn that raises before adopt must not kill the published child.
+
+    What was wrong: the except path always called kill(). Two unlocked
+    callers can overlap. The one that fails before adopt reaped the
+    other call's healthy child.
+    """
+    import logging
+
+    from plugin.framework import process_worker as worker_mod
+
+    worker = _worker_without_spawn(monkeypatch)
+    both_in_popen = threading.Event()
+    adopted = threading.Event()
+    hold = threading.Event()
+    calls = {"n": 0}
+    calls_lock = threading.Lock()
+    winner: dict[str, Any] = {}
+
+    class _Proc:
+        def __init__(self) -> None:
+            self.pid = 77
+            self.stdin = None
+            self.stdout = object()
+            self.stderr = None
+            self.killed = False
+            self.returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -9
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            if self.returncode is None:
+                self.returncode = -9
+            return self.returncode
+
+    def _popen(*_args: object, **_kwargs: object) -> _Proc:
+        with calls_lock:
+            calls["n"] += 1
+            mine = calls["n"]
+            if calls["n"] == 2:
+                both_in_popen.set()
+        assert both_in_popen.wait(timeout=2)
+        if mine == 1:
+            proc = _Proc()
+            winner["proc"] = proc
+            return proc
+        deadline = time.monotonic() + 2.0
+        while worker.process is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        raise OSError("second spawn failed")
+
+    def _drain(_stream: object, **_kwargs: object) -> object:
+        from plugin.framework.worker_pool import StderrTail
+
+        return StderrTail()
+
+    def _read(_stdout: object, _timeout_sec: float, **_kwargs: object) -> dict[str, object]:
+        current = worker.child
+        if current is not None and current.tail is not None:
+            current.tail._append("winner-still-healthy\n")
+        adopted.set()
+        hold.wait(timeout=2)
+        return {"status": "ready", "pid": 77}
+
+    monkeypatch.setattr(worker_mod.subprocess, "Popen", _popen)
+    monkeypatch.setattr(worker_mod, "start_stderr_drain", _drain)
+    monkeypatch.setattr(worker_mod, "read_pickle_frame_with_timeout", _read)
+    monkeypatch.setattr(worker_mod, "optimize_popen_pipes", lambda _proc: None)
+    errors: list[BaseException] = []
+
+    def _run() -> None:
+        try:
+            worker.respawn()
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_run) for _idx in range(2)]
+    with caplog.at_level(logging.ERROR, logger="compute_service.worker"):
+        for thread in threads:
+            thread.start()
+        try:
+            assert adopted.wait(timeout=2)
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline and sum(not thread.is_alive() for thread in threads) < 1:
+                time.sleep(0.01)
+            assert sum(not thread.is_alive() for thread in threads) == 1
+            published = winner["proc"]
+            assert worker.process is published
+            assert published.killed is False
+            hold.set()
+            for thread in threads:
+                thread.join(timeout=2)
+                assert not thread.is_alive()
+            assert errors == []
+            joined = "\n".join(record.getMessage() for record in caplog.records)
+            assert "second spawn failed" in joined
+            assert "winner-still-healthy" not in joined
+            assert worker.process is published
+            assert published.killed is False
+        finally:
+            hold.set()
+            for thread in threads:
+                thread.join(timeout=2)
+            worker.kill()
+
+
+def test_response_frame_error_is_ipc_not_crash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bad response frame is WORKER_IPC_ERROR and still kills the child.
+
+    What was wrong: IpcFrameError and a restricted-unpickler ValueError
+    fell through to WORKER_CRASHED. The pipe is not reusable, so the
+    kill stays. The code was the part that lied.
+    """
+    from unittest.mock import MagicMock
+
+    from compute_service.worker_base import BaseProcessWorker
+    from plugin.scripting.ipc import IpcFrameReadError
+
+    monkeypatch.setattr(BaseProcessWorker, "respawn", lambda self, timeout_sec=0.0, deadline=None: None)
+    monkeypatch.setattr("plugin.framework.process_worker.write_packed_frame_with_timeout", lambda *_args, **_kwargs: None)
+
+    def _run(exc: BaseException) -> dict[str, Any]:
+        worker = BaseProcessWorker(1, "unused.py")
+        worker.process = MagicMock()
+        worker.process.poll.return_value = None
+        worker.process.pid = 3
+        worker.process.stdin = MagicMock()
+        worker.process.stdout = MagicMock()
+        killed: list[bool] = []
+        worker.kill = lambda: killed.append(True)  # type: ignore[method-assign]
+        monkeypatch.setattr(
+            "plugin.framework.process_worker.read_pickle_frame_with_timeout",
+            MagicMock(side_effect=exc),
+        )
+        res = worker.execute({"code": "result = 1"}, timeout_sec=1.0)
+        assert killed == [True]
+        assert worker.tasks_executed == 0
+        return res
+
+    oversized = _run(IpcFrameReadError("Invalid IPC frame size: 99"))
+    assert oversized.get("code") == "WORKER_IPC_ERROR"
+    assert "WORKER_CRASHED" not in str(oversized.get("code"))
+    rejected = _run(ValueError("builtin is forbidden"))
+    assert rejected.get("code") == "WORKER_IPC_ERROR"
+    assert "forbidden" in str(rejected.get("error"))
+
+
+def test_unadopted_child_that_survives_kill_is_abandoned(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    """A child adopt refused, and that will not die, is abandoned. The slot stays.
+
+    What was wrong: a failed wait returned and the child was neither stored
+    nor mentioned above debug. The loser is signaled. The published child
+    is not.
+    """
+    import logging
+    import subprocess
+
+    from plugin.framework import process_worker as worker_mod
+    from plugin.framework.process_worker import Child
+
+    enqueued: list[object] = []
+    monkeypatch.setattr(worker_mod, "_enqueue_abandoned", lambda child: enqueued.append(child))
+    worker = _worker_without_spawn(monkeypatch)
+
+    class _Live:
+        def __init__(self) -> None:
+            self.pid = 1
+            self.killed = False
+            self.returncode: int | None = None
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def kill(self) -> None:
+            self.killed = True
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            self.returncode = 0
+            return 0
+
+    class _Stuck:
+        def __init__(self) -> None:
+            self.pid = 99
+            self.stdin = None
+            self.stdout = None
+
+        def poll(self) -> None:
+            return None
+
+        def kill(self) -> None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            raise subprocess.TimeoutExpired(cmd="stuck", timeout=1)
+
+    published = _Live()
+    worker.process = published  # type: ignore[assignment]
+    loser = Child(_Stuck(), None, worker_name=worker.worker_name, worker_id=worker.worker_id)
+    assert worker._adopt(loser) is False
+    with caplog.at_level(logging.WARNING, logger="compute_service.worker"):
+        assert loser.signal_from() is True
+    assert any("abandoning" in record.getMessage() for record in caplog.records)
+    assert enqueued == [loser]
+    assert worker.process is published
+    assert published.killed is False
+
+
+def test_abandoned_reaper_pauses_before_requeue(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A wait() that returns immediately must not hot-spin the reaper.
+
+    What was wrong: the retry called kill() again as soon as the previous
+    wait raised. Each pass logged a warning and burned a core. The module
+    reaper sleeps before putting the child back.
+    """
+    import subprocess
+
+    from plugin.framework import process_worker as worker_mod
+    from plugin.framework.process_worker import Child
+
+    sleeps: list[float] = []
+    enqueued: list[object] = []
+    monkeypatch.setattr(worker_mod.time, "sleep", lambda sec: sleeps.append(sec))
+    monkeypatch.setattr(worker_mod, "_enqueue_abandoned", lambda child: enqueued.append(child))
+
+    class _Stuck:
+        def poll(self) -> None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            raise subprocess.TimeoutExpired(cmd="stuck", timeout=1)
+
+    child = Child(_Stuck(), None, worker_name="Worker", worker_id=1)
+    child.reaper_pass()
+    assert sleeps == [0.1]
+    assert enqueued == [child]
+
+
+def test_reaper_stops_after_max_passes(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    """A child that never exits is dropped after ``_REAPER_MAX_PASSES``.
+
+    What was wrong: every failed wait slept and requeued. One D-state
+    child occupied the single reaper for the rest of the process and
+    delayed every later abandon.
+    """
+    import logging
+    import subprocess
+
+    from plugin.framework import process_worker as worker_mod
+    from plugin.framework.process_worker import Child, _REAPER_MAX_PASSES
+
+    sleeps: list[float] = []
+    enqueued: list[object] = []
+    monkeypatch.setattr(worker_mod.time, "sleep", lambda sec: sleeps.append(sec))
+    monkeypatch.setattr(worker_mod, "_enqueue_abandoned", lambda child: enqueued.append(child))
+
+    class _Stuck:
+        pid = 41
+
+        def poll(self) -> None:
+            return None
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            raise subprocess.TimeoutExpired(cmd="stuck", timeout=1)
+
+    child = Child(_Stuck(), None, worker_name="Worker", worker_id=1)
+    with caplog.at_level(logging.WARNING, logger="compute_service.worker"):
+        for _idx in range(_REAPER_MAX_PASSES):
+            child.reaper_pass()
+    assert sleeps == [0.1] * (_REAPER_MAX_PASSES - 1)
+    assert enqueued == [child] * (_REAPER_MAX_PASSES - 1)
+    giving_up = [record for record in caplog.records if "reaper giving up" in record.getMessage()]
+    assert len(giving_up) == 1
+    assert "pid=41" in giving_up[0].getMessage()
+
+
+def test_abandoned_reaper_thread_is_a_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The module reaper is a daemon, so a stuck child cannot hold process exit."""
+    import queue
+
+    from plugin.framework import process_worker as worker_mod
+    from plugin.framework.process_worker import Child
+
+    calls: list[dict[str, object]] = []
+
+    def _spy(*_args: object, **kwargs: object) -> None:
+        calls.append(dict(kwargs))
+
+    monkeypatch.setattr(worker_mod, "_reaper_started", False)
+    monkeypatch.setattr(worker_mod, "run_in_background", _spy)
+    child = Child(object(), None, worker_name="Worker", worker_id=1)
+    try:
+        worker_mod._enqueue_abandoned(child)
+        worker_mod._enqueue_abandoned(child)
+        assert calls == [{"name": "process-worker-reaper", "dedicated": True, "daemon": True}]
+    finally:
+        while True:
+            try:
+                worker_mod._abandoned.get_nowait()
+            except queue.Empty:
+                break
+
+
+def test_fail_request_skips_stderr_when_it_does_not_kill(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failure that leaves the child must not attach another child's tail.
+
+    What was wrong: _fail_request always read the stderr tail. kill=False
+    is shutdown, a clock spent before the frame was sent, or a spawn that
+    already logged its own tail.
+    """
+    from plugin.framework.worker_pool import StderrTail
+
+    worker = _worker_without_spawn(monkeypatch)
+
+    class _Proc:
+        pid = 3
+
+        def poll(self) -> None:
+            return None
+
+    worker.process = _Proc()  # type: ignore[assignment]
+    tail = StderrTail()
+    tail._append("previous-child-tail\n")
+    assert worker.child is not None
+    worker.child.tail = tail
+    killed: list[bool] = []
+
+    def _kill() -> bool:
+        killed.append(True)
+        return True
+
+    worker.kill = _kill  # type: ignore[method-assign]
+    quiet = worker._fail_request("SERVICE_SHUTDOWN", "stopping", pid=None, kill=False)
+    assert "previous-child-tail" not in str(quiet.get("error"))
+    assert killed == []
+    loud = worker._fail_request("WORKER_CRASHED", "died", pid=3, kill=True)
+    assert "previous-child-tail" in str(loud.get("error"))
+    assert killed == [True]
+
+
+def test_stderr_drain_keeps_a_bounded_tail(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A chatty child does not grow the diagnostic tail without a bound.
+
+    The drain drops the oldest chunks once the kept text passes
+    ``_STDERR_LOG_CAP``. The snippet attached to an error is the last
+    ``_STDERR_SNIPPET`` of that text. One chunk larger than the cap is
+    dropped whole, so the child text arrives in smaller writes.
+    """
+    from plugin.framework.process_worker import Child, _STDERR_LOG_CAP, _STDERR_SNIPPET
+    from plugin.framework.worker_pool import StderrTail
+
+    tail = StderrTail(max_chars=_STDERR_LOG_CAP)
+    piece = "x" * 1024
+    for _idx in range((_STDERR_LOG_CAP // len(piece)) + 2):
+        tail._append(piece)
+    tail._append("END")
+    text = tail.text()
+    assert len(text) <= _STDERR_LOG_CAP
+    assert text.endswith("END")
+    worker = _worker_without_spawn(monkeypatch)
+    child = Child(object(), tail, worker_name=worker.worker_name, worker_id=worker.worker_id)
+    snippet = child.diagnostic_tail()
+    assert snippet.endswith("END")
+    assert len(snippet) <= _STDERR_SNIPPET
+
+
+def test_stderr_drain_stays_alive_while_the_write_end_is_open() -> None:
+    """A pipe with no EOF keeps the drain thread after finish_text gives up.
+
+    A grandchild that inherited stderr is that pipe. The join is bounded.
+    Closing the write end lets the daemon thread leave.
     """
     import os
-    import sys
 
-    worker = _worker_without_spawn(monkeypatch)
-    handle, path = worker._open_stderr_log()
+    from plugin.framework.worker_pool import start_stderr_drain
+
+    read_fd, write_fd = os.pipe()
+    stream = os.fdopen(read_fd, "rb", buffering=0)
+    tail = start_stderr_drain(stream, name="wa-test-w1-stderr")
+    assert tail is not None
     try:
-        fd_stat = os.fstat(handle.fileno())
-        path_stat = os.stat(path)
-        assert fd_stat.st_ino == path_stat.st_ino
-        assert fd_stat.st_dev == path_stat.st_dev
-        if sys.platform != "win32":
-            import fcntl
-
-            flags = fcntl.fcntl(handle.fileno(), fcntl.F_GETFL)
-            assert flags & os.O_APPEND
+        assert tail.finish_text(timeout=0.05) == ""
+        assert tail.is_alive is True
     finally:
-        handle.close()
-        os.unlink(path)
-
-
-def test_adopt_publishes_process_and_stderr_together(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A child and its stderr file become visible in one lock hold.
-
-    What was wrong: the path was published first. kill() in that gap
-    reaped no process, unlinked the file, then adopt stored a live child
-    whose diagnostics read as empty.
-    """
-    worker = _worker_without_spawn(monkeypatch)
-    proc = object()
-    assert worker._adopt_spawned_process(proc, "/tmp/wa-stderr") is True  # type: ignore[arg-type]
-    assert worker.process is proc
-    assert worker._stderr_path == "/tmp/wa-stderr"
-
-
-def test_adopt_refuses_process_and_stderr_when_shutting_down(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Shutdown stores neither the child nor its stderr path."""
-    worker = _worker_without_spawn(monkeypatch)
-    worker.request_shutdown()
-    proc = object()
-    assert worker._adopt_spawned_process(proc, "/tmp/wa-stderr") is False  # type: ignore[arg-type]
-    assert worker.process is None
-    assert worker._stderr_path is None
-
-
-def test_stderr_log_keeps_tail(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A chatty child does not grow the stderr file without a bound.
-
-    Opening the file ``wb`` at spawn does not help: the child appends for
-    its whole life. The host keeps the last ``_STDERR_LOG_CAP`` bytes.
-    """
-    from compute_service.worker_base import _STDERR_LOG_CAP
-
-    worker = _worker_without_spawn(monkeypatch)
-    path = tmp_path / "w.stderr"
-    path.write_bytes(b"x" * (_STDERR_LOG_CAP + 50) + b"END")
-    worker._stderr_path = str(path)
-    worker.cap_stderr_log()
-    data = path.read_bytes()
-    assert len(data) == _STDERR_LOG_CAP
-    assert data.endswith(b"END")
-    assert worker._stderr_snippet().endswith("END")
-
-
-def test_cap_stderr_log_retries_a_short_write(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A short FileIO.write still leaves the last cap bytes.
-
-    What was wrong: the rewrite ignored write()'s count. os.write may
-    return early after the file was already truncated to empty.
-    """
-    from compute_service.worker_base import _STDERR_LOG_CAP
-
-    worker = _worker_without_spawn(monkeypatch)
-    path = tmp_path / "w.stderr"
-    path.write_bytes(b"x" * (_STDERR_LOG_CAP + 50) + b"END")
-    worker._stderr_path = str(path)
-    real_open = open
-
-    class _ShortOnce:
-        def __init__(self, raw: Any) -> None:
-            self._raw = raw
-            self._shorted = False
-
-        def __enter__(self) -> _ShortOnce:
-            return self
-
-        def __exit__(self, *exc: object) -> None:
-            self._raw.close()
-
-        def seek(self, *args: Any, **kwargs: Any) -> Any:
-            return self._raw.seek(*args, **kwargs)
-
-        def truncate(self, *args: Any, **kwargs: Any) -> Any:
-            return self._raw.truncate(*args, **kwargs)
-
-        def write(self, data: Any) -> int:
-            blob = bytes(data)
-            if not self._shorted and len(blob) > 1:
-                self._shorted = True
-                self._raw.write(blob[:1])
-                return 1
-            return int(self._raw.write(blob))
-
-    def _open(file: Any, mode: str = "r", *args: Any, **kwargs: Any) -> Any:
-        handle = real_open(file, mode, *args, **kwargs)
-        if "r+" in mode:
-            return _ShortOnce(handle)
-        return handle
-
-    monkeypatch.setattr("builtins.open", _open)
-    worker.cap_stderr_log()
-    data = path.read_bytes()
-    assert len(data) == _STDERR_LOG_CAP
-    assert data.endswith(b"END")
+        os.close(write_fd)
+        tail.join(timeout=2.0)
+    assert tail.is_alive is False
 
 
 @pytest.mark.parametrize(
@@ -1758,18 +2552,34 @@ def test_pipe_value_error_kills(monkeypatch: pytest.MonkeyPatch) -> None:
     assert worker.tasks_executed == 0
 
 
-def test_reap_timeout_caps_stderr(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A child still alive after the reap wait keeps its slot, and the log stays capped.
+def test_abandoned_diagnostic_does_not_join_the_drain(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A child that survives the reap is dropped. Its drain is not joined.
 
-    The idle reaper does not visit a slot that is neither idle nor leased.
+    Joining would wait for text that cannot arrive while the pipe is open.
+    The live tail is still readable.
     """
     import subprocess
 
-    from compute_service.worker_base import _STDERR_LOG_CAP
+    from plugin.framework import process_worker as worker_mod
+    from plugin.framework.process_worker import Child
+    from plugin.framework.worker_pool import StderrTail
+
+    enqueued: list[Child] = []
+    monkeypatch.setattr(worker_mod, "_enqueue_abandoned", lambda child: enqueued.append(child))
+
+    class _Blocked:
+        def join(self, timeout: float | None = None) -> None:
+            del timeout
+            raise AssertionError("abandoned diagnostic must not join the drain")
+
+        def is_alive(self) -> bool:
+            return True
 
     class _Stuck:
         def __init__(self) -> None:
             self.pid = 42
+            self.stdin = None
+            self.stdout = None
 
         def poll(self) -> None:
             return None
@@ -1781,44 +2591,52 @@ def test_reap_timeout_caps_stderr(monkeypatch: pytest.MonkeyPatch, tmp_path: Pat
             del timeout
             raise subprocess.TimeoutExpired(cmd="stuck", timeout=1)
 
+    tail = StderrTail()
+    tail._append("still-running\n")
+    tail.attach_thread(_Blocked())  # type: ignore[arg-type]
     worker = _worker_without_spawn(monkeypatch)
-    path = tmp_path / "stuck.stderr"
-    path.write_bytes(b"a" * (_STDERR_LOG_CAP + 8) + b"TAIL")
-    worker._stderr_path = str(path)
-    child = _Stuck()
-    worker.process = child  # type: ignore[assignment]
-    assert worker._reap_previous_process() is False
-    assert worker.process is child
-    data = path.read_bytes()
-    assert len(data) == _STDERR_LOG_CAP
-    assert data.endswith(b"TAIL")
+    child = Child(_Stuck(), tail, worker_name=worker.worker_name, worker_id=worker.worker_id)
+    worker.child = child
+    assert worker.kill() is True
+    assert worker.child is None
+    assert enqueued == [child]
+    assert "still-running" in child.diagnostic_tail()
 
 
-def test_idle_scan_caps_stderr_without_evicting(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """An idle-reaper scan caps a live child's log before idle TTL elapses."""
+def test_idle_scan_before_ttl_does_not_kill(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An idle-reaper tick before the TTL leaves the live child in idle."""
     import time
 
-    from compute_service.worker_base import BaseProcessPool, _STDERR_LOG_CAP
+    from compute_service.worker_base import BaseProcessPool
 
     worker = _worker_without_spawn(monkeypatch)
 
     class _Live:
+        def __init__(self) -> None:
+            self.kills = 0
+            self.stdin = None
+            self.stdout = None
+
         def poll(self) -> None:
             return None
 
-    worker.process = _Live()  # type: ignore[assignment]
-    path = tmp_path / "idle.stderr"
-    path.write_bytes(b"b" * (_STDERR_LOG_CAP + 4) + b"END")
-    worker._stderr_path = str(path)
+        def kill(self) -> None:
+            self.kills += 1
+
+        def wait(self, timeout: float | None = None) -> int:
+            del timeout
+            return 0
+
+    live = _Live()
+    worker.process = live  # type: ignore[assignment]
     pool = BaseProcessPool(script_path="unused.py", num_workers=0, idle_worker_ttl_sec=3600.0)
     try:
         with pool._cond:
             pool._idle[worker] = time.monotonic()  # type: ignore[index]
         pool._evict_idle_workers()
-        data = path.read_bytes()
-        assert len(data) == _STDERR_LOG_CAP
-        assert data.endswith(b"END")
+        assert live.kills == 0
         assert worker in pool._idle
+        assert worker.is_alive()
     finally:
         pool.shutdown()
 
@@ -1861,22 +2679,23 @@ def test_usable_budget_truth_table(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_timeout_message_keeps_fractional_seconds(monkeypatch: pytest.MonkeyPatch) -> None:
     """A 1.9s budget is not reported as 1 second. Whole seconds stay integers."""
-    from compute_service.worker_base import _Deadline
+    from compute_service.worker_base import Deadline
 
     worker = _worker_without_spawn(monkeypatch)
-    fractional = worker._timeout_message(_Deadline(1.9))
+    fractional = worker._timeout_message(Deadline(1.9))
     assert "1.9" in fractional
     assert "1 seconds" not in fractional
-    assert worker._timeout_message(_Deadline(1.0)) == "Execution exceeded maximum timeout of 1 second."
-    assert worker._timeout_message(_Deadline(2.0)) == "Execution exceeded maximum timeout of 2 seconds."
+    assert worker._timeout_message(Deadline(1.0)) == "Execution exceeded maximum timeout of 1 second."
+    assert worker._timeout_message(Deadline(2.0)) == "Execution exceeded maximum timeout of 2 seconds."
 
 
-def test_is_alive_snapshots_process(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A second read of process must not run. kill() clears it between the two.
+def test_is_alive_snapshots_the_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A second read of the child must not run. kill() clears it between the two.
 
-    What was wrong: is_alive checked self.process, then called poll on a
+    What was wrong: is_alive loaded the process, then called poll on a
     second load. Shutdown set that to None, and the write path reported
-    AttributeError as REQUEST_NOT_SERIALIZABLE.
+    AttributeError as REQUEST_NOT_SERIALIZABLE. The child pointer is the
+    load that has to happen once.
     """
     worker = _worker_without_spawn(monkeypatch)
 
@@ -1889,7 +2708,7 @@ def test_is_alive_snapshots_process(monkeypatch: pytest.MonkeyPatch) -> None:
 
     class _SecondReadIsNone(type(worker)):
         def __getattribute__(self, name: str) -> object:
-            if name == "process":
+            if name == "child":
                 loads["n"] += 1
                 if loads["n"] > 1:
                     return None
@@ -1910,57 +2729,48 @@ class _PolledDead:
         return 1
 
 
-def _dead_slot_with_stderr(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """A dead published child and the stderr file poll() used to leave behind."""
+def _dead_slot(monkeypatch: pytest.MonkeyPatch):
+    """A published child whose poll() has already reaped it."""
     worker = _worker_without_spawn(monkeypatch)
-    path = tmp_path / "idle.stderr"
-    path.write_bytes(b"crash tail")
     child = _PolledDead()
     worker.process = child  # type: ignore[assignment]
-    worker._stderr_path = str(path)
-    return worker, child, path
+    return worker, child
 
 
-def test_is_alive_unlinks_stderr_when_poll_reaps(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """An idle poll() drops the stderr file and leaves the dead Popen in place.
+def test_is_alive_leaves_a_reaped_child_in_place(monkeypatch: pytest.MonkeyPatch) -> None:
+    """poll() that has reaped the child does not clear the slot.
 
-    What was wrong: poll() reaped the zombie and did not unlink _stderr_path.
-    A slot that died idle and was never leased again kept the temp file until
-    the pool shut down. The process stays so a later kill still reports exit.
+    The session scan treats that poll as a dead kernel. is_alive only
+    reports it. A later kill still sees this process.
     """
-    worker, child, path = _dead_slot_with_stderr(monkeypatch, tmp_path)
+    worker, child = _dead_slot(monkeypatch)
     assert worker.is_alive() is False
-    assert not path.exists()
-    assert worker._stderr_path is None
     assert worker.process is child
 
 
-def test_is_alive_keeps_stderr_while_execute_holds_the_lock(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """A request that already holds self.lock still gets the crash tail.
+def test_is_alive_while_execute_holds_the_lock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A request that already holds self.lock can still call is_alive.
 
-    The IPC loop calls is_alive from execute. Unlinking there would empty
-    the snippet _fail_request reads before kill(). The lock is not
-    re-entrant, so this acquire must not block.
+    The IPC loop calls is_alive from execute. The lock is not re-entrant,
+    so this acquire must not block, and the dead child stays put.
     """
-    worker, child, path = _dead_slot_with_stderr(monkeypatch, tmp_path)
+    worker, child = _dead_slot(monkeypatch)
     worker.lock.acquire()
     try:
         assert worker.is_alive() is False
     finally:
         worker.lock.release()
-    assert path.read_bytes() == b"crash tail"
-    assert worker._stderr_path == str(path)
     assert worker.process is child
 
 
-def test_is_alive_does_not_wait_on_the_lifecycle_lock(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_is_alive_does_not_wait_on_the_lifecycle_lock(monkeypatch: pytest.MonkeyPatch) -> None:
     """poll() returns while another thread holds _lifecycle_lock.
 
-    Idle prune calls is_alive while holding the pool condition. kill() holds
-    the lifecycle lock across wait() and the exit callback takes that
-    condition. A blocking acquire here is the inverse order.
+    Idle prune calls is_alive while holding the pool condition. kill()
+    takes the lifecycle lock only to drop the pointer. A blocking acquire
+    here would invert that order.
     """
-    worker, _child, path = _dead_slot_with_stderr(monkeypatch, tmp_path)
+    worker, child = _dead_slot(monkeypatch)
     held = threading.Event()
     release = threading.Event()
 
@@ -1980,8 +2790,7 @@ def test_is_alive_does_not_wait_on_the_lifecycle_lock(monkeypatch: pytest.Monkey
     finally:
         release.set()
         holder.join(timeout=2)
-    assert path.read_bytes() == b"crash tail"
-    assert worker._stderr_path == str(path)
+    assert worker.process is child
     assert not holder.is_alive()
 
 
@@ -2046,11 +2855,11 @@ def test_deadline_budget_table(
     left_sec: float,
 ) -> None:
     """usable() is the only start gate. left() is the true remainder."""
-    from compute_service.worker_base import _Deadline
+    from compute_service.worker_base import Deadline
 
     now = 1_000.0
     monkeypatch.setattr("plugin.framework.process_worker.time.monotonic", lambda: now)
-    clock = _Deadline.__new__(_Deadline)
+    clock = Deadline.__new__(Deadline)
     clock.budget_sec = budget
     clock._end = now + remaining
     assert clock.usable() == usable_sec
@@ -2060,7 +2869,6 @@ def test_deadline_budget_table(
 def test_formula_worker_script_handshake() -> None:
     """The production formula script completes the ready handshake and one cell."""
     import json
-    from pathlib import Path
 
     from compute_service.worker_base import BaseProcessWorker
 
@@ -2077,154 +2885,74 @@ def test_formula_worker_script_handshake() -> None:
         worker.kill()
 
 
-def test_retry_reap_reports_exit_when_the_child_dies(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A second reap reports the pid the first wait could not.
+def test_stuck_kill_drops_the_slot_after_one_signal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One timed-out SIGKILL drops the slot. The survivor is not killed again here.
 
-    What was wrong: one timed-out SIGKILL left the slot alive, and nothing
-    called kill() again, so on_process_exit never ran for that pid.
+    The module reaper keeps waiting. The slot does not.
     """
     import subprocess
 
-    class _DiesOnSecond:
+    from plugin.framework import process_worker as worker_mod
+
+    enqueued: list[object] = []
+    monkeypatch.setattr(worker_mod, "_enqueue_abandoned", lambda child: enqueued.append(child))
+
+    class _Stuck:
         def __init__(self) -> None:
             self.pid = 42
             self.kills = 0
-            self.returncode: int | None = None
+            self.stdin = None
+            self.stdout = None
 
-        def poll(self) -> int | None:
-            return self.returncode
+        def poll(self) -> None:
+            return None
 
         def kill(self) -> None:
             self.kills += 1
 
         def wait(self, timeout: float | None = None) -> int:
             del timeout
-            if self.kills < 2:
-                raise subprocess.TimeoutExpired(cmd="stuck", timeout=1)
-            self.returncode = -9
-            return -9
+            raise subprocess.TimeoutExpired(cmd="stuck", timeout=1)
 
     worker = _worker_without_spawn(monkeypatch)
-    child = _DiesOnSecond()
-    exited: list[int] = []
-    worker.on_process_exit = lambda _slot, pid: exited.append(pid)
+    child = _Stuck()
     worker.process = child  # type: ignore[assignment]
-    assert worker.kill() is None
-    assert worker.reap_incomplete()
-    assert exited == []
-    worker.retry_reap(threading.Event())
-    assert child.kills == 2
-    assert exited == [42]
+    assert worker.kill() is True
+    assert child.kills == 1
     assert worker.process is None
-    assert not worker.reap_incomplete()
+    assert len(enqueued) == 1
 
 
-def test_exit_callback_cannot_reenter(monkeypatch: pytest.MonkeyPatch) -> None:
-    """kill, respawn, and request_shutdown raise instead of taking the lifecycle lock.
+def test_release_does_not_idle_a_dead_worker() -> None:
+    """A worker that is not alive after release is not idled, and can be cold-claimed.
 
-    The callback already holds that lock. Acquiring it again on the same
-    thread deadlocks; the ident check runs first.
+    What was wrong: release idled any worker that still answered is_alive.
+    A child kill could not reap was handed to the next lease. kill() now
+    drops that child, so the slot is dead and the next lease respawns it.
     """
-    worker = _worker_without_spawn(monkeypatch)
-
-    class _Exited:
-        def __init__(self) -> None:
-            self.pid = 7
-            self.returncode: int | None = None
-
-        def poll(self) -> int | None:
-            return self.returncode
-
-        def kill(self) -> None:
-            return None
-
-        def wait(self, timeout: float | None = None) -> int:
-            del timeout
-            self.returncode = 0
-            return 0
-
-    seen: list[bool] = []
-
-    def _on_exit(slot: object, pid: int) -> None:
-        del pid
-        assert slot is worker
-        # The callback holds _lifecycle_lock. Reading the flag used to
-        # acquire it again and deadlock. kill, respawn, and request_shutdown
-        # still refuse that re-entry.
-        seen.append(worker.is_shutting_down())
-        with pytest.raises(RuntimeError, match="re-entered"):
-            worker.kill()
-        with pytest.raises(RuntimeError, match="re-entered"):
-            worker.request_shutdown()
-        with pytest.raises(RuntimeError, match="re-entered"):
-            worker.respawn()
-
-    worker.on_process_exit = _on_exit
-    worker.process = _Exited()  # type: ignore[assignment]
-    worker.kill()
-    assert seen == [False]
-    assert worker.process is None
-    assert not worker.is_shutting_down()
-
-
-def test_release_does_not_idle_unreaped_worker(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A child that survived kill stays out of idle until the retry reap.
-
-    What was wrong: release idled any live worker. A timeout whose SIGKILL
-    had not landed was handed to the next lease on a desynced pipe, and a
-    recycle or idle eviction dropped the slot with no second kill.
-    """
-    deferred: list[object] = []
-
-    def _defer(func: object, *_args: object, **_kwargs: object) -> None:
-        deferred.append(func)
-
-    monkeypatch.setattr("compute_service.worker_base.run_in_background", _defer)
     pool = BaseProcessPool(script_path="unused.py", num_workers=0, idle_worker_ttl_sec=None)
 
-    class _SurvivesKill:
+    class _Dead:
         def __init__(self) -> None:
             self.tasks_executed = 0
             self.worker_id = 3
-            self.killed = 0
-            self._alive = True
-            self._incomplete = False
 
         def is_alive(self) -> bool:
-            return self._alive
+            return False
 
         def request_shutdown(self) -> None:
             return None
 
-        def kill(self) -> None:
-            self.killed += 1
-            self._incomplete = True
+        def kill(self) -> bool:
+            return True
 
-        def reap_incomplete(self) -> bool:
-            return self._incomplete
-
-        def retry_reap(self, stop: threading.Event) -> None:
-            del stop
-            self.killed += 1
-            self._alive = False
-            self._incomplete = False
-
-    worker = _SurvivesKill()
+    worker = _Dead()
     try:
-        worker.kill()
         pool.workers.append(worker)  # type: ignore[arg-type]
         pool._leased.add(worker)  # type: ignore[arg-type]
         pool.release_worker(worker)  # type: ignore[arg-type]
         assert worker not in pool._idle
         assert worker not in pool._leased
-        assert worker in pool._unreaped
-        assert pool.lease_any(timeout_sec=0) is None
-        assert len(deferred) == 1
-        watch = deferred[0]
-        assert callable(watch)
-        watch()
-        assert worker not in pool._unreaped
-        assert not worker.reap_incomplete()
         assert pool.lease_any(timeout_sec=0) is worker
     finally:
         pool.shutdown()
@@ -2253,6 +2981,30 @@ def test_unpicklable_payload_does_not_spawn(monkeypatch: pytest.MonkeyPatch) -> 
     res = worker.execute({"code": "result = 1"}, timeout_sec=5)
     assert res.get("code") == "REQUEST_NOT_SERIALIZABLE"
     assert spawned == []
+
+
+def test_install_image_pkgs_adds_sibling_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pkgs directory next to the service is inserted once.
+
+    The image publishes wheels through PYTHONPATH, and the worker scrub
+    removes that variable. The directory itself has to be added by path.
+    A missing directory leaves sys.path alone.
+    """
+    import sys
+
+    from compute_service.worker_base import install_image_pkgs
+
+    pkgs = tmp_path / "pkgs"
+    pkgs.mkdir()
+    monkeypatch.setattr(sys, "path", ["/usr/lib/python"])
+    install_image_pkgs(str(tmp_path))
+    assert sys.path[0] == str(pkgs)
+    install_image_pkgs(str(tmp_path))
+    assert sys.path.count(str(pkgs)) == 1
+
+    monkeypatch.setattr(sys, "path", ["/usr/lib/python"])
+    install_image_pkgs(str(tmp_path / "no-such-root"))
+    assert sys.path == ["/usr/lib/python"]
 
 
 

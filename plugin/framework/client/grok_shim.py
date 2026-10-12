@@ -6,30 +6,33 @@
 
 from __future__ import annotations
 
-import json
 from typing import Any
 
-from plugin.framework.url_utils import get_url_path_and_query
-from .base_provider_shim import canonical_aspect_ratio, canonical_resolution, coerce_image_data_url
-from .openai_shim import OpenAIShim
+from .base_provider_shim import BaseProviderShim, canonical_aspect_ratio, canonical_resolution, coerce_image_data_url
 
 
-class GrokShim(OpenAIShim):
-    """Shim for xAI Grok API (OpenAI-compatible with Aurora image generation)."""
+class GrokShim(BaseProviderShim):
+    """Shim for xAI Grok API (OpenAI-compatible chat, Imagine image generation)."""
 
     def build_image_request(self, prompt: str, model: str | None, width: int, height: int, steps: int | None = None, source_image: str | None = None, image_url: str | None = None) -> tuple[str, str, bytes, dict[str, str]]:
-        endpoint = self.client._endpoint()
-        api_path = self.client._api_path()
         ref = coerce_image_data_url(image_url, source_image)
         # Create stays on /images/generations. xAI edit is a different JSON
         # route (not OpenAI multipart): POST /v1/images/edits with image.url.
         # https://docs.x.ai/developers/model-capabilities/images/editing
-        url = endpoint + api_path + ("/images/edits" if ref else "/images/generations")
+        url = self._url("/images/edits" if ref else "/images/generations")
 
-        data: dict[str, Any] = {"prompt": prompt, "n": 1, "response_format": "b64_json", "model": model or "aurora"}
+        # ``aurora`` is not an xAI model id. An omitted image model used to send
+        # that name and 400. grok-imagine-image is the documented 1.0 model.
+        # A caller-supplied id, including a saved ``aurora``, is sent unchanged.
+        # https://docs.x.ai/docs/models/grok-imagine-image
+        data: dict[str, Any] = {"prompt": prompt, "n": 1, "response_format": "b64_json", "model": str(model or "").strip() or "grok-imagine-image"}
         # xAI documents aspect_ratio (default auto) and resolution (1k/2k), not
         # OpenAI size. Write width and height as those fields, or Square / 2048
         # in the sidebar never reach the model.
+        # response_format stays b64_json: the documented default is a URL, and
+        # this client reads b64_json. steps is not an xAI Images field, so a
+        # Settings steps value is not sent.
+        # https://docs.x.ai/developers/rest-api-reference/inference/images
         # https://docs.x.ai/developers/model-capabilities/images/generation
         ratio = canonical_aspect_ratio(width, height)
         if ratio:
@@ -37,10 +40,7 @@ class GrokShim(OpenAIShim):
         res = canonical_resolution(width, height, family="grok")
         if res:
             data["resolution"] = res
-        if steps:
-            data["steps"] = steps
         if ref:
             data["image"] = {"url": ref, "type": "image_url"}
 
-        path = get_url_path_and_query(url)
-        return "POST", path, json.dumps(data).encode("utf-8"), self.client._headers()
+        return self._post(url, data)

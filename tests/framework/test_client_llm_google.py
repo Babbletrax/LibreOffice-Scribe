@@ -5,9 +5,10 @@
 import json
 import pytest
 from unittest.mock import MagicMock
+from plugin.framework.errors import NetworkError
 from plugin.framework.client.llm_client import LlmClient
+from plugin.framework.client.base_provider_shim import BaseProviderShim
 from plugin.framework.client.google_shim import GoogleShim
-from plugin.framework.client.openai_shim import OpenAIShim
 from plugin.tests.testing_utils import MockContext
 
 @pytest.fixture
@@ -16,7 +17,7 @@ def mock_ctx():
 
 
 def test_google_get_shim_returns_google_shim(mock_ctx):
-    """Verify that LlmClient with Google config resolves to GoogleShim (subclass of OpenAIShim)."""
+    """Verify that LlmClient with Google config resolves to GoogleShim (subclass of BaseProviderShim)."""
     config = {
         "endpoint": "https://generativelanguage.googleapis.com",
         "api_key": "test-key",
@@ -25,11 +26,11 @@ def test_google_get_shim_returns_google_shim(mock_ctx):
     client = LlmClient(config, mock_ctx)
     shim = client._get_shim()
     assert isinstance(shim, GoogleShim)
-    assert isinstance(shim, OpenAIShim)
+    assert isinstance(shim, BaseProviderShim)
 
 
 def test_google_chat_request_openai_format(mock_ctx):
-    """Verify that GoogleShim inherits OpenAIShim chat request building with /v1beta/openai/chat/completions."""
+    """Verify that GoogleShim uses the base chat builder at /v1beta/openai/chat/completions."""
     config = {
         "endpoint": "https://generativelanguage.googleapis.com",
         "api_key": "test-gemini-key",
@@ -106,16 +107,18 @@ def test_google_image_completion(mock_ctx):
     assert "responseModalities" in data["generationConfig"]
     assert "IMAGE" in data["generationConfig"]["responseModalities"]
     assert data["generationConfig"]["imageConfig"]["aspectRatio"] == "1:1"
-    assert data["generationConfig"]["imageConfig"]["imageSize"] == "1K"
+    # gemini-2.5-flash-image documents aspectRatio only. imageSize used to be
+    # sent anyway, including "512", and a Google 400 is not retried.
+    assert "imageSize" not in data["generationConfig"]["imageConfig"]
     assert data["contents"][0]["parts"] == [{"text": "Generate an image"}]
 
     _, _, body_wide, _ = shim.build_image_request("Generate an image", model="gemini-2.5-flash-image", width=1792, height=1024)
     wide_cfg = json.loads(body_wide.decode("utf-8"))["generationConfig"]["imageConfig"]
     assert wide_cfg["aspectRatio"] == "16:9"
-    assert wide_cfg["imageSize"] == "2K"
+    assert "imageSize" not in wide_cfg
 
     _, _, body_small, _ = shim.build_image_request("Generate an image", model="gemini-2.5-flash-image", width=512, height=512)
-    assert json.loads(body_small.decode("utf-8"))["generationConfig"]["imageConfig"]["imageSize"] == "512"
+    assert "imageSize" not in json.loads(body_small.decode("utf-8"))["generationConfig"]["imageConfig"]
 
 
 def test_google_gemini_image_edit_sends_inline_data(mock_ctx):
@@ -159,6 +162,35 @@ def test_google_imagen_rejects_edit(mock_ctx):
         )
 
 
+def test_google_model_id_prefix_case_and_image_size(mock_ctx):
+    """Native models/ names, mixed-case Imagen, and Gemini 3 imageSize."""
+    client = LlmClient({"endpoint": "https://generativelanguage.googleapis.com", "api_key": "test-key"}, mock_ctx)
+    shim = client._get_shim()
+
+    _, path, body, _ = shim.build_image_request("Generate an image", model="models/gemini-2.5-flash-image", width=1024, height=1024)
+    assert path == "/v1beta/models/gemini-2.5-flash-image:generateContent"
+    assert "imageSize" not in json.loads(body.decode("utf-8"))["generationConfig"]["imageConfig"]
+
+    _, path, body, _ = shim.build_image_request("Draw a mural", model="models/Imagen-4.0-generate-001", width=1024, height=1024)
+    assert path == "/v1beta/models/imagen-4.0-generate-001:predict"
+    assert json.loads(body.decode("utf-8"))["parameters"]["imageSize"] == "1K"
+
+    with pytest.raises(ValueError, match="Imagen models cannot edit"):
+        shim.build_image_request("make it dusk", model="Imagen-4.0-generate-001", width=1024, height=1024, source_image="abc123")
+
+    _, _, body, _ = shim.build_image_request("Wide", model="gemini-3-pro-image", width=1792, height=1024)
+    assert json.loads(body.decode("utf-8"))["generationConfig"]["imageConfig"]["imageSize"] == "2K"
+
+    _, _, body, _ = shim.build_image_request("Small", model="gemini-3.1-flash-image", width=512, height=512)
+    assert json.loads(body.decode("utf-8"))["generationConfig"]["imageConfig"]["imageSize"] == "512"
+
+    _, _, body, _ = shim.build_image_request("Small", model="gemini-nano-banana-2.1", width=512, height=512)
+    assert json.loads(body.decode("utf-8"))["generationConfig"]["imageConfig"]["imageSize"] == "1K"
+
+    _, _, body, _ = shim.build_image_request("Huge", model="gemini-3.1-flash-lite-image", width=2048, height=2048)
+    assert json.loads(body.decode("utf-8"))["generationConfig"]["imageConfig"]["imageSize"] == "1K"
+
+
 def test_google_parse_image_responses(mock_ctx):
     """Verify parsing both Imagen predictions and Gemini candidates inlineData."""
     client = LlmClient({"endpoint": "https://generativelanguage.googleapis.com"}, mock_ctx)
@@ -175,9 +207,15 @@ def test_google_parse_image_responses(mock_ctx):
         }]
     }
     assert shim.parse_image_responses(data_multimodal) == ["img_b64_2"]
+    assert shim.parse_image_responses(["nope"]) == []
 
     # Safety blocks send content: null. That used to raise AttributeError.
     assert shim.parse_image_responses({"candidates": [{"content": None}]}) == []
+
+    # "error": null is not a failure. The key check raised NetworkError("None").
+    assert shim.parse_image_responses({"error": None, "predictions": [{"bytesBase64Encoded": "img"}]}) == ["img"]
+    with pytest.raises(NetworkError, match="bad key"):
+        shim.parse_image_responses({"error": {"message": "bad key"}})
 
 
 def test_google_openai_auth_resolution():

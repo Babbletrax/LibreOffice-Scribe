@@ -197,7 +197,7 @@ def test_headers_none_api_key_matches_empty_string():
 
 @pytest.mark.parametrize(
     "model",
-    ["o3", "o1-preview", "o4-mini-2025-04-16", "gpt-5-mini", "gpt-5.1", "openai/o3", "ft:gpt-5-mini:org:name:id"],
+    ["o3", "o1-preview", "o4-mini-2025-04-16", "gpt-5-mini", "gpt-5.1", "gpt-5-codex", "openai/o3", "ft:gpt-5-mini:org:name:id", "ft:gpt-5-mini:org/team:name:id", "openai/ft:gpt-5-mini:org:name:id"],
 )
 def test_openai_reasoning_models_send_max_completion_tokens(model):
     """o-series and gpt-5 on api.openai.com reject max_tokens and non-default temperature."""
@@ -210,6 +210,23 @@ def test_openai_reasoning_models_send_max_completion_tokens(model):
     assert data["max_completion_tokens"] == 50
     assert "max_tokens" not in data
     assert "temperature" not in data
+
+
+@pytest.mark.parametrize(
+    "model",
+    ["gpt-5-chat-latest", "openai/gpt-5-chat-latest", "ft:gpt-5-chat-latest:org:name:id", "gpt-5.1-chat-latest", "gpt-5.2-chat-latest", "gpt-5.3-chat-latest", "openai/gpt-5.1-chat-latest"],
+)
+def test_gpt5_chat_latest_keeps_max_tokens_and_temperature(model):
+    """ChatGPT gpt-5* snapshots accept max_tokens and temperature. startswith('gpt-5-chat') missed gpt-5.1-chat-latest."""
+    client = LlmClient(
+        {"endpoint": "https://api.openai.com", "api_key": "sk-test", "model": model, "temperature": 0.2},
+        MockContext(),
+    )
+    _method, _path, body, _headers = client.make_chat_request([{"role": "user", "content": "hi"}], max_tokens=50)
+    data = json.loads(body.decode("utf-8"))
+    assert data["max_tokens"] == 50
+    assert "max_completion_tokens" not in data
+    assert data["temperature"] == pytest.approx(0.2)
 
 
 def test_openai_reasoning_model_keeps_default_temperature():
@@ -1072,15 +1089,23 @@ def test_grok_shim(client):
         mock_auth.return_value = {"provider": "xai"}
         mock_sync.return_value = {"data": []}
 
-        # Test image request for Grok (should omit size)
-        client.image_completion("Draw a cat", model="aurora", width=1024, height=1024)
+        # An omitted model used to send "aurora", which is not an xAI model id.
+        client.image_completion("Draw a cat", model=None, width=1024, height=1024)
+        _path, body = _posted_json(mock_sync)
+        assert body["model"] == "grok-imagine-image"
+
+        # Test image request for Grok (should omit size and steps). A saved
+        # aurora id is still sent as the caller wrote it.
+        client.image_completion("Draw a cat", model="aurora", width=1024, height=1024, steps=30)
 
         path, body = _posted_json(mock_sync)
         assert body["prompt"] == "Draw a cat"
         assert body["model"] == "aurora"
         assert body["aspect_ratio"] == "1:1"
         assert body["resolution"] == "1k"
+        assert body["response_format"] == "b64_json"
         assert "size" not in body
+        assert "steps" not in body
         assert "quality" not in body
         assert "image" not in body
         assert str(path).endswith("/images/generations")
@@ -1142,6 +1167,11 @@ def test_ollama_shim_image(client):
         assert shim.parse_image_responses({"image": "def"}) == ["def"]
         # Fallback to OpenAI style
         assert shim.parse_image_responses({"data": [{"b64_json": "ghi"}]}) == ["ghi"]
+        # A non-dict body, or a non-string list entry, must not reach the decoder.
+        assert shim.parse_image_responses(["nope"]) == []
+        assert shim.parse_image_responses({"images": ["abc", 1, ""]}) == ["abc"]
+        with pytest.raises(ValueError, match="http"):
+            shim.build_image_request("edit", "flux", 512, 512, image_url="https://example.com/a.png")
 
 
 def test_image_completion_passes_client_timeout(client):
@@ -1342,31 +1372,38 @@ def test_is_image_only_model(client):
 
 
 def test_anthropic_shim(client):
-    # Clear the default model so we see the shim's default
-    client.config["model"] = ""
-    
+    client.config["model"] = "claude-sonnet-4-5"
+
     with patch("plugin.framework.client.llm_client.LlmClient._resolve_auth") as mock_auth:
         mock_auth.return_value = {"provider": "anthropic"}
-        
+
         messages = [
             {"role": "system", "content": "You are a helpful assistant."},
             {"role": "user", "content": "Hello!"}
         ]
-        
+
         method, path, body, headers = client.make_chat_request(messages, max_tokens=100)
-        
+
         assert method == "POST"
         assert "/v1/messages" in path
-        
+
         data = json.loads(body)
-        assert data["model"] == "claude-3-5-sonnet-20241022"
+        assert data["model"] == "claude-sonnet-4-5"
         assert data["system"].endswith("You are a helpful assistant.")
         assert data["messages"] == [{"role": "user", "content": "Hello!"}]
         assert data["max_tokens"] == 100
 
 
-def test_anthropic_joins_system_messages_and_maps_reasoning_effort(client):
+def test_anthropic_blank_model_raises(client):
     client.config["model"] = ""
+    with patch("plugin.framework.client.llm_client.LlmClient._resolve_auth") as mock_auth:
+        mock_auth.return_value = {"provider": "anthropic"}
+        with pytest.raises(NetworkError, match="model is not set"):
+            client.make_chat_request([{"role": "user", "content": "Hi"}], max_tokens=10)
+
+
+def test_anthropic_joins_system_messages_and_maps_reasoning_effort(client):
+    client.config["model"] = "claude-sonnet-4-5"
     with patch("plugin.framework.client.llm_client.LlmClient._resolve_auth") as mock_auth:
         mock_auth.return_value = {"provider": "anthropic"}
         messages = [
@@ -1600,6 +1637,41 @@ def test_anthropic_stream_loop_keeps_tool_events(client):
     assert "Hi" in result["content"]
     assert result["tool_calls"][0]["function"]["name"] == "do_work"
     assert result["finish_reason"] == "tool_calls"
+
+
+def test_anthropic_stream_usage_replaces_cumulative_output_tokens(client):
+    """message_start output_tokens=1 plus message_delta output_tokens=15 stays 15, not 16."""
+    payloads = [
+        '{"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":25,"output_tokens":1}}}',
+        '{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hi"}}',
+        '{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":15}}',
+        '{"type":"message_stop"}',
+        "[DONE]",
+    ]
+
+    def iterate(_response):
+        yield from payloads
+
+    with (
+        patch("plugin.framework.client.llm_client.LlmClient._resolve_auth", return_value={"provider": "anthropic"}),
+        patch("http.client.HTTPSConnection") as mock_https,
+        patch("plugin.framework.client.llm_client.iterate_sse", side_effect=iterate),
+        patch("plugin.framework.client.http_transport.get_verified_ssl_context"),
+    ):
+        mock_conn = MagicMock()
+        mock_https.return_value = mock_conn
+        mock_response = MagicMock()
+        mock_response.status = 200
+        mock_conn.getresponse.return_value = mock_response
+        result = client.stream_request_with_tools(
+            messages=[{"role": "user", "content": "Hi"}],
+            max_tokens=10,
+        )
+    usage = result["usage"]
+    assert usage["input_tokens"] == 25
+    assert usage["prompt_tokens"] == 25
+    assert usage["output_tokens"] == 15
+    assert usage["completion_tokens"] == 15
 
 
 def test_make_chat_request_coalesces_mixed_system_messages(client):

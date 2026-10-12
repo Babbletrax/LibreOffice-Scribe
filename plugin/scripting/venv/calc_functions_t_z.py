@@ -9,10 +9,11 @@ Semantics mirror the inline helpers formerly pasted by spreadsheet import transl
 
 from __future__ import annotations
 
+import calendar
 import datetime as dt
 import math
 import re
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
 from typing import Any, cast
 
 import numpy as np
@@ -21,6 +22,7 @@ from .calc_functions_util import (
     _build_holiday_set,
     _clean_paired_arrays,
     _collect_a_values,
+    _days360,
     _extract_numeric_array,
     _find_match_index,
     _find_text_cut,
@@ -79,9 +81,12 @@ def t(value: Any) -> str:
 def tdist(x: Any, df: Any, tails: Any) -> float:
     try:
         val = float(x)
-        d = float(df)
-        t = int(float(tails))
-        if d < 1 or t not in (1, 2) or val < 0:
+        # ScTDist floors df (approxFloor) before the < 1 check. 2.7 was
+        # passed through to the t distribution.
+        d = math.floor(float(df))
+        # ``t`` is the public T() function. A local with that name would hide it.
+        tail_count = int(float(tails))
+        if d < 1 or tail_count not in (1, 2) or val < 0:
             return float("nan")
         st = _scipy_stats()
         if st is None:
@@ -90,7 +95,7 @@ def tdist(x: Any, df: Any, tails: Any) -> float:
         # tdist in Calc/Excel returns 1 - cdf(val) for 1 tail
         # and 2 * (1 - cdf(val)) for 2 tails
         p = st.t.sf(val, d)
-        return float(p if t == 1 else 2 * p)
+        return float(p if tail_count == 1 else 2 * p)
     except (ValueError, TypeError, OverflowError):
         # int(float("inf")) on tails raises OverflowError. The handler only
         # caught ValueError and TypeError, so TDIST(x, df, inf) raised instead
@@ -133,12 +138,24 @@ _DATE_FORMATS: dict[str, str] = {
 }
 
 
-def _format_number_pattern(value: float, places: int, grouped: bool) -> str:
-    """Round half away from zero and apply numeric TEXT specs."""
+def _format_number_pattern(value: float, places: int, grouped: bool, *, scale: int = 1) -> str:
+    """Round half away from zero and apply numeric TEXT specs.
+
+    ``scale`` is applied in Decimal. Multiplying the float first turned
+    0.285 into 28.499999999999996, so TEXT(0.285,"0%") was "28%" instead
+    of the "29%" Calc's percent format produces.
+    """
     if not math.isfinite(value):
         return str(value)
+    dec = Decimal(str(value))
+    if scale != 1:
+        dec *= scale
     quant = Decimal(1).scaleb(-places)
-    rounded = Decimal(str(value)).quantize(quant, rounding=ROUND_HALF_UP)
+    # Default precision is 28. quantize of 1e30 raised InvalidOperation,
+    # and TEXT then returned the scientific fallback "1e+30".
+    with localcontext() as ctx:
+        ctx.prec = max(28, abs(dec.adjusted()) + places + 2)
+        rounded = dec.quantize(quant, rounding=ROUND_HALF_UP)
     if places == 0:
         whole = int(rounded)
         # int(Decimal("-0")) is 0; Calc shows 0, not "-0".
@@ -165,14 +182,23 @@ def text(val: Any, fmt: Any) -> str:
     if fmt_str in _PERCENT_FORMATS:
         places = _PERCENT_FORMATS[fmt_str]
         try:
-            formatted = _format_number_pattern(float(val) * 100, places, False)
+            number = float(val)
+            # A non-finite value is not a percent. "inf%" would look formatted.
+            if not math.isfinite(number):
+                return str(number)
+            formatted = _format_number_pattern(number, places, False, scale=100)
             return f"{formatted}%"
         except (ValueError, TypeError, OverflowError, InvalidOperation):
             return str(val)
     date_fmt = _DATE_FORMATS.get(fmt_str.lower())
     if date_fmt is not None:
+        # _serial_to_date is the same +693594 ordinal. A bad serial stays
+        # the original text, as the hand-rolled fromordinal path did.
+        day = _serial_to_date(val)
+        if day is None:
+            return str(val)
         try:
-            return dt.date.fromordinal(int(float(val)) + 693594).strftime(date_fmt)
+            return day.strftime(date_fmt)
         except (ValueError, TypeError, OverflowError):
             return str(val)
     return str(val)
@@ -188,13 +214,20 @@ fmt = text
 
 def textbefore(text: Any, delimiter: Any, instance_num: Any = 1, match_mode: Any = 0, match_end: Any = 0, if_not_found: Any = float("nan")) -> str | float:
     try:
-        s, _delim, _inst, idx, match_end_miss = _find_text_cut(
+        # bool("0") is true, so a zero flag invented a virtual delimiter.
+        # ScTextBeforeOrAfter uses GetBool(), which is GetDouble() != 0.
+        use_end = _as_nonzero(match_end)
+        s, _delim, inst, idx, match_end_miss = _find_text_cut(
             text, delimiter, instance_num, match_mode, after=False
         )
         if idx is not None:
             return s[:idx]
-        if match_end and match_end_miss:
-            return s
+        if use_end and match_end_miss:
+            # ScTextBeforeOrAfter inserts the virtual delimiter at 0
+            # when the instance is negative, and at the end otherwise.
+            # Text before offset 0 is empty. This branch used to return
+            # the whole string for both signs.
+            return "" if inst < 0 else s
         return if_not_found
     except (ValueError, TypeError, OverflowError):
         # _find_text_cut does int(float(instance_num)). An infinite instance
@@ -203,15 +236,62 @@ def textbefore(text: Any, delimiter: Any, instance_num: Any = 1, match_mode: Any
         return float("nan")
 
 
+def _textjoin_piece(val: Any) -> str:
+    """Cell text for TEXTJOIN.
+
+    ScTextJoin_MS (interpr8.cxx) formats numbers with the general format
+    (GetString / NFGetInputLineString). str(1.0) is "1.0", so 1, 2, 3
+    joined as "1.0,2.0,3.0". A whole number prints without the trailing
+    ".0". Bool stays "True". header_label would also strip the text.
+    """
+    if isinstance(val, (bool, np.bool_)):
+        return str(bool(val))
+    if isinstance(val, (int, np.integer)) and not isinstance(val, bool):
+        try:
+            return str(int(val))
+        except (ValueError, TypeError, OverflowError):
+            return str(val)
+    if isinstance(val, (float, np.floating)):
+        try:
+            number = float(val)
+        except (ValueError, TypeError, OverflowError):
+            return str(val)
+        if math.isfinite(number) and number.is_integer():
+            return str(int(number))
+        return str(number)
+    return str(val)
+
+
+def _as_nonzero(val: Any) -> bool:
+    """Calc ``GetDouble() != 0`` for a flag.
+
+    ``bool("0")`` and ``bool("FALSE")`` are true. GetDouble of ``"0"`` is
+    0, and a non-numeric string is ``#VALUE!``. The words TRUE and FALSE
+    are not booleans here; that map is LINEST's ``_as_bool_flag``. A blank
+    cell is 0.
+    """
+    if val is None or val == "":
+        return False
+    return bool(float(val))
+
+
 def textjoin(delim: Any, ignore_empty: Any, *args: Any) -> str:
+    # bool("0") and bool("FALSE") are true, so a zero or text flag skipped
+    # empty cells. ScTextJoin_MS uses GetDouble() != 0.
+    try:
+        skip_empty = _as_nonzero(ignore_empty)
+    except (ValueError, TypeError, OverflowError):
+        return "#VALUE!"
     parts = []
     for arg in args:
-        for val in np.asarray(arg).ravel():
+        # dtype=object. A mixed list would otherwise become strings, and the
+        # general-format spelling above would never see the number.
+        for val in np.asarray(arg, dtype=object).ravel():
             if is_missing_value(val):
-                if not ignore_empty:
+                if not skip_empty:
                     parts.append("")
             else:
-                parts.append(str(val))
+                parts.append(_textjoin_piece(val))
     return str(delim).join(parts)
 
 
@@ -229,13 +309,16 @@ def textsplit(text: Any, col_delimiter: Any, row_delimiter: Any = None, ignore_e
     try:
         s = str(text)
         ci = (match_mode == 1)
+        # bool("0") is true, so a zero flag dropped empty pieces.
+        # ScTextSplit uses GetBool(), which is GetDouble() != 0.
+        skip_empty = _as_nonzero(ignore_empty)
 
         if col_delimiter is None and row_delimiter is None:
             return float("nan")
 
         if row_delimiter is not None:
             rows = _split_text(s, str(row_delimiter), ci)
-            if ignore_empty:
+            if skip_empty:
                 rows = [r for r in rows if r]
             res = []
             for r in rows:
@@ -243,7 +326,7 @@ def textsplit(text: Any, col_delimiter: Any, row_delimiter: Any = None, ignore_e
                     cols = _split_text(r, str(col_delimiter), ci)
                 else:
                     cols = [r]
-                if ignore_empty:
+                if skip_empty:
                     cols = [c for c in cols if c]
                 res.append(cols)
             # pad with pad_with to make rectangle
@@ -254,10 +337,13 @@ def textsplit(text: Any, col_delimiter: Any, row_delimiter: Any = None, ignore_e
             return res
         else:
             cols = _split_text(s, str(col_delimiter), ci)
-            if ignore_empty:
+            if skip_empty:
                 cols = [c for c in cols if c]
             return [cols]
-    except Exception:
+    except (ValueError, TypeError, OverflowError, re.error):
+        # A broad Exception hid programming errors as NaN. An empty
+        # delimiter still raises ValueError and stays NaN. match_mode is
+        # compared with == 1; a value other than 1 still splits.
         return float("nan")
 
 
@@ -284,10 +370,11 @@ def time(hour: Any, minute: Any, second: Any) -> float:
 
 def timevalue(text: Any) -> float:
     s = str(text).strip().strip('"')
-    for fmt in ("%H:%M:%S", "%H:%M", "%I:%M:%S %p", "%I:%M %p"):
+    # ``fmt`` is the TEXT alias. A loop variable with that name would hide it.
+    for time_fmt in ("%H:%M:%S", "%H:%M", "%I:%M:%S %p", "%I:%M %p"):
         try:
-            t = dt.datetime.strptime(s, fmt).time()
-            return float((t.hour * 3600 + t.minute * 60 + t.second) / 86400.0)
+            parsed = dt.datetime.strptime(s, time_fmt).time()
+            return float((parsed.hour * 3600 + parsed.minute * 60 + parsed.second) / 86400.0)
         except ValueError:
             continue
     return float("nan")
@@ -296,16 +383,22 @@ def timevalue(text: Any) -> float:
 def tinv(prob: Any, df: Any) -> float:
     try:
         p = float(prob)
-        d = float(df)
+        # ScTInv floors df, same as ScTDist. A fractional df was used as-is.
+        d = math.floor(float(df))
         if p <= 0 or p > 1 or d < 1:
             return float("nan")
         st = _scipy_stats()
         if st is None:
             return float("nan")
 
-        # TINV is the 2-tailed inverse
-        return float(st.t.ppf(1 - p / 2, d))
-    except (ValueError, TypeError):
+        # TINV is the 2-tailed inverse. ppf(1 - p/2) rounds the
+        # probability to 1 once p is about 1e-16, so the result was inf.
+        # ScTInv inverts the t distribution; isf(p/2) is that upper tail.
+        # isf(0.5) is a tiny negative, and TINV is a non-negative critical value.
+        return float(abs(st.t.isf(p / 2, d)))
+    except (ValueError, TypeError, OverflowError):
+        # float(10**400) raises OverflowError. The handler only caught
+        # ValueError and TypeError, so TINV of a huge probability raised.
         return float("nan")
 
 
@@ -317,7 +410,11 @@ def trend(*args: Any) -> Any:
         if data_y.size == 0 or np.any(np.isnan(data_y)):
             return "#VALUE!"
         if len(args) > 1 and args[1] is not None:
-            data_x = np.asarray(args[1], dtype=float)
+            # A scalar is 0-d. GetMatrix (interpr5.cxx) stores that double
+            # as a 1×1 matrix. shape[0] on the 0-d array raised IndexError,
+            # which this handler does not catch, so TREND of a scalar known_x
+            # escaped instead of fitting.
+            data_x = np.atleast_1d(np.asarray(args[1], dtype=float))
             if data_x.ndim == 1:
                 data_x = data_x[:, np.newaxis]
             elif data_x.ndim == 2 and data_x.shape[0] != data_y.shape[0] and data_x.shape[1] == data_y.shape[0]:
@@ -329,7 +426,9 @@ def trend(*args: Any) -> Any:
             return "#VALUE!"
 
         if len(args) > 2 and args[2] is not None:
-            new_data_x = np.asarray(args[2], dtype=float)
+            # Same 0-d scalar as known_x. CalculateTrendGrowth predicts
+            # every element of the 1×1 new_x matrix.
+            new_data_x = np.atleast_1d(np.asarray(args[2], dtype=float))
             if new_data_x.ndim == 1:
                 new_data_x = new_data_x[:, np.newaxis]
             elif new_data_x.ndim == 2 and new_data_x.shape[1] != data_x.shape[1] and new_data_x.shape[0] == data_x.shape[1]:
@@ -340,7 +439,16 @@ def trend(*args: Any) -> Any:
         if np.any(np.isnan(new_data_x)):
             return "#VALUE!"
 
-        const = bool(args[3]) if len(args) > 3 else True
+        # bool("FALSE") is True, so a const string kept the intercept.
+        # LINEST's GetBool helper already maps "FALSE" / "TRUE" / 0.
+        # i_m imports yearfrac only inside a function, so this import
+        # does not cycle.
+        if len(args) > 3:
+            from .calc_functions_i_m import _as_bool_flag
+
+            const = _as_bool_flag(args[3])
+        else:
+            const = True
 
         if const:
             A = np.c_[data_x, np.ones(data_x.shape[0])]
@@ -351,7 +459,9 @@ def trend(*args: Any) -> Any:
             pred = new_data_x @ c
 
         return pred.tolist()
-    except Exception:
+    except (ValueError, TypeError, OverflowError, ZeroDivisionError, np.linalg.LinAlgError):
+        # A broad Exception hid programming errors as #VALUE!. A bad const
+        # string still raises ValueError inside _as_bool_flag and stays #VALUE!.
         return "#VALUE!"
 
 
@@ -369,15 +479,18 @@ def trimmean(r: Any, percent: Any) -> float:
             return float(np.mean(arr))
         arr.sort()
         return float(np.mean(arr[k:-k]))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
+        # float(10**400) raises OverflowError. The handler only caught
+        # ValueError and TypeError, so TRIMMEAN of a huge percent raised.
         return float("nan")
 
 
 def ttest(data1: Any, data2: Any, tails: Any, type_: Any) -> float:
     try:
-        t = int(float(tails))
+        # ``t`` is the public T() function. A local with that name would hide it.
+        tail_count = int(float(tails))
         type_num = int(float(type_))
-        if t not in (1, 2) or type_num not in (1, 2, 3):
+        if tail_count not in (1, 2) or type_num not in (1, 2, 3):
             return float("nan")
 
         if type_num == 1:
@@ -404,7 +517,7 @@ def ttest(data1: Any, data2: Any, tails: Any, type_: Any) -> float:
             res = st.ttest_ind(d1_clean, d2_clean, equal_var=False)
 
         p = float(cast("float", res[1]))
-        if t == 1:
+        if tail_count == 1:
             p /= 2.0
         return float(p)
     except (ValueError, TypeError, OverflowError):
@@ -448,25 +561,66 @@ def unicode(text: Any) -> float:
         return float("nan")
 
 
+def _unique_key(item: Any) -> Any:
+    """Identity for UNIQUE.
+
+    ScUnique (interpr1.cxx) lowercases each cell's display string. This
+    helper does not stringify across types: 1 and "1" stay distinct.
+    Strings still compare with casefold. Bool is not a number, so True
+    does not merge with 1 (bool is an int subclass, and 1 == 1.0). Every
+    NaN shares one key; float NaN is not equal to itself, so a dict of
+    the raw values kept each error cell.
+    """
+    if isinstance(item, tuple):
+        return tuple(_unique_key(part) for part in item)
+    if isinstance(item, (bool, np.bool_)):
+        return ("b", bool(item))
+    if isinstance(item, (int, float, np.integer, np.floating)) and not isinstance(item, bool):
+        try:
+            number = float(item)
+        except (ValueError, TypeError, OverflowError):
+            return ("o", item)
+        if math.isnan(number):
+            return ("nan",)
+        return ("n", number)
+    if isinstance(item, str):
+        return ("s", item.casefold())
+    return ("o", item)
+
+
 def _unique_items(items: list[Any], exactly_once: bool) -> list[Any]:
-    # Dict insertion order is the first-seen order, so a second list is not needed.
+    # Dict insertion order is the first-seen order. The stored value is the
+    # original cell, not the comparison key.
     counts: dict[Any, int] = {}
+    first: dict[Any, Any] = {}
     for item in items:
-        counts[item] = counts.get(item, 0) + 1
+        key = _unique_key(item)
+        if key not in counts:
+            first[key] = item
+            counts[key] = 1
+        else:
+            counts[key] += 1
     if exactly_once:
-        return [item for item, c in counts.items() if c == 1]
-    return list(counts.keys())
+        return [first[key] for key, count in counts.items() if count == 1]
+    return list(first.values())
 
 
-def unique(arr: Any, by_col: bool = False, unique_only: bool = False) -> list[Any]:
+def unique(arr: Any, by_col: bool = False, unique_only: bool = False) -> list[Any] | str:
+    # bool("FALSE") is true, so a text flag selected columns or the
+    # exactly-once filter. ScUnique uses GetDouble() != 0, and a
+    # non-numeric string is #VALUE!.
+    try:
+        by_column = _as_nonzero(by_col)
+        once = _as_nonzero(unique_only)
+    except (ValueError, TypeError, OverflowError):
+        return "#VALUE!"
     # dtype=object. A bare asarray makes 1 and '1' the same string.
     data = np.asarray(arr, dtype=object)
     if data.size == 0:
         return []
-    once = bool(unique_only)
     if data.ndim < 2:
         return _unique_items(data.reshape(-1).tolist(), once)
-    if not bool(by_col):
+    if not by_column:
         rows = [tuple(row) for row in data.tolist()]
         return [list(row) for row in _unique_items(rows, once)]
     cols = [tuple(data[:, i].tolist()) for i in range(data.shape[1])]
@@ -491,18 +645,27 @@ def varpa(*args: Any) -> float:
     return float(np.var(vals, ddof=0))
 
 
-# return_type 11..17: the day that is numbered 1, as date.weekday() (Monday=0).
-_WEEKDAY_ONES: dict[int, int] = {11: 0, 12: 1, 13: 2, 14: 3, 15: 4, 16: 5, 17: 6}
+# return_type 11..17: the day numbered 1, as date.weekday() (Monday=0).
+# WEEKNUM uses the same 11–17 starts. This is not _WEEKEND_MAPPING:
+# weekend code 11 means Sunday is the day off, not that the week starts Monday.
+_WEEK_START_11_17: dict[int, int] = {11: 0, 12: 1, 13: 2, 14: 3, 15: 4, 16: 5, 17: 6}
+
+_WEEKDAY_ONES: dict[int, int] = _WEEK_START_11_17
 
 # System-1 WEEKNUM week start, same Monday=0 numbering. 21 and 150 are ISO.
-_WEEKNUM_WEEK_START: dict[int, int] = {1: 6, 2: 0, 11: 0, 12: 1, 13: 2, 14: 3, 15: 4, 16: 5, 17: 6}
+_WEEKNUM_WEEK_START: dict[int, int] = {1: 6, 2: 0, **_WEEK_START_11_17}
 
 
 def weekday(serial: Any, return_type: int | float = 1) -> float:
     try:
-        d = dt.date.fromordinal(int(float(serial)) + 693594)
+        # _serial_to_date is the +693594 ordinal. OSError from a wild
+        # ordinal used to be caught here; the helper turns the usual
+        # conversion errors into None.
+        d = _serial_to_date(serial)
         rt = int(float(return_type))
     except (TypeError, ValueError, OverflowError, OSError):
+        return float("nan")
+    if d is None:
         return float("nan")
     wd = d.weekday()
     # date.weekday() is already Monday=0 .. Sunday=6, which is return_type 3.
@@ -535,10 +698,14 @@ def _system1_week_number(day: dt.date, week_start: int) -> int:
     if week == 54:
         return 1
     if week == 53:
-        leap = day.year % 4 == 0 and (day.year % 100 != 0 or day.year % 400 == 0)
-        days_in_year = 366 if leap else 365
-        next_jan1 = dt.date(day.year + 1, 1, 1)
-        next_first = (next_jan1.weekday() + (7 - week_start)) % 7
+        # date(year + 1, 1, 1) raises ValueError for year 9999, and that
+        # call sat outside weeknum's try, so WEEKNUM of 9999-12-31 raised.
+        # Date::GetWeekOfYear uses Date(1, 1, GetNextYear()), and year
+        # 10000 is legal there. Next 1 January is days_in_year weekdays
+        # after this 1 January.
+        days_in_year = 366 if calendar.isleap(day.year) else 365
+        next_weekday = (jan1.weekday() + days_in_year) % 7
+        next_first = (next_weekday + (7 - week_start)) % 7
         if day_of_year > (days_in_year - next_first - 1):
             return 1
     return week
@@ -549,9 +716,11 @@ def weeknum(serial: Any, return_type: int | float = 1) -> float:
     # only return_type 21 (and 150, the Gnumeric alias). isoweeknum already
     # covers that path; system 1 is a different numbering.
     try:
-        day = dt.date.fromordinal(int(float(serial)) + 693594)
+        day = _serial_to_date(serial)
         rt = int(float(return_type))
     except (TypeError, ValueError, OverflowError, OSError):
+        return float("nan")
+    if day is None:
         return float("nan")
     if rt in (21, 150):
         return float(day.isocalendar()[1])
@@ -573,11 +742,13 @@ def weibull(x: Any, alpha: Any, beta: Any, cumulative: Any = True) -> float:
             return float("nan")
 
         # In scipy, c=alpha (shape), scale=beta. Note: Calc calls alpha shape and beta scale.
-        if cumulative:
+        # bool("0") is true, so a zero flag returned the CDF.
+        # ScWeibull uses GetDouble() == 0 for the density.
+        if _as_nonzero(cumulative):
             return float(st.weibull_min.cdf(val, a, scale=b))
-        else:
-            return float(st.weibull_min.pdf(val, a, scale=b))
-    except (ValueError, TypeError):
+        return float(st.weibull_min.pdf(val, a, scale=b))
+    except (ValueError, TypeError, OverflowError):
+        # float(10**400) raises OverflowError, which this handler missed.
         return float("nan")
 
 
@@ -681,27 +852,42 @@ def workday_intl(start_date: Any, days: Any, weekend: Any = 1, holidays: Any | N
 def xirr(values: Any, dates: Any, guess: Any = 0.1) -> float:
     try:
         vals = np.asarray(values, dtype=float).ravel()
-        dts = np.asarray(dates, dtype=float).ravel()
+        # getXirr takes sal_Int32 dates. A fractional serial was divided
+        # as-is, so day 365.9 was not one year.
+        dts = np.trunc(np.asarray(dates, dtype=float).ravel())
         if len(vals) != len(dts) or len(vals) == 0:
             return float("nan")
         x = float(guess)
+        # getXirr (financial.cxx) rejects a guess <= -1. A later step onto
+        # that rate makes (1+rate)**fraction a complex, which only became
+        # NaN because the broad handler caught it.
+        if not math.isfinite(x) or x <= -1.0:
+            return float("nan")
         d0 = float(dts[0])
         for _unused in range(100):
+            if 1.0 + x <= 0.0 or not math.isfinite(x):
+                return float("nan")
             f = 0.0
             df = 0.0
             for v, d in zip(vals, dts):
-                t = (float(d) - d0) / 365.0
-                f += v / ((1.0 + x) ** t)
-                df -= t * v / ((1.0 + x) ** (t + 1.0))
-            if abs(f) < 1e-7:
+                year_offset = (float(d) - d0) / 365.0
+                f += v / ((1.0 + x) ** year_offset)
+                df -= year_offset * v / ((1.0 + x) ** (year_offset + 1.0))
+            # getXirr stops when abs(NPV) or the Newton step is <= 1e-10.
+            # abs(f) < 1e-7 returned the 0.1 guess for cash flows near 1e-6
+            # (NPV there is about 9e-8) and never succeeded for flows near 1e10.
+            if abs(f) <= 1e-10:
                 return float(x)
             # df == 0 missed a tiny slope. Newton then stepped by f/df
             # (up to ~1e300) before the derivative underflowed to 0.
             if abs(df) < 1e-15:
                 break
-            x = x - f / df
+            step = f / df
+            if abs(step) <= 1e-10:
+                return float(x - step)
+            x = x - step
         return float("nan")
-    except Exception:
+    except (ValueError, TypeError, OverflowError, ZeroDivisionError):
         return float("nan")
 
 
@@ -711,18 +897,26 @@ def _scalar_if_singleton(values: list[Any]) -> Any:
     return values
 
 
-def xlookup(lookup_val: Any, lookup_arr: Any, return_arr: Any, if_not_found: Any | None = None, match_mode: int | float = 0, search_mode: int | float = 1) -> Any:
+def xlookup(lookup_val: Any, lookup_arr: Any, return_arr: Any, if_not_found: Any = "#N/A", match_mode: int | float = 0, search_mode: int | float = 1) -> Any:
     best_idx = _find_match_index(lookup_val, lookup_arr, match_mode, search_mode)
     if best_idx is None:
+        # ScXLookup pushes #N/A when the 4th argument is omitted. None
+        # became a blank cell. An explicit None is still returned.
         return if_not_found
-    r_flat = np.asarray(return_arr)
+    # dtype=object. A mixed return such as ["x", 5] became strings,
+    # so the hit was "5" instead of the number 5. The lookup path
+    # already keeps numbers as numbers.
+    r_flat = np.asarray(return_arr, dtype=object)
     # A return array shorter than the matched index used to raise IndexError
     # (xlookup("b", ["a", "b"], [1])). The match succeeded, so this is not
     # if_not_found; it is a bad range. Report #VALUE!, same as other shape
     # mismatches, instead of letting the exception escape.
     try:
         if r_flat.ndim == 1:
-            return r_flat[best_idx]
+            # A 1-D numeric return was an np.int64 / np.float64. The 2-D
+            # branch already returns Python values via tolist().
+            cell = r_flat[best_idx]
+            return cell.item() if isinstance(cell, np.generic) else cell
         if r_flat.ndim == 2:
             l_shape = np.asarray(lookup_arr).shape
             if len(l_shape) == 2 and l_shape[0] > 1 and l_shape[1] == 1:
@@ -739,8 +933,10 @@ def xlookup(lookup_val: Any, lookup_arr: Any, return_arr: Any, if_not_found: Any
                 # A horizontal 1×N lookup into a one-row return sliced out a
                 # one-element column and .tolist() wrapped it. A 1×1 result is a scalar.
                 return _scalar_if_singleton(r_flat[:, best_idx].tolist())
-            return r_flat.ravel()[best_idx]
-        return r_flat.ravel()[best_idx]
+            cell = r_flat.ravel()[best_idx]
+            return cell.item() if isinstance(cell, np.generic) else cell
+        cell = r_flat.ravel()[best_idx]
+        return cell.item() if isinstance(cell, np.generic) else cell
     except IndexError:
         return "#VALUE!"
 
@@ -754,7 +950,8 @@ def xnpv(rate: Any, values: Any, dates: Any) -> float:
     try:
         r = float(rate)
         vals = np.asarray(values).ravel()
-        dts = np.asarray(dates).ravel()
+        # getXnpv takes sal_Int32 dates, same truncation as getXirr.
+        dts = np.trunc(np.asarray(dates, dtype=float).ravel())
         if len(vals) != len(dts) or len(vals) == 0:
             return float("nan")
         # Excel XNPV returns #NUM! when rate <= -1. (1+rate)**fraction is
@@ -768,7 +965,9 @@ def xnpv(rate: Any, values: Any, dates: Any) -> float:
         for v, d in zip(vals, dts):
             res += float(v) / ((1.0 + r) ** ((float(d) - d0) / 365.0))
         return res
-    except Exception:
+    except (ValueError, TypeError, OverflowError, ZeroDivisionError):
+        # A broad Exception hid programming errors as NaN. Bad values
+        # still fail float() and stay NaN.
         return float("nan")
 
 
@@ -841,34 +1040,59 @@ def xor(*args: Any) -> bool | float | str:
     return trues % 2 == 1
 
 
+def _actual_actual_year_length(start: dt.date, end: dt.date) -> float:
+    """Year length for YEARFRAC basis 1.
+
+    GetYearFrac (analysishelper.cxx, ODFF 1.2 §4.11.7.7). ``start`` is on
+    or before ``end``. A span longer than one year uses the average length
+    of each calendar year it touches. A shorter span uses 366 when it sits
+    in one leap year or includes 29 February, otherwise 365. Dividing by
+    a flat 365.25 made 2023-01-01 through 2024-01-01 about 0.99932.
+    """
+    y1, m1, d1 = start.year, start.month, start.day
+    y2, m2, d2 = end.year, end.month, end.day
+    years_differ = y1 != y2
+    longer_than_one_year = years_differ and (
+        y2 != y1 + 1 or m1 < m2 or (m1 == m2 and d1 < d2)
+    )
+    if longer_than_one_year:
+        day_count = sum(366 if calendar.isleap(year) else 365 for year in range(y1, y2 + 1))
+        return day_count / (y2 - y1 + 1)
+    if not years_differ and calendar.isleap(y1):
+        return 366.0
+    includes_feb29 = years_differ and (
+        (calendar.isleap(y1) and (m1 < 2 or (m1 == 2 and d1 <= 29)))
+        or (calendar.isleap(y2) and (m2 > 2 or (m2 == 2 and d2 == 29)))
+    )
+    if includes_feb29:
+        return 366.0
+    return 365.0
+
+
 def yearfrac(start_date: Any, end_date: Any, basis: Any = 0) -> float:
     # Swap when start is after end. Excel and LibreOffice GetYearFrac return
-    # a non-negative fraction either way.
-    from plugin.scripting.venv.calc_functions_d_h import days360
-
+    # a non-negative fraction either way. Bond callers check order themselves.
     try:
         s = float(start_date)
         e = float(end_date)
         b = int(float(basis))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return float("nan")
-    if b < 0 or b > 4:
+    if b < 0 or b > 4 or not math.isfinite(s) or not math.isfinite(e):
         return float("nan")
     if s > e:
         s, e = e, s
-    if b == 0 or b == 4:
-        counted = days360(s, e, b == 4)
-        if math.isnan(counted):
-            return float("nan")
-        return counted / 360.0
-    try:
-        sd = dt.date.fromordinal(int(s) + 693594)
-        ed = dt.date.fromordinal(int(e) + 693594)
-    except (OverflowError, OSError, ValueError):
+    # _days360 is what days360() calls. Importing days360 from calc_functions_d_h
+    # pulled that module back while it imports yearfrac at load time.
+    sd = _serial_to_date(s)
+    ed = _serial_to_date(e)
+    if sd is None or ed is None:
         return float("nan")
+    if b == 0 or b == 4:
+        return _days360(sd, ed, european=(b == 4)) / 360.0
     actual = (ed - sd).days
     if b == 1:
-        return actual / 365.25
+        return actual / _actual_actual_year_length(sd, ed)
     if b == 2:
         return actual / 360.0
     return actual / 365.0
@@ -885,9 +1109,13 @@ def yielddisc(settlement: Any, maturity: Any, pr: Any, redemption: Any, basis: A
         p = float(pr)
         red = float(redemption)
         b = int(float(basis))
-        if p <= 0 or red <= 0 or b < 0 or b > 4:
+        settle = float(settlement)
+        mature = float(maturity)
+        # getYielddisc throws when settlement >= maturity. yearfrac swaps
+        # those dates, so a reversed pair used to return a positive yield.
+        if p <= 0 or red <= 0 or b < 0 or b > 4 or settle >= mature:
             return float("nan")
-        yf = yearfrac(settlement, maturity, b)
+        yf = yearfrac(settle, mature, b)
         if math.isnan(yf) or yf <= 0:
             return float("nan")
         return float(((red - p) / p) / yf)
@@ -901,11 +1129,16 @@ def yieldmat(settlement: Any, maturity: Any, issue: Any, rate: Any, pr: Any, bas
         r = float(rate)
         p = float(pr)
         b = int(float(basis))
-        if r < 0 or p <= 0 or b < 0 or b > 4:
+        settle = float(settlement)
+        mature = float(maturity)
+        issued = float(issue)
+        # getYieldmat throws when settlement >= maturity or settlement < issue.
+        # Equal issue and settlement is allowed. yearfrac would hide the order.
+        if r < 0 or p <= 0 or b < 0 or b > 4 or settle >= mature or settle < issued:
             return float("nan")
-        dim_b = yearfrac(issue, maturity, b)
-        dis_b = yearfrac(issue, settlement, b)
-        dsm_b = yearfrac(settlement, maturity, b)
+        dim_b = yearfrac(issued, mature, b)
+        dis_b = yearfrac(issued, settle, b)
+        dsm_b = yearfrac(settle, mature, b)
         if math.isnan(dim_b) or math.isnan(dis_b) or math.isnan(dsm_b) or dsm_b <= 0:
             return float("nan")
         denom = (p / 100.0) + r * dis_b
@@ -919,9 +1152,12 @@ def yieldmat(settlement: Any, maturity: Any, issue: Any, rate: Any, pr: Any, bas
 
 def ztest(data: Any, x: Any, sigma: Any | None = None) -> float:
     try:
-        d = np.asarray(data, dtype=float).ravel()
-        d = d[np.isfinite(d)]
-        if len(d) == 0:
+        # ScZTest counts numeric cells, including TRUE as 1, and skips text
+        # and blanks. dtype=float raised on None, so one blank made the call
+        # NaN. isfinite then dropped error cells instead of propagating them.
+        # Fewer than 2 numbers is #DIV/0! even when sigma is supplied.
+        d = _extract_numeric_array(data, ignore_bool=False, propagate_nan=True)
+        if len(d) < 2 or np.any(np.isnan(d)):
             return float("nan")
         val = float(x)
         n = len(d)
@@ -931,7 +1167,8 @@ def ztest(data: Any, x: Any, sigma: Any | None = None) -> float:
         else:
             s = float(sigma)
 
-        if s == 0:
+        # sigma <= 0 is #NUM!. inf made z = 0 and the survival function 0.5.
+        if not math.isfinite(s) or s <= 0:
             return float("nan")
 
         z = (m - val) / (s / math.sqrt(n))
@@ -940,5 +1177,5 @@ def ztest(data: Any, x: Any, sigma: Any | None = None) -> float:
             return float("nan")
 
         return float(st.norm.sf(z))
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         return float("nan")

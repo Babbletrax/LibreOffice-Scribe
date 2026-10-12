@@ -11,6 +11,7 @@ A response still buffered on stdout after the child exits must be
 delivered, not replaced by the reader-exit sweep.
 """
 
+import json
 import subprocess
 import sys
 import threading
@@ -19,7 +20,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from plugin.acp.acp_connection import ACPConnection
+from plugin.acp.acp_connection import ACPConnection, _Pending, _QueuedStop, _QueuedWrite
 from plugin.framework.errors import ToolExecutionError
 
 
@@ -72,27 +73,31 @@ class TestACPConnectionStop:
         conn._proc = _live_proc()
         conn._running = True
         event = threading.Event()
-        conn._pending[1] = {"event": event, "response": {"result": {"stopReason": "end_turn"}}}
+        conn._pending[1] = _Pending(event, {"result": {"stopReason": "end_turn"}})
         conn.stop()
         assert event.is_set()
-        assert conn._pending[1]["response"]["result"]["stopReason"] == "end_turn"
+        assert conn._pending[1].response["result"]["stopReason"] == "end_turn"
 
     def test_second_stop_is_safe(self):
         conn = ACPConnection(cmd_line=["agent"])
         proc = _live_proc()
         conn._proc = proc
         conn._running = True
-        conn.stop()
-        conn.stop()
-        # What was wrong: stop() delegates termination to the background writer drain
-        # thread (_writer_drain_loop). Checking proc.terminate synchronously right after
-        # stop() raced with the background worker, intermittently failing in CI when the
-        # background thread had not yet executed proc.terminate().
-        # Why this change: poll with a short deadline before asserting called_once.
-        deadline = time.monotonic() + 2
-        while time.monotonic() < deadline and not proc.terminate.called:
-            time.sleep(0.01)
-        proc.terminate.assert_called_once()
+        # What was wrong: stop() delegates the kill to the background writer.
+        # Checking it synchronously raced that thread.
+        killed: list[object] = []
+
+        def _kill(proc_arg: object) -> None:
+            killed.append(proc_arg)
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr("plugin.scripting.venv_worker._kill_process_tree", _kill)
+            conn.stop()
+            conn.stop()
+            deadline = time.monotonic() + 2
+            while time.monotonic() < deadline and proc not in killed:
+                time.sleep(0.01)
+        assert proc in killed
 
 
 def _assert_prompt_unblocked(errors: list[BaseException], worker: threading.Thread) -> None:
@@ -480,15 +485,16 @@ sys.stdout.buffer.flush()
         # Register a pending request manually
         event = threading.Event()
         with conn._lock:
-            conn._pending[1] = {"event": event, "response": None}
+            conn._pending[1] = _Pending(event)
 
         # Run reader loop (simulating subprocess termination)
         conn._reader_loop()
 
         # The pending request must have been unblocked immediately
         assert event.is_set()
-        entry = conn._pending.get(1) or {}
-        assert "error" in entry.get("response", {})
+        entry = conn._pending.get(1)
+        assert entry is not None
+        assert "error" in entry.response
 
 
 def _proc_nulled_on_bool(conn: ACPConnection, stdin: object):
@@ -543,6 +549,40 @@ class TestStdinWriteCapturesProc:
             conn.send_request("session/prompt", {"sessionId": "s"}, timeout=2)
         assert stdin.written
         assert b"session/prompt" in stdin.written[0]
+
+    def test_null_error_field_returns_the_result(self):
+        """JSON-RPC ``error: null`` is success. The result is returned."""
+        conn = ACPConnection(cmd_line=["agent"])
+        proc = _live_proc()
+
+        def flush() -> None:
+            with conn._lock:
+                entry = conn._pending.get(1)
+                if entry is not None and entry.response is None:
+                    entry.response = {"result": {"protocolVersion": 1}, "error": None}
+                    entry.event.set()
+
+        proc.stdin.flush.side_effect = flush
+        conn._proc = proc
+        conn._running = True
+        assert (conn.send_request("initialize", {}, timeout=2)) == ({"protocolVersion": 1})
+
+    def test_error_object_still_raises(self):
+        conn = ACPConnection(cmd_line=["agent"])
+        proc = _live_proc()
+
+        def flush() -> None:
+            with conn._lock:
+                entry = conn._pending.get(1)
+                if entry is not None and entry.response is None:
+                    entry.response = {"error": {"message": "nope"}}
+                    entry.event.set()
+
+        proc.stdin.flush.side_effect = flush
+        conn._proc = proc
+        conn._running = True
+        with pytest.raises(ToolExecutionError, match="nope"):
+            conn.send_request("initialize", {}, timeout=2)
 
     def test_send_request_closed_stdin_is_tool_error(self):
         """A pipe stop() already closed must not escape as ValueError.
@@ -696,7 +736,47 @@ def test_stderr_text_reads_live_tail_without_finishing():
     drain.finish_text.assert_not_called()
 
 
-def test_stop_flushes_before_terminate():
+def test_null_id_error_completes_the_pending_request():
+    """A JSON-RPC parse error uses id null. It is not a notification."""
+    conn = ACPConnection(["agent"])
+    event = threading.Event()
+    conn._pending[1] = _Pending(event)
+    called: list[tuple[object, ...]] = []
+    conn.set_notification_callback(lambda *args: called.append(args))
+    conn._running = True
+    line = json.dumps({"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}) + "\n"
+    proc = _live_proc()
+    proc.stdout.readline.side_effect = [line.encode(), b""]
+    conn._proc = proc
+    conn._reader_loop()
+    assert event.is_set()
+    assert conn._pending[1].response["error"]["message"] == "Parse error"
+    assert called == []
+
+
+def test_posix_start_uses_a_new_session(monkeypatch):
+    if sys.platform == "win32":
+        pytest.skip("POSIX session")
+    captured: dict[str, object] = {}
+
+    def fake_popen(_cmd, **kwargs):
+        captured["kwargs"] = kwargs
+        proc = MagicMock()
+        proc.stderr = MagicMock()
+        proc.pid = 1
+        return proc
+
+    monkeypatch.setattr("plugin.acp.acp_connection.subprocess.Popen", fake_popen)
+    monkeypatch.setattr("plugin.acp.acp_connection.start_stderr_drain", lambda *_a, **_k: MagicMock())
+    monkeypatch.setattr("plugin.acp.acp_connection.run_in_background", lambda *_a, **_k: MagicMock())
+    conn = ACPConnection(["agent"])
+    conn.start()
+    kwargs = captured["kwargs"]
+    assert isinstance(kwargs, dict)
+    assert kwargs["start_new_session"] is True
+
+
+def test_stop_flushes_before_tree_kill():
     from unittest.mock import MagicMock
 
     conn = ACPConnection(["dummy"])
@@ -709,25 +789,214 @@ def test_stop_flushes_before_terminate():
     def mock_write(_data):
         events.append("write")
 
-    def mock_terminate():
-        events.append("terminate")
+    def mock_kill(_proc):
+        events.append("kill")
 
     mock_stdin.write.side_effect = mock_write
-    mock_proc.terminate.side_effect = mock_terminate
 
     conn._proc = mock_proc
     conn._running = True
     mock_proc.poll.return_value = None
 
-    conn.send_notification("session/cancel", {})
-    conn.stop()
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("plugin.scripting.venv_worker._kill_process_tree", mock_kill)
+        conn.send_notification("session/cancel", {})
+        conn.stop()
 
-    import time
-    for _ in range(50):
-        if "terminate" in events:
-            break
-        time.sleep(0.01)
+        for _ in range(50):
+            if "kill" in events:
+                break
+            time.sleep(0.01)
 
     assert "write" in events, "write was never called"
-    assert "terminate" in events, "terminate was never called"
-    assert events.index("write") < events.index("terminate")
+    assert "kill" in events, "process tree kill was never called"
+    assert events.index("write") < events.index("kill")
+    mock_proc.stdout.close.assert_not_called()
+
+
+def test_json_array_is_not_sliced_into_an_object():
+    from plugin.acp.acp_connection import _accept_message
+
+    assert _accept_message('[{"a": 1}]') is None
+
+
+def test_brace_after_a_prefix_still_parses():
+    from plugin.acp.acp_connection import _accept_message
+
+    msg = _accept_message('log {"jsonrpc":"2.0","method":"session/update","params":{}}')
+    assert msg is not None
+    assert msg["method"] == "session/update"
+
+
+def test_bracket_log_prefix_still_parses():
+    from plugin.acp.acp_connection import _accept_message
+
+    msg = _accept_message('[INFO] {"jsonrpc":"2.0","method":"session/update","params":{}}')
+    assert msg is not None
+    assert msg["method"] == "session/update"
+
+
+def test_integral_float_id_completes_the_integer_request():
+    conn = ACPConnection(["agent"])
+    event = threading.Event()
+    conn._pending[1] = _Pending(event)
+    conn._running = True
+    line = json.dumps({"jsonrpc": "2.0", "id": 1.0, "result": {"ok": True}}) + "\n"
+    proc = _live_proc()
+    proc.stdout.readline.side_effect = [line.encode(), b""]
+    conn._proc = proc
+    conn._reader_loop()
+    assert event.is_set()
+    assert conn._pending[1].response["result"] == {"ok": True}
+
+
+def test_fractional_float_id_does_not_complete_the_request():
+    conn = ACPConnection(["agent"])
+    event = threading.Event()
+    conn._pending[1] = _Pending(event)
+    conn._running = True
+    line = json.dumps({"jsonrpc": "2.0", "id": 1.5, "result": {"ok": True}}) + "\n"
+    proc = _live_proc()
+    proc.stdout.readline.side_effect = [line.encode(), b""]
+    conn._proc = proc
+    conn._reader_loop()
+    assert conn._pending[1].response["error"]["message"] == "ACP process terminated"
+    assert "result" not in conn._pending[1].response
+    assert all("result" not in (entry.response or {}) for entry in conn._pending.values())
+
+
+def test_inbound_lines_extend_the_idle_wait():
+    """Silence times out. Accepted-line bumps of the clock keep the wait alive."""
+    conn = ACPConnection(["agent"])
+    proc = _live_proc()
+    conn._proc = proc
+    conn._running = True
+
+    def bump() -> None:
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and not conn._pending:
+            time.sleep(0.01)
+        assert conn._pending
+        # send_request stamps the clock at the start of the wait, after pending.
+        time.sleep(0.05)
+        end = time.monotonic() + 0.55
+        while time.monotonic() < end:
+            conn._last_inbound = time.monotonic()
+            time.sleep(0.04)
+
+    bumper = threading.Thread(target=bump)
+    bumper.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError):
+            conn.send_request("session/prompt", {}, timeout=0.3)
+    finally:
+        conn.stop()
+        bumper.join(timeout=2)
+    assert time.monotonic() - started >= 0.5
+
+
+def test_watchdog_does_not_kill_again_when_wait_returns():
+    conn = ACPConnection(["agent"])
+    proc = _live_proc()
+    proc.wait.return_value = 0
+    kills: list[object] = []
+    conn._proc = proc
+    conn._running = True
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("plugin.scripting.venv_worker._kill_process_tree", lambda process: kills.append(process))
+        conn.stop()
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and len(kills) < 1:
+            time.sleep(0.01)
+        time.sleep(0.2)
+    assert len(kills) == 1
+
+
+def test_watchdog_kills_when_wait_times_out():
+    conn = ACPConnection(["agent"])
+    proc = _live_proc()
+    proc.wait.side_effect = subprocess.TimeoutExpired(cmd="agent", timeout=0.5)
+    kills: list[object] = []
+    conn._proc = proc
+    conn._running = True
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("plugin.scripting.venv_worker._kill_process_tree", lambda process: kills.append(process))
+        conn.stop()
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and len(kills) < 2:
+            time.sleep(0.01)
+    assert len(kills) >= 2
+
+
+def test_reader_answers_a_request_when_the_callback_is_gone():
+    conn = ACPConnection(["agent"])
+    conn._running = True
+    conn._notify_callback = None
+    replies = []
+
+    def send_response(msg_id, result=None, error=None):
+        replies.append((msg_id, result, error))
+
+    conn.send_response = send_response  # type: ignore[method-assign]
+    permission = json.dumps({"jsonrpc": "2.0", "id": 4, "method": "session/request_permission", "params": {}}) + "\n"
+    fs_read = json.dumps({"jsonrpc": "2.0", "id": 5, "method": "fs/read_text_file", "params": {}}) + "\n"
+    note = json.dumps({"jsonrpc": "2.0", "method": "session/update", "params": {}}) + "\n"
+    proc = _live_proc()
+    proc.stdout.readline.side_effect = [permission.encode(), fs_read.encode(), note.encode(), b""]
+    conn._proc = proc
+    conn._reader_loop()
+    assert replies == [
+        (4, {"outcome": {"outcome": "cancelled"}}, None),
+        (5, None, {"code": -32601, "message": "Method not found: fs/read_text_file"}),
+    ]
+
+
+def _wait_until(pred) -> bool:
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        if pred():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def test_request_after_the_writer_stops_fails_without_a_new_thread():
+    conn = ACPConnection(["agent"])
+    proc = _live_proc()
+    conn._proc = proc
+    conn._running = True
+    names: list[str | None] = []
+    from plugin.framework.worker_pool import run_in_background as real_run
+
+    def run(*args, **kwargs):
+        names.append(kwargs.get("name"))
+        return real_run(*args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("plugin.acp.acp_connection.run_in_background", run)
+        patch.setattr("plugin.scripting.venv_worker._kill_process_tree", lambda process: None)
+        conn._enqueue(_QueuedStop(proc))
+        # The handle is cleared in the writer's finally. Waiting for that,
+        # not merely for _closed, is what used to start a second writer.
+        assert _wait_until(lambda: conn._writer_thread is None)
+        event = threading.Event()
+        conn._pending[3] = _Pending(event)
+        conn._enqueue(_QueuedWrite(proc, b"{}\n", 3))
+        assert event.wait(timeout=1)
+    assert "Failed to write" in conn._pending[3].response["error"]["message"]
+    assert names == ["acp-writer"]
+
+
+def test_write_queued_behind_stop_is_failed():
+    conn = ACPConnection(["agent"])
+    proc = _live_proc()
+    event = threading.Event()
+    conn._pending[8] = _Pending(event)
+    conn._write_queue.put(_QueuedStop(proc))
+    conn._write_queue.put(_QueuedWrite(proc, b"{}\n", 8))
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("plugin.scripting.venv_worker._kill_process_tree", lambda process: None)
+        conn._ensure_writer()
+        assert event.wait(timeout=2)
+    assert "Failed to write" in conn._pending[8].response["error"]["message"]

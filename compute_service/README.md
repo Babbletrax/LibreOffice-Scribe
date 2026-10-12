@@ -187,7 +187,7 @@ Evaluates heavy document/image OCR and layout structure extraction in a dedicate
 | **`413 Payload Too Large`**| Request body exceeds `max_body_bytes`, the execute frame exceeds the IPC limit (`PAYLOAD_TOO_LARGE`), the result frame does (`RESULT_TOO_LARGE`), or a vision image is larger than 32 MiB (`FILE_TOO_LARGE`) | `{"status": "error", "code"?: "RESULT_TOO_LARGE", "error": "..."}` |
 | **`501 Not Implemented`** | `/v1/vision` when OCR is off (`VISION_SERVICE_DISABLED`, `ocr_workers=0`) | `{"id"?: "...", "status": "error", "code": "VISION_SERVICE_DISABLED", "error": "..."}` |
 | **`503 Service Unavailable`** | `/v1/execute`, `/v1/session/reset`, or `/v1/vision` when the cell never ran and a proxy may retry (`WORKER_POOL_BUSY`, `VISION_POOL_BUSY`, `SERVICE_SHUTDOWN`, `WORKER_SPAWN_FAILED`, `WORKER_PIPE_BROKEN`, `QUEUE_TIMEOUT`, `VISION_UNAVAILABLE`). A full permit set queues until the request deadline. Execute and vision use the clamped `timeout_ms` (the pool default when it is omitted: `default_timeout_sec` or `ocr_timeout_sec`, at most `max_timeout_sec`). Session reset uses `default_timeout_sec`. 503 is that timeout. A few milliseconds of queueing is the steady state at 200–400 rps and stays HTTP 200. Sticky execute and session reset share a listener cap. A vision request that never leased a worker is `VISION_POOL_BUSY` at 503, same as the route's accept-deadline pre-check. Eval errors inside `result_json`, and `EXECUTION_TIMEOUT`, stay HTTP 200. coolwsd may map 503 to `#N/A`. | `{"id"?: "...", "status": "error", "code": "...", "error": "..."}` |
-| **`500 Internal Server Error`**| Unhandled server exception, JSON encoding failure, worker-side session reset error, a worker that died or returned no frame (`WORKER_CRASHED`, `EMPTY_RESPONSE`), or a dict-shaped internal fault (`VISION_WORKER_ERROR`, `WORKER_EXECUTION_ERROR`). A `WORKER_EXECUTION_ERROR` wrapped in forwarded `result_json` stays HTTP 200 | `{"id"?: "...", "status": "error", "code"?: "...", "error": "..."}` |
+| **`500 Internal Server Error`**| Unhandled server exception, JSON encoding failure, worker-side session reset error, a worker that died, rejected a response frame, or returned no frame (`WORKER_CRASHED`, `WORKER_IPC_ERROR`, `EMPTY_RESPONSE`), or a dict-shaped internal fault (`VISION_WORKER_ERROR`, `WORKER_EXECUTION_ERROR`). A `WORKER_EXECUTION_ERROR` wrapped in forwarded `result_json` stays HTTP 200 | `{"id"?: "...", "status": "error", "code"?: "...", "error": "..."}` |
 
 ---
 
@@ -209,7 +209,7 @@ Rules:
 - **Loopback and no key** → `/v1/execute` and `/v1/session/reset` are open (local dev/test only).
 - **Host header validation in keyless mode** → When running without an API key, the server rejects requests with a missing, empty, or non-loopback `Host` header with `403 Forbidden` (for example, accessing via a Docker service name such as `http://python-compute:8000` gets 403, and an HTTP/1.0 client that omits `Host` does too). Only loopback Host headers (`localhost`, `127.0.0.1`, `[::1]`) are accepted.
 - **Empty bind address (`--host ""`)** → Binding `--host ""` binds loopback interfaces only.
-- **Any other bind without a key** → `load_settings` refuses to start. This includes `0.0.0.0` and `::`. The image entrypoint checks the same case before exec.
+- **Any other bind without a key** → `ComputeSettings.validate` refuses to start. This includes `0.0.0.0` and `::`. `docker-entrypoint.sh` only execs the server.
 - **Key configured** → `/v1/execute`, `/v1/session/reset`, and `/v1/vision` require a `Bearer <token>` match
   (`hmac.compare_digest` on the UTF-8 bytes). The scheme prefix `Bearer ` is matched case-insensitively per RFC 7235 (`bearer `, `BEARER `, etc.). A non-ASCII token or key is a 401 or a match, not a dropped connection. Failures return HTTP 401 + `WWW-Authenticate: Bearer`.
 - `PYTHON_COMPUTE_API_KEY` is not stripped. A key file drops one trailing newline and keeps surrounding spaces. The same secret text is the same bytes from either source.
@@ -256,7 +256,7 @@ Example JSON: [`python-compute.example.json`](python-compute.example.json).
 | `PYTHON_COMPUTE_MAX_CODE_CHARS` | Max `code` string length | `262144` |
 | `PYTHON_COMPUTE_OCR_ALLOW_PATHS` | `{os.pathsep}`-separated prefixes allowed for vision `file_path` (empty = deny) | `""` |
 
-Key file permissions: readable only by the service user (e.g. mode `0400`).
+Key file permissions: readable only by the service user (e.g. mode `0400`). `./compute_service/start-docker.sh` runs the container as the invoking uid and gid, so a mode `600` file owned by that user is readable. The image user's uid does not have to match the host file.
 
 ### Production / Collabora Online
 
@@ -266,18 +266,14 @@ coolwsd is the only hop that should reach this process. Bind loopback, set the s
 
 `--network=none` cannot be combined with `-p` (published ports need a network namespace). Publish to loopback on the host, or use an internal bridge **without a default route**. Tenant sockets still fail via the AST sandbox plus missing egress.
 
-`load_settings` refuses a non-loopback bind that has no API key, so `python compute_service/server.py --host 0.0.0.0` fails the same way as the image. `./compute_service/start-docker.sh` still requires `PYTHON_COMPUTE_API_KEY` or `PYTHON_COMPUTE_API_KEY_FILE` before it publishes a port. When the file variable is set, the script mounts that host file read-only at `/run/secrets/python_compute_api_key` and sets the container's `PYTHON_COMPUTE_API_KEY_FILE` to that path. Loopback with no key remains allowed.
+`load_settings` refuses a non-loopback bind that has no API key, so `python compute_service/server.py --host 0.0.0.0` fails the same way as the image. `./compute_service/start-docker.sh` still requires `PYTHON_COMPUTE_API_KEY` or `PYTHON_COMPUTE_API_KEY_FILE` before it publishes a port. A relative key-file path is resolved from the directory where you run the script (before the script `cd`s to the repo root) and mounted read-only at `/run/secrets/python_compute_api_key`. The container's `PYTHON_COMPUTE_API_KEY_FILE` is that mount. When `PYTHON_COMPUTE_API_KEY` is set, the script writes it to a mode-600 temp file and mounts that instead. It does not pass `-e PYTHON_COMPUTE_API_KEY` (that value shows up in `ps`). If both are set, the env key wins, same as `load_settings`. `PYTHON_COMPUTE_PORT` (default `8000`) is the published host port and the port inside the container (`127.0.0.1:$PORT:$PORT`). The script also passes `--init` and `--user` of the invoking uid and gid. Loopback with no key remains allowed for a process you start yourself; the script will not publish a port without a key.
 
 ```bash
 PYTHON_COMPUTE_API_KEY=same-secret-as-coolwsd ./compute_service/start-docker.sh
-# or:
-docker build -f compute_service/Dockerfile -t python-compute .
-docker run --read-only --tmpfs /tmp:rw,size=64m,mode=1777 \
-  --memory=512m --memory-swap=512m --cpus=1 --pids-limit=256 \
-  --security-opt no-new-privileges --cap-drop ALL \
-  -p 127.0.0.1:8000:8000 \
-  -e PYTHON_COMPUTE_API_KEY=same-secret-as-coolwsd \
-  python-compute
+# or a key file, from the directory where you run the script:
+PYTHON_COMPUTE_API_KEY_FILE=./secret ./compute_service/start-docker.sh
+# or another port:
+PYTHON_COMPUTE_PORT=9001 PYTHON_COMPUTE_API_KEY_FILE=./secret ./compute_service/start-docker.sh
 ```
 
 Shared `mode=shared` **must** use a per-document `session_id` query parameter (`?session_id=<id>`) (not a user id). coolwsd should `POST /v1/session/reset?session_id=<id>` on DocumentBroker destroy / last view leave (caller not shipped; Online still hard-codes isolated). Session TTL (`shared_kernel_ttl_sec`) remains the safety net if reset is missed: the next sticky call resets that kernel.
@@ -334,8 +330,8 @@ Kit-side dumb JSON contract: [`docs/scripting/numpy-jailsafe.md`](../docs/script
 - **Linear Algebra / BLAS Thread Limits**: Numerical and vector libraries (`OPENBLAS_NUM_THREADS`, `OMP_NUM_THREADS`, `MKL_NUM_THREADS`, `VECLIB_MAXIMUM_THREADS`, `NUMEXPR_NUM_THREADS`) default to `1` thread per worker process via `setdefault()`. In multi-worker server pools, allowing each child process to spawn thread pools sized to all host CPU cores causes severe CPU over-subscription and cache thrashing on rapid calculations. Restricting each worker process to 1 thread ensures clean multi-core scaling across pool processes. (Note: LibrePy desktop is unconstrained and uses full system/user multithreading for desktop Calc workbooks).
 - **GIL Elimination**: Each worker runs its own Python interpreter, achieving true parallel multi-core scaling for pure-Python and NumPy workloads.
 - **Sticky Session Affinity**: For stateful calculations (`mode="shared"`), requests with the same `session_id` are routed to the process that owns that workbook. The supervisor maps are a cache of that pid: when the process exits, every session on it is dropped, and a respawn is not the same workbook. Clean workers without shared sessions are preferred for isolated work (`mode="isolated"`); however, when all idle workers hold shared sessions, isolated work falls back to the worker with the fewest sessions to avoid starving isolated calculations while waiting for shared session TTL. Shared sessions on one process still occupy it exclusively (one cell at a time). There are no explicit per-host caps on the number of active shared sessions: only coolwsd calls this service, and container OOM kills everything if memory limits are exceeded.
-- **Stderr log**: Each worker's stderr is a file, read when spawn or a request fails and removed when the child is reaped. The host keeps the last 64 KiB after each request, on each idle-reaper scan, and when a reap leaves the child alive, so one chatty child cannot grow the file between requests. A pipe would need a drain thread so a noisy child cannot fill the kernel buffer and deadlock the handshake.
-- **Timeouts**: The accept timestamp, the worker lease, and the child share one deadline. Reaping the previous child is inside that deadline; if the reap leaves under one second on a longer request, the slot does not start a new process. The child is given the time still left and returns an error frame when its alarm fires, so a normal timeout leaves the process up. `SIGKILL` is only when that frame never arrives. The exit callback runs only after `wait` reaps the pid, and that kill drops every shared session on it. A child still alive after the reap wait keeps the slot and its sessions.
+- **Stderr log**: Each worker's stderr is a file, read when a spawn fails or a request fails and kills the child, and removed when the child is reaped. The host keeps the last 64 KiB after each request, on each idle-reaper scan, and when a reap leaves the child alive, so one chatty child cannot grow the file between requests. A pipe would need a drain thread so a noisy child cannot fill the kernel buffer and deadlock the handshake. After `wait` reaps the child, the parent closes its stdin and stdout copies instead of leaving them until the `Popen` object is collected.
+- **Timeouts**: The accept timestamp, the worker lease, and the child share one deadline. Reaping the previous child is inside that deadline; if the reap leaves under one second on a longer request, the slot does not start a new process. A one-second budget stays usable with a short remainder so the pool can lift it to one second. A dead slot does not `Popen` once less than 0.25s is left on that clock. The child is given the time still left and returns an error frame when its alarm fires, so a normal timeout leaves the process up. `SIGKILL` is only when that frame never arrives. The exit callback runs only after `wait` reaps the pid, and that kill drops every shared session on it. A child still alive after the reap wait keeps the slot and its sessions.
 - **Task Recycling**: After `worker_max_tasks` (default: 500) the slot is killed and left dead; the next lease respawns it. Workers holding active stateful sessions (`mode="shared"`) skip that kill so the workbook stays up. A session past `shared_kernel_ttl_sec` (default: 1 hour) is reset on the next sticky call for that id.
 - **Idle Worker Reaper**: All worker pools terminate worker subprocesses that remain idle for > `idle_worker_ttl_sec` (default: 1 hour) to free system RAM. A dead pid is not idle. The next lease claims that slot and the following request respawns it after a ready handshake. A worker that still owns a shared session inside the session TTL is not idle-evicted. A worker whose sessions are all past that TTL is killed on the idle pass; process exit marks those ids lost. The reaper thread also runs when `shared_kernel_ttl_sec` is positive and `idle_worker_ttl_sec` is 0, so those abandoned kernels are not left up.
 
@@ -398,18 +394,22 @@ Log format includes timestamps, log level, request IDs, modes, code size, execut
 
 ```bash
 docker build -f compute_service/Dockerfile -t python-compute .
-docker run --rm -p 127.0.0.1:8000:8000 \
+docker run --rm --init -p 127.0.0.1:8000:8000 \
   --read-only --tmpfs /tmp:rw,size=64m,mode=1777 \
   --memory=1g --cpus=1 --pids-limit=256 \
   --security-opt no-new-privileges \
   --cap-drop ALL \
+  --user "$(id -u):$(id -g)" \
   -e PYTHON_COMPUTE_API_KEY_FILE=/run/secrets/key \
   -v /secure/key:/run/secrets/key:ro \
   python-compute
 ```
 
-- The image and `start-docker.sh` set `PYTHON_COMPUTE_HOST=0.0.0.0` so the published port reaches the process. The host publish stays on `127.0.0.1`. `HOST` and `PORT` are not read.
-- The multi-stage Dockerfile copies only pre-compiled packages into the runner image, drops root privileges (`USER appuser`), and excludes compiler build tools (`build-essential`).
+- The image and `start-docker.sh` set `PYTHON_COMPUTE_HOST=0.0.0.0` so the published port reaches the process. The host publish stays on `127.0.0.1`. `HOST` and `PORT` are not read. `start-docker.sh` publishes `127.0.0.1:$PYTHON_COMPUTE_PORT:$PYTHON_COMPUTE_PORT` (default `8000`) and passes that value into the container. The default memory limit is `1g` (`PYTHON_COMPUTE_MEMORY` overrides it). `--memory-swap` equals that value, so there is no extra swap. A cell loads numpy, pandas, sympy, scipy, and matplotlib into the worker.
+- `start-docker.sh` resolves `PYTHON_COMPUTE_API_KEY_FILE` to an absolute path from the caller's working directory. It runs `--init` and `--user` as the invoking uid and gid, so a mode `600` key file owned by that user is readable on rootful Docker. An env key is mounted from a temp file. It is not placed on the `docker run` command line. Rootless Docker remaps uids: container uid 0 is the host user, so `--user $(id -u)` can make that mode `600` file look like someone else's. The startup error then includes the process uid and the file owner. SELinux hosts need `:z` or `:Z` on the `-v` mount. The script leaves the mount `:ro`.
+- The image `HEALTHCHECK` calls `GET /health` with the Python stdlib. The base image has no curl. `HOME=/tmp` and `MPLCONFIGDIR=/tmp/mpl` sit on the `/tmp` tmpfs, because `--read-only` and a foreign `--user` have no writable home. Matplotlib creates `/tmp/mpl` itself.
+- The builder installs the pinned stack with `pip --only-binary=:all:` into `/app/pkgs` and does not install a compiler. A source build would link against libraries the runner never receives. The runner uses `USER appuser` and does not recurse ownership over `/app` (the tree is world-readable, and the real uid is the invoker's). `server.py` needs `plugin/vision/vision_common.py` at import. The desktop `plugin/vision/__init__.py` is not copied. OCR is not in this image. Every cell imports `plugin.scripting.named_scripts`, which imports `plugin.doc.doc_type`. The runner copies that module and not `plugin/doc/__init__.py`.
+- Formula workers drop `PYTHONPATH` before spawn, and `worker_base.install_image_pkgs` adds `/app/pkgs` to `sys.path` when it is present. Without that, the process reaches the ready handshake and then exits because numpy and sympy are not visible to the worker.
 
 ---
 
@@ -443,7 +443,7 @@ python scripts/benchmark_compute_service.py --workers 1,2,4 --concurrency 4
 # Multi-concurrency client load benchmark (1 to 32 concurrent clients)
 python scripts/benchmark_compute_service.py --concurrency 1,2,4,8,16,32 --requests 50 --threads 32
 
-# Battle-hardened stress scenario (32 clients hammering 2 workers, dual-wire peel+multipart, rapid process recycling every 25 tasks, concurrent reset traffic, and chaos hangs+crashes recovery by default)
+# Battle-hardened stress scenario (32 clients hammering 2 workers, dual-wire peel+multipart, rapid process recycling every 25 tasks, concurrent reset traffic, gated deadline-wait + queue absorption verification, and chaos hangs+crashes recovery by default)
 python scripts/benchmark_compute_service.py --stress
 
 # Optional overrides (e.g. custom workers, disable chaos, or adjust concurrency)
