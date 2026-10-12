@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 # master-branch raw.githubusercontent.com had no digest, so a swapped body was
 # imported into the LibreOffice process. Pin the commit and check sha256 before
 # the partial replaces a host-mapped native.
-_CONTRIB_COMMIT = "440924ec58ec29f3112c3eab643d4bb285861f20"
+_CONTRIB_COMMIT = "c8c615bfb5ed95936bae478fe3535677fa51accb"
 _CONTRIB_BASE_URL = f"https://raw.githubusercontent.com/KeithCu/writeragent/{_CONTRIB_COMMIT}/contrib/"
 # urlopen's default is no timeout, so a stalled native download blocked the caller.
 _NATIVE_DOWNLOAD_TIMEOUT_SEC = 60
@@ -33,26 +33,26 @@ _MAX_VEC_PACK_BYTES = 1_048_576
 # sha256 of contrib/vec_pack blobs at _CONTRIB_COMMIT. Audio zips are not pinned.
 _VEC_PACK_SHA256 = {
     "__init__.py": "cc00e1b2a43a73974798085e64df9492f744dad2415dbfeefe5582cd67433fb7",
-    "pack.cp311-win_amd64.pyd": "da48716e9dcbad3802d58d3a47da86a20ff941d845d413c0cbe5fb839fef8f17",
-    "pack.cp311-win_arm64.pyd": "0d113b50bbd035ed7b30c549964bcef740b3359e629d96ef7ec034209f238d50",
-    "pack.cp312-win_amd64.pyd": "62037eb470bd9a45da46c910eff808f5f775f91cce8406d4c87ed4b4fb2094c1",
-    "pack.cp312-win_arm64.pyd": "0c58c2480aad0aebbbaadc7b9f08dfd65e715811385e83d55bb5cef2a1bfee2f",
-    "pack.cp313-win_amd64.pyd": "6bc59ed46964e500424b73221b713c06e30f9b69a524dc9faff16514c5fa3c96",
-    "pack.cp313-win_arm64.pyd": "101e41dad713a305078b52f2ea4c572bb56496b7b12e78185e20511dd455e9f8",
-    "pack.cp314-win_amd64.pyd": "8fed7eb82dd45f1d42b5a631a118da0f5b201707f69825d29bdfeecf71a29109",
-    "pack.cp314-win_arm64.pyd": "3bfe863147fd56893540eee5065edad713468a0a92afe2db76bd6e18e482317c",
-    "pack.cpython-311-aarch64-linux-gnu.so": "6ae401976b22fdc0937b95adf7e87b679f0089cb61fe868e981d238ec63796ad",
-    "pack.cpython-311-darwin.so": "317d6a011c7851b0f31b4cf5d0f66fee26e82f3df959acda6877b8663c448d14",
-    "pack.cpython-311-x86_64-linux-gnu.so": "b0204142c0d7512385076bcf6266a0e88108947ebd304c7429ab6920237b04c7",
-    "pack.cpython-312-aarch64-linux-gnu.so": "e833d78dcd245e1293245eb36ed323ac02a7363d418f5142366d66c4a84bf0a8",
-    "pack.cpython-312-darwin.so": "992b62dec6a17779a8a429b26fad238c4d9d4662da061bcdea27f8b483b6cb86",
-    "pack.cpython-312-x86_64-linux-gnu.so": "2599b127bd99276eb6768700c17c5cb5ea99b361f9c75c90fbf2908236351c06",
-    "pack.cpython-313-aarch64-linux-gnu.so": "33f8119215e2e44c1209a0182774ba7d0266aa10542d268d129cdf68cbb4583f",
-    "pack.cpython-313-darwin.so": "7232b4cb3e74e14eb273c168f909239406b4b48cd8e665870031b83db8105617",
-    "pack.cpython-313-x86_64-linux-gnu.so": "fa57b98aafad56e5e79ff5e6015d5c9542e67ea1176de282fec416f8f5f2388d",
-    "pack.cpython-314-aarch64-linux-gnu.so": "606f65dcd0ca720792a8cc32833f161c0eddfddcbf513aca3162850dd518ca39",
-    "pack.cpython-314-darwin.so": "3d294d290a44cff8e557e9d0130abb9c62fd4ea1f10c347c84debdbdb22fc846",
-    "pack.cpython-314-x86_64-linux-gnu.so": "5102dd1f5ccc05c0b821e048e580949ad9977e4d507a78e2634c6b2cb8e6196f",
+    "pack.cp311-win_amd64.pyd": "def6f088500d03379260528a2f278ebdf6b748db24f2f4a98b16e4db639943aa",
+    "pack.cp311-win_arm64.pyd": "addf88b1f6f9035638742f7860dd4e4ec52281c179606e4d3ddb7b6818f69e9a",
+    "pack.cp312-win_amd64.pyd": "9e98ddec14a7894be0fa8e8f459ca7f0a07671967f5d9e1a3967aef0583da16b",
+    "pack.cp312-win_arm64.pyd": "0219cb61ac515db2fec48040a8d96155f7eca15258a1057a859dbecbcb1f374f",
+    "pack.cp313-win_amd64.pyd": "afa3dc4400354ab946a32cfe6aa4626cf775b6a4240e001c9d78a03b55b40b21",
+    "pack.cp313-win_arm64.pyd": "95c600c92d4d3cd3928421dfde55d8044fcd13dd95b58f51058dd90137a1eaad",
+    "pack.cp314-win_amd64.pyd": "7a9a5ed53cebc5ce6319af482f2d80df990517e6c71bd8f3883efd39fc7a803f",
+    "pack.cp314-win_arm64.pyd": "b5535f6b3c996fb28c53a96cb798cbdc2925c604ffb235f4b8a55b9a95af0b90",
+    "pack.cpython-311-aarch64-linux-gnu.so": "9b14aebde4cdd99c6e1d056ee41caf68406aef4557378a894ee0dd7c72e341d9",
+    "pack.cpython-311-darwin.so": "3984ad6ca90990b7e886f200dcb657060723237c91e1cbc8b1dded87cb6360ee",
+    "pack.cpython-311-x86_64-linux-gnu.so": "9a7742c3f113d7649b5471762750cb2ef03eb6f5afa5333b6484cf7e54f914b1",
+    "pack.cpython-312-aarch64-linux-gnu.so": "0d16b140d17139e20118d7cdd45471d575c8673b5d1cc03d1fade0e447d8fc2f",
+    "pack.cpython-312-darwin.so": "37199f72d1b556495e980674fcac2fbf8aedd6fba24879258949d01d6735d87e",
+    "pack.cpython-312-x86_64-linux-gnu.so": "6c9741f40215f2140203e3d26dba117864ac22d2f837f379d21f1a11273ace04",
+    "pack.cpython-313-aarch64-linux-gnu.so": "8b13961712f39115669893bd63983d853b260b77810cefed526e95303ded8ea9",
+    "pack.cpython-313-darwin.so": "55270025bafa819c8c3cc90deff314e0682664ba8863b015f621cd2ecc74cbc1",
+    "pack.cpython-313-x86_64-linux-gnu.so": "68e8f7171f8d01024fb6631f4591585e283b70e3b41572a4c75610930cd0ca34",
+    "pack.cpython-314-aarch64-linux-gnu.so": "7a287d3bd0a3fd32c5b9f903b9815c520f59e5a5dc04d961fc10107eb8e038c7",
+    "pack.cpython-314-darwin.so": "6f31caefd2eb875b061024db115c787ffd1a667de9bbdd806c097831490130c8",
+    "pack.cpython-314-x86_64-linux-gnu.so": "549c1473eea5b31c135f7160d5d66b5c9d3648ec09d190e0184e7fe482392055",
 }
 
 _MAX_AUDIO_BYTES = 1_048_576

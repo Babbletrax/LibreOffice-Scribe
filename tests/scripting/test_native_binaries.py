@@ -185,7 +185,7 @@ def test_run_vec_pack_download_invalidates_accelerator(tmp_path):
     from plugin.scripting.native_binaries import run_vec_pack_download
 
     assert "/master/" not in native_binaries._CONTRIB_BASE_URL
-    assert "440924ec58ec29f3112c3eab643d4bb285861f20" in native_binaries._CONTRIB_BASE_URL
+    assert native_binaries._CONTRIB_COMMIT in native_binaries._CONTRIB_BASE_URL
 
     with (
         patch("plugin.framework.config.user_config_dir", return_value=str(tmp_path)),
