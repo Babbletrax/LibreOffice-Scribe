@@ -866,7 +866,8 @@ class PageSetHeaderFooterText(ToolWriterPageBase):
         "pointed at the region's XText. Call page_get_header_footer_text first and edit "
         "that HTML. Enables the region if it is off. Pass auto_height=true so a taller "
         "letterhead grows instead of overlapping the body. Plain text is wrapped as a "
-        "paragraph and still goes through import."
+        "paragraph and still goes through import. To change one substring and leave "
+        "fields and floating graphics alone, use page_replace_header_footer_text."
     )
     parameters: dict[str, Any] | None = {
         "type": "object",
@@ -949,6 +950,433 @@ class PageSetHeaderFooterText(ToolWriterPageBase):
             return result
         except Exception as e:
             return self._tool_error(f"Error writing to {region} text on page style '{style_name}': {e}")
+
+
+# A field is one cursor step, but getString() expands it to the digits the reader
+# sees. goRight follows the cursor step, so the search string is built from portions
+# (\x01 per TextField), not from getString(). doc.findFirst is the wrong tool here
+# too: it hits the body first, and it cannot see a header on a page style no page uses.
+_FIELD_CURSOR_STEP = "\x01"
+
+
+def _portion_cursor_text(portion: Any) -> str:
+    """Text this portion contributes to a goRight index. A field is one step."""
+    try:
+        kind = portion.getPropertyValue("TextPortionType")
+    except Exception:
+        return ""
+    if kind == "TextField":
+        return _FIELD_CURSOR_STEP
+    try:
+        chunk = portion.getString()
+    except Exception:
+        return ""
+    return chunk if isinstance(chunk, str) else ""
+
+
+def _paragraph_cursor_text(para: Any) -> str | None:
+    """Concatenate portion steps for one paragraph. None when it cannot be walked."""
+    try:
+        portions = para.createEnumeration()
+    except Exception:
+        return None
+    parts: list[str] = []
+    seen = 0
+    while portions.hasMoreElements() is True and seen < _SCAN_PORTION_LIMIT:
+        seen += 1
+        try:
+            portion = portions.nextElement()
+        except Exception:
+            break
+        parts.append(_portion_cursor_text(portion))
+    record_walk_cap(portions, seen, _SCAN_PORTION_LIMIT, "text portions", None)
+    return "".join(parts)
+
+
+def _casefold_keeps_length(text: str) -> bool:
+    folded = text.lower()
+    return len(folded) == len(text)
+
+
+def _match_offsets(hay: str, needle: str, case_sensitive: bool) -> list[int]:
+    """Non-overlapping start indexes of *needle* in *hay*.
+
+    Case-insensitive search uses lower() only when that does not change length,
+    so the index still matches goRight. A length-changing fold falls back to
+    an exact match.
+    """
+    if not needle:
+        return []
+    if case_sensitive or not (_casefold_keeps_length(hay) and _casefold_keeps_length(needle)):
+        src, pat = hay, needle
+    else:
+        src, pat = hay.lower(), needle.lower()
+    step = len(needle)
+    hits: list[int] = []
+    start = 0
+    while True:
+        found = src.find(pat, start)
+        if found < 0:
+            break
+        hits.append(found)
+        start = found + step
+    return hits
+
+
+def _same_region_text(selected: Any, needle: str, case_sensitive: bool) -> bool:
+    """True when the cursor selection is the requested match."""
+    if not isinstance(selected, str):
+        return False
+    if case_sensitive or not (_casefold_keeps_length(selected) and _casefold_keeps_length(needle)):
+        return selected == needle
+    return selected.lower() == needle.lower()
+
+
+def _find_region_matches(text_obj: Any, needle: str, case_sensitive: bool) -> tuple[list[tuple[Any, int]], list[str]]:
+    """Return (paragraph, offset) hits and any walk-cap notes.
+
+    The offset is a goRight count from the paragraph start. A match may span
+    portions (mixed bold). It does not span a paragraph break.
+    """
+    hits: list[tuple[Any, int]] = []
+    notes: list[str] = []
+    try:
+        enum = text_obj.createEnumeration()
+    except Exception:
+        return hits, notes
+    seen = 0
+    while enum.hasMoreElements() is True and seen < _SCAN_PARA_LIMIT:
+        seen += 1
+        try:
+            para = enum.nextElement()
+        except Exception:
+            break
+        hay = _paragraph_cursor_text(para)
+        if hay is None:
+            continue
+        for offset in _match_offsets(hay, needle, case_sensitive):
+            hits.append((para, offset))
+    record_walk_cap(enum, seen, _SCAN_PARA_LIMIT, "paragraphs", notes)
+    return hits, notes
+
+
+def _cursor_for_match(text_obj: Any, para: Any, offset: int, length: int) -> Any | None:
+    """Collapsed cursor grown to the match. None when goRight cannot land there."""
+    try:
+        cursor = text_obj.createTextCursorByRange(para.getStart())
+    except Exception:
+        return None
+    try:
+        # `is False`: a MagicMock goRight() is truthy and must not abort the walk.
+        if offset and cursor.goRight(offset, False) is False:
+            return None
+        if cursor.goRight(length, True) is False:
+            return None
+    except Exception:
+        return None
+    return cursor
+
+
+def _point_before(text: Any, left: Any, right: Any) -> bool:
+    """True when *left* starts before *right* (compareRegionStarts == 1)."""
+    try:
+        return int(text.compareRegionStarts(left, right)) == 1
+    except Exception:
+        return False
+
+
+def _point_after(text: Any, left: Any, right: Any) -> bool:
+    """True when *left* ends after *right* (compareRegionEnds == -1)."""
+    try:
+        return int(text.compareRegionEnds(left, right)) == -1
+    except Exception:
+        return False
+
+
+def _ranges_overlap(text: Any, left: Any, right: Any) -> bool:
+    """True when the two ranges share a character. Touching at an edge does not."""
+    try:
+        a0, a1 = left.getStart(), left.getEnd()
+        b0, b1 = right.getStart(), right.getEnd()
+    except Exception:
+        return False
+    return _point_before(text, a0, b1) and _point_after(text, a1, b0)
+
+
+def _character_anchor_in_matches(doc: Any, text_obj: Any, cursors: list[Any]) -> str | None:
+    """Name of an AT_CHARACTER shape whose anchor lies inside a match, if any.
+
+    Probe A: setString on footer text left an AT_PARAGRAPH graphic and its
+    HyperLinkURL alone. An AT_CHARACTER anchor sits in the text range, so
+    setString there can drop the image. Refuse before writing.
+    """
+    from com.sun.star.text.TextContentAnchorType import AT_CHARACTER
+
+    try:
+        draw_page = doc.getDrawPage()
+        count = int(draw_page.getCount())
+    except Exception:
+        return None
+    shapes: list[Any] = []
+    for i in range(min(count, _SCAN_SHAPE_LIMIT)):
+        try:
+            shapes.append(draw_page.getByIndex(i))
+        except Exception:
+            break
+    for shape in shapes:
+        try:
+            anchor = shape.getAnchor()
+            if not uno_same(anchor.getText(), text_obj):
+                continue
+        except Exception:
+            continue
+        try:
+            if shape.getPropertyValue("AnchorType") != AT_CHARACTER:
+                continue
+        except Exception:
+            continue
+        for cursor in cursors:
+            if _ranges_overlap(text_obj, anchor, cursor):
+                return _shape_name(shape)
+    return None
+
+
+def _apply_match_cursors(doc: Any, text_obj: Any, cursors: list[Any], new_text: str) -> tuple[str | None, int, int]:
+    """setString from the last match backward. Returns (error, fields, shapes).
+
+    WriterCompoundUndo only groups; it does not undo a failed write. Several
+    matches have to leave the context and undo that title, same as a TOC
+    one-entry edit, or a later failure would leave the earlier replacements.
+    """
+    from .edit_review import next_agent_edit_undo_title
+
+    before = _scan_region_content(doc, text_obj)
+    after = before
+    title = next_agent_edit_undo_title()
+    mgr = None
+    try:
+        candidate = doc.getUndoManager()
+        # `is True`: MagicMock isLocked() is truthy and must not look locked.
+        if candidate is not None and candidate.isLocked() is not True:
+            candidate.enterUndoContext(title)
+            mgr = candidate
+    except Exception:
+        log.warning("header/footer replace: undo grouping skipped", exc_info=True)
+        mgr = None
+    if mgr is None and len(cursors) > 1:
+        return "Cannot replace every match in one undo step. Nothing was changed.", 0, 0
+
+    error: str | None = None
+    try:
+        for cursor in reversed(cursors):
+            cursor.setString(new_text)
+        after = _scan_region_content(doc, text_obj)
+        if len(after["fields"]) < len(before["fields"]) or len(after["images"]) < len(before["images"]):
+            raise RuntimeError("the replace removed a field or graphic")
+    except Exception as exc:
+        error = str(exc)
+    left = False
+    if mgr is not None:
+        try:
+            mgr.leaveUndoContext()
+            left = True
+        except Exception:
+            log.exception("header/footer replace: leaveUndoContext failed")
+            error = error or "Could not close the header/footer undo context."
+        if error and left:
+            try:
+                titles = mgr.getAllUndoActionTitles()
+                if titles and titles[0] == title:
+                    mgr.undo()
+            except Exception:
+                log.exception("header/footer replace rollback failed")
+    if error:
+        return error, 0, 0
+    return None, len(after["fields"]), len(after["images"])
+
+
+class PageReplaceHeaderFooterText(ToolWriterPageBase):
+    """Replace one substring in a header or footer without rewriting the region."""
+
+    name: str | None = "page_replace_header_footer_text"
+    description: str = (
+        "Replace one substring in this page-style header or footer. Leaves page-number "
+        "fields and floating graphics in place. One old_content/content pair per call — "
+        "call again for a second change, the same way apply_document_content search-replace "
+        "does. Does not turn the region on and does not rewrite it; use "
+        "page_set_header_footer_text for a full HTML replacement. A region that only mirrors "
+        "the shared header or footer is skipped. Refuses when an image is anchored to a "
+        "character inside the match."
+    )
+    parameters: dict[str, Any] | None = {
+        "type": "object",
+        "properties": {
+            "style": {
+                "type": "string",
+                "description": "Page style name. Defaults to 'Standard'.",
+            },
+            "region": {
+                "type": "string",
+                "enum": list(_REGIONS),
+                "description": (
+                    "Which region to edit. 'header'/'footer' are the shared ones. "
+                    "'_first' and '_left' are skipped when they only mirror the shared region."
+                ),
+            },
+            "old_content": {
+                "type": "string",
+                "description": "Exact substring to find in the region's text. Does not match inside a field.",
+            },
+            "content": {
+                "type": "string",
+                "description": "Text to write in place of old_content. Empty deletes the match.",
+            },
+            "case_sensitive": {
+                "type": "boolean",
+                "description": "Case-sensitive match (default true).",
+            },
+            "occurrence": {
+                "type": "integer",
+                "minimum": 0,
+                "description": "0-based match to replace (default 0). Cannot be combined with all_matches=true.",
+            },
+            "all_matches": {
+                "type": "boolean",
+                "description": "Replace every match (default false). Cannot be combined with occurrence.",
+            },
+        },
+        "required": ["region", "old_content", "content"],
+    }
+    is_mutation: bool | None = True
+
+    def execute(self, ctx: ToolContext, **kwargs: Any) -> dict[str, Any]:
+        style_name = kwargs.get("style", "Standard")
+        region = kwargs.get("region")
+        old_content = kwargs.get("old_content")
+        new_text = kwargs.get("content")
+        if region not in _REGION_PROPS:
+            return self._tool_error("region is required, one of: %s." % ", ".join(_REGIONS))
+        if not isinstance(old_content, str) or old_content == "":
+            return self._tool_error("old_content must be a non-empty string.")
+        if _FIELD_CURSOR_STEP in old_content:
+            return self._tool_error("old_content cannot include a field.")
+        if not isinstance(new_text, str):
+            return self._tool_error("content must be a string.")
+        case_sensitive = kwargs.get("case_sensitive", True)
+        if not isinstance(case_sensitive, bool):
+            return self._tool_error("case_sensitive must be a boolean.")
+        all_matches = kwargs.get("all_matches", False)
+        if not isinstance(all_matches, bool):
+            return self._tool_error("all_matches must be a boolean.")
+        raw_occurrence = kwargs.get("occurrence", None)
+        if all_matches and raw_occurrence is not None:
+            return self._tool_error("occurrence cannot be combined with all_matches=true.")
+        occurrence = 0
+        if raw_occurrence is not None:
+            if isinstance(raw_occurrence, bool) or not isinstance(raw_occurrence, int) or raw_occurrence < 0:
+                return self._tool_error("occurrence must be a non-negative integer.")
+            occurrence = raw_occurrence
+
+        try:
+            style, style_name = resolve_page_style(ctx.doc, style_name)
+        except Exception as e:
+            return self._tool_error("Error accessing page style '%s': %s" % (style_name, e))
+
+        # A shared mirror is the same text as header/footer. Editing it would
+        # surprise the caller who asked for the first or left page only.
+        if _region_mirrors_shared(style, region):
+            shared = _region_kind(region)
+            return {
+                "status": "skipped",
+                "style": style_name,
+                "region": region,
+                "mirrored": True,
+                "message": (
+                    "%s mirrors the shared %s. Edit region='%s' instead."
+                    % (region, shared, shared)
+                ),
+            }
+
+        is_on_prop, text_prop = _REGION_PROPS[region]
+        try:
+            is_on = style.getPropertyValue(is_on_prop) is True
+        except Exception:
+            is_on = False
+        if not is_on:
+            return self._tool_error(
+                "The %s is off on page style '%s'. Turn it on before replacing text."
+                % (region, style_name)
+            )
+        try:
+            text_obj = style.getPropertyValue(text_prop)
+        except Exception:
+            text_obj = None
+        if text_obj is None:
+            return self._tool_error(
+                "Could not retrieve text object for %s on style '%s'." % (region, style_name)
+            )
+
+        hits, notes = _find_region_matches(text_obj, old_content, case_sensitive)
+        if not hits:
+            message = "'%s' was not found in the %s of page style '%s'." % (old_content, region, style_name)
+            if notes:
+                message = "%s %s" % (message, notes[0])
+            return self._tool_error(message)
+        if all_matches:
+            chosen = hits
+        elif occurrence >= len(hits):
+            return self._tool_error(
+                "'%s' has %d match(es) in the %s; occurrence %d is past the end. Nothing was changed."
+                % (old_content, len(hits), region, occurrence)
+            )
+        else:
+            chosen = [hits[occurrence]]
+
+        cursors: list[Any] = []
+        for para, offset in chosen:
+            cursor = _cursor_for_match(text_obj, para, offset, len(old_content))
+            if cursor is None:
+                return self._tool_error(
+                    "Could not select '%s' in the %s. Nothing was changed." % (old_content, region)
+                )
+            try:
+                selected = cursor.getString()
+            except Exception:
+                selected = None
+            # The portion index and the cursor must name the same characters.
+            # A miss here means a field was counted wrong; do not setString.
+            if not _same_region_text(selected, old_content, case_sensitive):
+                return self._tool_error(
+                    "The match for '%s' did not line up with the text (a field may sit inside it). "
+                    "Nothing was changed." % old_content
+                )
+            cursors.append(cursor)
+
+        blocked = _character_anchor_in_matches(ctx.doc, text_obj, cursors)
+        if blocked:
+            return self._tool_error(
+                "An image (%s) is anchored to a character inside '%s', so replacing it would drop "
+                "the image. Nothing was changed." % (blocked, old_content)
+            )
+
+        error, fields_preserved, shapes_preserved = _apply_match_cursors(
+            ctx.doc, text_obj, cursors, new_text,
+        )
+        if error:
+            return self._tool_error(
+                "Could not replace '%s' in the %s: %s" % (old_content, region, error)
+            )
+        result: dict[str, Any] = {
+            "status": "ok",
+            "style": style_name,
+            "region": region,
+            "replaced_count": len(cursors),
+            "fields_preserved": fields_preserved,
+            "shapes_preserved": shapes_preserved,
+        }
+        if notes:
+            result["warning"] = notes[0]
+        return result
 
 
 # ------------------------------------------------------------------

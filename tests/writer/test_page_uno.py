@@ -22,7 +22,7 @@ from plugin.tests.testing_utils import (
     with_native_doc,
     writer_services_tool_context,
 )
-from com.sun.star.text.TextContentAnchorType import AT_PARAGRAPH
+from com.sun.star.text.TextContentAnchorType import AT_CHARACTER, AT_PARAGRAPH
 
 from plugin.writer.images.image_tools import (
     _file_url_for_path,
@@ -31,6 +31,7 @@ from plugin.writer.images.image_tools import (
 )
 from plugin.writer.page import (
     PageGetHeaderFooterText,
+    PageReplaceHeaderFooterText,
     PageSetHeaderFooterText,
     PageSetStyleProperties,
     _scan_region_content,
@@ -368,3 +369,110 @@ def test_copy_page_style_keeps_footer_field_and_graphic(ctx, doc):
     sources = _shapes_anchored_in(doc, footer)
     assert sources, "source footer graphic was moved instead of copied"
     assert any(s.getPropertyValue("HyperLinkURL") == source_url for s in sources)
+
+
+@native_test
+@with_native_doc("writer")
+def test_replace_footer_keeps_field_and_graphic(ctx, doc):
+    """Title and a literal after a field change; the page field and hyperlink stay.
+
+    Probes A and A'. The date field's visible text is longer than one cursor step,
+    so a getString() index would miss "274". "Annex 1: Intro" is split by a bold
+    run so the match has to span portions.
+    """
+    logo = _header_logo_path()
+    assert os.path.isfile(logo), "fixture image missing: %s" % logo
+    graphic = _graphic_from_provider(ctx, _file_url_for_path(logo))
+    assert graphic is not None, "GraphicProvider could not load the fixture"
+
+    style, name = _style(doc)
+    style.setPropertyValue("FooterIsOn", True)
+    footer = style.getPropertyValue("FooterText")
+    footer.setString("Annex 1: Intro")
+    bold = footer.createTextCursor()
+    bold.gotoStart(False)
+    bold.goRight(len("Annex"), True)
+    bold.setPropertyValue("CharWeight", 150.0)
+
+    cursor = footer.createTextCursor()
+    cursor.gotoEnd(False)
+    page_field = doc.createInstance("com.sun.star.text.textfield.PageNumber")
+    footer.insertTextContent(cursor, page_field, False)
+    cursor.gotoEnd(False)
+    footer.insertString(cursor, " ", False)
+    cursor.gotoEnd(False)
+    date_field = doc.createInstance("com.sun.star.text.textfield.DateTime")
+    footer.insertTextContent(cursor, date_field, False)
+    shown = date_field.getPresentation(False)
+    assert isinstance(shown, str) and len(shown) != 1, shown
+    cursor.gotoEnd(False)
+    footer.insertString(cursor, "274", False)
+
+    shape = doc.createInstance("com.sun.star.text.TextGraphicObject")
+    shape.setPropertyValue("Graphic", graphic)
+    shape.setPropertyValue("AnchorType", AT_PARAGRAPH)
+    shape.setPropertyValue("Width", 1500)
+    shape.setPropertyValue("Height", 1500)
+    shape.setPropertyValue("HyperLinkURL", "https://example.com/index")
+    cursor.gotoEnd(False)
+    footer.insertTextContent(cursor, shape, False)
+
+    tool = PageReplaceHeaderFooterText()
+    tool_ctx = _tool_ctx(doc, ctx)
+    title = tool.execute(
+        tool_ctx, style=name, region="footer",
+        old_content="Annex 1: Intro", content="Annex A: Methods",
+    )
+    assert title["status"] == "ok", title
+    assert title["replaced_count"] == 1
+    assert title["fields_preserved"] >= 1
+    assert title["shapes_preserved"] >= 1
+
+    literal = tool.execute(
+        tool_ctx, style=name, region="footer", old_content="274", content="300",
+    )
+    assert literal["status"] == "ok", literal
+    plain = footer.getString()
+    assert "Annex A: Methods" in plain, plain
+    assert "274" not in plain, plain
+    assert "300" in plain, plain
+    assert "Annex 1" not in plain, plain
+    scan = _scan_region_content(doc, footer)
+    assert len(scan["fields"]) >= 2, scan
+    linked = [
+        s for s in _shapes_anchored_in(doc, footer)
+        if s.getPropertyValue("HyperLinkURL") == "https://example.com/index"
+    ]
+    assert linked, "footer graphic or its hyperlink was dropped"
+
+
+@native_test
+@with_native_doc("writer")
+def test_replace_footer_refuses_character_anchor_inside_match(ctx, doc):
+    """AT_CHARACTER inside the match is refused and the footer text stays."""
+    logo = _header_logo_path()
+    graphic = _graphic_from_provider(ctx, _file_url_for_path(logo))
+    assert graphic is not None
+
+    style, name = _style(doc)
+    style.setPropertyValue("FooterIsOn", True)
+    footer = style.getPropertyValue("FooterText")
+    footer.setString("Annex 1: Intro")
+    cursor = footer.createTextCursor()
+    cursor.gotoStart(False)
+    cursor.goRight(len("Annex "), False)
+    shape = doc.createInstance("com.sun.star.text.TextGraphicObject")
+    shape.setPropertyValue("Graphic", graphic)
+    shape.setPropertyValue("AnchorType", AT_CHARACTER)
+    shape.setPropertyValue("Width", 800)
+    shape.setPropertyValue("Height", 800)
+    footer.insertTextContent(cursor, shape, False)
+    before = footer.getString()
+
+    res = PageReplaceHeaderFooterText().execute(
+        _tool_ctx(doc, ctx), style=name, region="footer",
+        old_content="Annex 1: Intro", content="Annex A: Methods",
+    )
+    assert res["status"] == "error", res
+    assert footer.getString() == before
+    assert _shapes_anchored_in(doc, footer), "refuse path removed the graphic"

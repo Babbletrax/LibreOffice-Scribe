@@ -153,6 +153,7 @@ DOMAIN_TOOLS = {   'bookmark': [   'bookmark_cleanup',
                 'page_get_header_footer_text',
                 'page_get_style_properties',
                 'page_insert_break',
+                'page_replace_header_footer_text',
                 'page_set_columns',
                 'page_set_header_footer_text',
                 'page_set_style_properties'],
@@ -347,6 +348,7 @@ TOOL_METHODS = {   'add_cell_comment': ('comment', 'add_cell_comment'),
     'page_get_header_footer_text': ('page', 'get_header_footer_text'),
     'page_get_style_properties': ('page', 'get_style_properties'),
     'page_insert_break': ('page', 'insert_break'),
+    'page_replace_header_footer_text': ('page', 'replace_header_footer_text'),
     'page_set_columns': ('page', 'set_columns'),
     'page_set_header_footer_text': ('page', 'set_header_footer_text'),
     'page_set_style_properties': ('page', 'set_style_properties'),
@@ -1520,6 +1522,20 @@ class _PageProxy:
         """
         return _rpc_call("page_insert_break", before_text=before_text, after_text=after_text, occurrence=occurrence, case_sensitive=case_sensitive)
 
+    def replace_header_footer_text(self, region: str, old_content: str, content: str, *, style: str | None = None, case_sensitive: bool | None = None, occurrence: int | None = None, all_matches: bool | None = None) -> dict[str, Any]:
+        """Replace one substring in this page-style header or footer. Leaves page-number fields and floating graphics in place. One old_content/content pair per call — call again for a second change, the same way apply_document_content search-replace does. Does not turn the region on and does not rewrite it; use page_set_header_footer_text for a full HTML replacement. A region that only mirrors the shared header or footer is skipped. Refuses when an image is anchored to a character inside the match.
+
+        Args:
+            region (required): Which region to edit. 'header'/'footer' are the shared ones. '_first' and '_left' are skipped when they only mirror the shared region. One of: header, footer, header_first, footer_first, header_left, footer_left.
+            old_content (required): Exact substring to find in the region's text. Does not match inside a field.
+            content (required): Text to write in place of old_content. Empty deletes the match.
+            style (optional): Page style name. Defaults to 'Standard'.
+            case_sensitive (optional): Case-sensitive match (default true).
+            occurrence (optional): 0-based match to replace (default 0). Cannot be combined with all_matches=true.
+            all_matches (optional): Replace every match (default false). Cannot be combined with occurrence.
+        """
+        return _rpc_call("page_replace_header_footer_text", style=style, region=region, old_content=old_content, content=content, case_sensitive=case_sensitive, occurrence=occurrence, all_matches=all_matches)
+
     def set_columns(self, column_count: int, *, style: str | None = None, spacing_mm: float | None = None) -> dict[str, Any]:
         """Set the number of columns and spacing for a page style.
 
@@ -1531,7 +1547,7 @@ class _PageProxy:
         return _rpc_call("page_set_columns", style=style, column_count=column_count, spacing_mm=spacing_mm)
 
     def set_header_footer_text(self, region: str, content: str, *, style: str | None = None, auto_height: bool | None = None) -> dict[str, Any]:
-        """Replace this page-style header or footer with HTML so logos, tables, and page-number fields survive — the same StarWriter import as apply_document_content, pointed at the region's XText. Call page_get_header_footer_text first and edit that HTML. Enables the region if it is off. Pass auto_height=true so a taller letterhead grows instead of overlapping the body. Plain text is wrapped as a paragraph and still goes through import.
+        """Replace this page-style header or footer with HTML so logos, tables, and page-number fields survive — the same StarWriter import as apply_document_content, pointed at the region's XText. Call page_get_header_footer_text first and edit that HTML. Enables the region if it is off. Pass auto_height=true so a taller letterhead grows instead of overlapping the body. Plain text is wrapped as a paragraph and still goes through import. To change one substring and leave fields and floating graphics alone, use page_replace_header_footer_text.
 
         Args:
             region (required): Which region to set. 'header'/'footer' are the shared ones; '_first' targets a 'different first page' letterhead and '_left' the left-hand pages. One of: header, footer, header_first, footer_first, header_left, footer_left.

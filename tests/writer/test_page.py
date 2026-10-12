@@ -12,6 +12,7 @@ setattr(sys.modules["com.sun.star.style.BreakType"], "PAGE_BEFORE", 4)
 from plugin.writer.page import (
     PageGetHeaderFooterText,
     PageGetStyleProperties,
+    PageReplaceHeaderFooterText,
     PageSetStyleProperties,
     PageSetHeaderFooterText,
     PageSetColumns,
@@ -831,4 +832,177 @@ def test_copy_page_style_inserts_without_touching_follow_style():
     assert stats["shapes_copied"] == 0
     for call in clone.setPropertyValue.call_args_list:
         assert call.args[0] != "FollowStyle"
+
+
+# --- header/footer: replace one substring, leave fields and graphics -----------
+
+
+class _ReplaceCursor:
+    """goRight cursor over a portion-index string. ``\\x01`` is one field step."""
+
+    def __init__(self, hay):
+        self.hay = hay
+        self.pos = 0
+        self.anchor = 0
+        self.written = None
+
+    def goRight(self, count, expand):
+        count = int(count)
+        nxt = self.pos + count
+        if nxt > len(self.hay):
+            return False
+        if not expand:
+            self.anchor = nxt
+        else:
+            self.anchor = self.pos
+        self.pos = nxt
+        return True
+
+    def getString(self):
+        if self.written is not None:
+            return self.written
+        start, end = (self.anchor, self.pos) if self.anchor <= self.pos else (self.pos, self.anchor)
+        return self.hay[start:end]
+
+    def setString(self, value):
+        self.written = value
+
+    def getStart(self):
+        return ("start", self.anchor)
+
+    def getEnd(self):
+        return ("end", self.pos)
+
+
+def _text_portion(text):
+    portion = _portion("Text")
+    portion.getString.return_value = text
+    return portion
+
+
+def _replace_doc(portions, shapes=(), hay=""):
+    """Page style whose footer enumerates *portions*. Cursors walk *hay*."""
+    text_obj = MagicMock()
+    text_obj.createEnumeration.side_effect = lambda: _enum_of([_paragraph(portions)])
+    text_obj.createTextCursorByRange.side_effect = lambda _rng: _ReplaceCursor(hay)
+    doc, _style = _page_style_doc(text_obj, shapes=shapes)
+    return doc, text_obj
+
+
+def _cursors_for(text_obj, hay):
+    """Record every cursor the replace tool builds so tests can see setString."""
+    seen = []
+
+    def make(_rng):
+        cursor = _ReplaceCursor(hay)
+        seen.append(cursor)
+        return cursor
+
+    text_obj.createTextCursorByRange.side_effect = make
+    return seen
+
+
+def _replace(doc, **kwargs):
+    args = {"style": "Standard", "region": "footer", "old_content": "Annex", "content": "Appendix"}
+    args.update(kwargs)
+    return PageReplaceHeaderFooterText().execute(SimpleNamespace(doc=doc), **args)
+
+
+def test_replace_header_footer_rejects_bad_args():
+    doc = MagicMock()
+    tool = PageReplaceHeaderFooterText()
+    both = tool.execute(
+        SimpleNamespace(doc=doc), region="footer", old_content="Annex", content="A",
+        occurrence=1, all_matches=True,
+    )
+    assert both["status"] == "error" and "all_matches" in both["message"]
+    empty = tool.execute(SimpleNamespace(doc=doc), region="footer", old_content="", content="A")
+    assert empty["status"] == "error" and "old_content" in empty["message"]
+    missing = tool.execute(SimpleNamespace(doc=doc), region="nope", old_content="Annex", content="A")
+    assert missing["status"] == "error" and "region" in missing["message"]
+    doc.getStyleFamilies.assert_not_called()
+
+
+def test_replace_header_footer_skips_mirrored_region_without_writing():
+    text_obj = MagicMock()
+    doc, style = _page_style_doc(text_obj)
+
+    def props(name):
+        if name == "FirstIsShared":
+            return True
+        if name.endswith("IsOn"):
+            return True
+        return text_obj
+
+    style.getPropertyValue.side_effect = props
+    res = _replace(doc, region="footer_first", old_content="Annex", content="Appendix")
+    assert res["status"] == "skipped" and res["mirrored"] is True
+    assert "region='footer'" in res["message"]
+    text_obj.createTextCursorByRange.assert_not_called()
+
+
+def test_replace_header_footer_missing_string_writes_nothing():
+    doc, text_obj = _replace_doc([_text_portion("Hello")], hay="Hello")
+    res = _replace(doc, old_content="Annex", content="Appendix")
+    assert res["status"] == "error" and "not found" in res["message"]
+    text_obj.createTextCursorByRange.assert_not_called()
+
+
+def test_replace_header_footer_occurrence_and_all_matches():
+    portions = [_text_portion("Annex and Annex")]
+    hay = "Annex and Annex"
+    doc, text_obj = _replace_doc(portions, hay=hay)
+    seen = _cursors_for(text_obj, hay)
+    second = _replace(doc, old_content="Annex", content="Appendix", occurrence=1)
+    assert second["status"] == "ok" and second["replaced_count"] == 1
+    assert len(seen) == 1 and seen[0].written == "Appendix" and seen[0].pos == 15
+
+    doc_all, text_all = _replace_doc(portions, hay=hay)
+    seen_all = _cursors_for(text_all, hay)
+    res_all = _replace(doc_all, old_content="Annex", content="Appendix", all_matches=True)
+    assert res_all["status"] == "ok" and res_all["replaced_count"] == 2
+    assert [c.written for c in seen_all] == ["Appendix", "Appendix"]
+
+    doc_past, _text_past = _replace_doc(portions, hay=hay)
+    past = _replace(doc_past, old_content="Annex", content="Appendix", occurrence=5)
+    assert past["status"] == "error" and "past the end" in past["message"]
+
+
+def test_replace_header_footer_counts_a_field_as_one_cursor_step():
+    """The literal after a field is indexed with \\x01, not the field's visible digits."""
+    hay = "Annex \x01 of 274"
+    portions = [_text_portion("Annex "), _portion("TextField", _page_number_field()), _text_portion(" of 274")]
+    doc, text_obj = _replace_doc(portions, hay=hay)
+    shape = _logo_anchored_in(text_obj)
+    doc.getDrawPage().getCount.return_value = 1
+    doc.getDrawPage().getByIndex.side_effect = lambda i: shape
+    seen = _cursors_for(text_obj, hay)
+    res = _replace(doc, old_content="274", content="300")
+    assert res["status"] == "ok", res
+    assert res["replaced_count"] == 1
+    assert res["fields_preserved"] == 1
+    assert res["shapes_preserved"] == 1
+    assert len(seen) == 1 and seen[0].written == "300"
+    # "Annex " (6) + field (1) + " of " (4) = 11. A getString() index would use the
+    # field's presentation ("1") and still land here only because that happens to
+    # be one character; the haystack itself is the cursor index.
+    assert seen[0].anchor == 11
+
+
+def test_replace_header_footer_refuses_character_anchored_image():
+    from com.sun.star.text.TextContentAnchorType import AT_CHARACTER
+
+    hay = "Annex 1: Intro"
+    portions = [_text_portion(hay)]
+    doc, text_obj = _replace_doc(portions, hay=hay)
+    seen = _cursors_for(text_obj, hay)
+    text_obj.compareRegionStarts.return_value = 1
+    text_obj.compareRegionEnds.return_value = -1
+    shape = _logo_anchored_in(text_obj, name="stamp")
+    shape.getPropertyValue.side_effect = lambda name: AT_CHARACTER if name == "AnchorType" else None
+    doc.getDrawPage().getCount.return_value = 1
+    doc.getDrawPage().getByIndex.side_effect = lambda i: shape
+    res = _replace(doc, old_content=hay, content="Annex A: Methods")
+    assert res["status"] == "error" and "stamp" in res["message"]
+    assert seen and seen[0].written is None
 

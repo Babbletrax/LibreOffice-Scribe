@@ -62,6 +62,8 @@ Region membership (is this draw-page shape or search hit in *this* header `XText
 
 `page_set_header_footer_text` imports that HTML into the same `XText` via `replace_xtext_with_html` (`html_import.py`) — StarWriter `insertDocumentFromURL`. Field spans are restored as live UNO fields after import (the HTML filter drops the empty span). Plain text is wrapped as a paragraph and still goes through import. Get the HTML, edit it, set it back — logos, tables, and fields stay live.
 
+`page_replace_header_footer_text` changes one substring in place (`old_content` / `content`, one pair per call, same shape as `apply_document_content` search-replace). It walks the region's portions and selects with `goRight`, counting each text field as one cursor step, so a page-number field and an `AT_PARAGRAPH` graphic stay. Call it again for a second change. It does not turn the region on. A `_first` or `_left` region that only mirrors the shared header or footer is skipped; edit `header` or `footer` instead. An image anchored `AT_CHARACTER` inside the match is refused, because `setString` on that range can drop it. Use `page_set_header_footer_text` when the whole region should be replaced.
+
 ### Python Example: Enabling and Writing to a Header
 ```python
 # Prefer the page tools: get returns HTML, set imports it back.
