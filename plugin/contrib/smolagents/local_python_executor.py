@@ -20,6 +20,7 @@ import difflib
 import inspect
 import logging
 import math
+import operator
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Generator, Mapping
@@ -71,9 +72,14 @@ def is_forbidden_dunder_attribute(name: str) -> bool:
     return name.startswith("__") and name.endswith("__") and name not in ALLOWED_DUNDER_ATTRIBUTES
 
 
-def nodunder_getattr(obj, name, default=None):
+_GETATTR_SENTINEL = object()
+
+
+def nodunder_getattr(obj, name, default=_GETATTR_SENTINEL):
     if is_forbidden_dunder_attribute(name):
         raise InterpreterError(f"Forbidden access to dunder attribute: {name}")
+    if default is _GETATTR_SENTINEL:
+        return getattr(obj, name)
     return getattr(obj, name, default)
 
 
@@ -91,8 +97,13 @@ def _reject_shared_object_mutation(obj: Any) -> None:
 
 
 def _guarded_setattr(obj: Any, name: str, value: Any) -> None:
+    # Previously, _guarded_setattr did not check is_forbidden_dunder_attribute,
+    # allowing setattr(obj, "__class__", ...) to bypass the dunder attribute guard.
+    if is_forbidden_dunder_attribute(name):
+        raise InterpreterError(f"Forbidden access to dunder attribute: {name}")
     _reject_shared_object_mutation(obj)
     setattr(obj, name, value)
+
 
 
 BASE_PYTHON_TOOLS = {
@@ -149,6 +160,12 @@ BASE_PYTHON_TOOLS = {
     "type": type,
     "complex": complex,
 }
+
+_IMPORT_OVERRIDABLE_TOOLS = frozenset(
+    k
+    for k, v in BASE_PYTHON_TOOLS.items()
+    if getattr(v, "__module__", None) == "math" or v is getattr(math, k, None)
+)
 
 # Non-exhaustive list of dangerous modules that should not be imported
 DANGEROUS_MODULES = [
@@ -265,10 +282,6 @@ class PrintContainer:
     def __init__(self):
         self.value = ""
 
-    def append(self, text):
-        self.value += text
-        return self
-
     def __iadd__(self, other):
         """Implements the += operator"""
         self.value += str(other)
@@ -282,28 +295,35 @@ class PrintContainer:
         """Representation for debugging"""
         return f"PrintContainer({self.value})"
 
-    def __len__(self):
-        """Implements len() function support"""
-        return len(self.value)
 
+# Control-flow signals (break/continue/return) and timeout previously subclassed
+# Exception, causing user `except Exception` blocks in the sandbox to swallow
+# returns, breaks, continues, and SIGALRM timeout errors.
+# Subclassing BaseException ensures these signals bypass `except Exception` clauses.
+class InterpreterSignal(BaseException):
+    """Base class for AST control flow signals (break, continue, return)."""
 
-class BreakException(Exception):
     pass
 
 
-class ContinueException(Exception):
+class BreakException(InterpreterSignal):
     pass
 
 
-class ReturnException(Exception):
+class ContinueException(InterpreterSignal):
+    pass
+
+
+class ReturnException(InterpreterSignal):
     def __init__(self, value):
         self.value = value
 
 
-class ExecutionTimeoutError(Exception):
+class ExecutionTimeoutError(BaseException):
     """Exception raised when code execution exceeds the maximum allowed time."""
 
     pass
+
 
 
 def timeout(timeout_seconds: int):
@@ -322,8 +342,10 @@ def timeout(timeout_seconds: int):
     Note:
         If a timeout occurs, the thread running the function cannot be forcefully killed
         in Python, so it will continue running in the background until completion. However,
-        the caller will receive a TimeoutError and can continue execution.
+        the caller will receive an ExecutionTimeoutError and can continue execution.
     """
+    if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int) or timeout_seconds < 1:
+        raise TypeError("executor timeout_seconds must be a whole number of seconds >= 1")
 
     def decorator(func):
         @wraps(func)
@@ -333,44 +355,61 @@ def timeout(timeout_seconds: int):
             # thread, signal.alarm runs the cell on that thread. Fall back to a
             # thread only when alarm cannot be installed.
             import signal
+            import time
+
+            start_time = time.monotonic()
 
             def sigalrm_handler(signum, frame):
-                raise ExecutionTimeoutError(f"Code execution exceeded the maximum execution time of {timeout_seconds} seconds")
+                raise ExecutionTimeoutError(
+                    f"Code execution exceeded the maximum execution time of {timeout_seconds} seconds"
+                )
 
             try:
                 old_handler = signal.signal(signal.SIGALRM, sigalrm_handler)
-                signal.alarm(timeout_seconds)
+                previous_alarm = signal.alarm(timeout_seconds)
+                # If an outer alarm was already active and sooner than timeout_seconds,
+                # keep the sooner deadline so the inner call cannot extend the budget.
+                if 0 < previous_alarm < timeout_seconds:
+                    signal.alarm(previous_alarm)
             except (ValueError, AttributeError):
-                # InterpreterError subclasses ValueError. Catching it around the
-                # cell treated a real timeout as "alarm unsupported", re-ran the
-                # cell on a thread, and ThreadPoolExecutor.shutdown waited for
-                # that thread. The compute host then SIGKILLed the process and
-                # dropped every other shared session on it. Only setup failures
-                # (not the main thread, or Windows) take this path.
-                with ThreadPoolExecutor(max_workers=1) as executor:
-                    future = executor.submit(func, *args, **kwargs)
-                    try:
-                        return future.result(timeout=timeout_seconds)
-                    except FuturesTimeoutError:
-                        raise ExecutionTimeoutError(f"Code execution exceeded the maximum execution time of {timeout_seconds} seconds")
+                # Fallback to ThreadPoolExecutor when SIGALRM cannot be installed
+                # (e.g. not the main thread, or on Windows).
+                # Bugfix: with ThreadPoolExecutor(...) waited on shutdown(wait=True),
+                # blocking the caller until the timed-out thread finished.
+                # Now shutdown(wait=False, cancel_futures=True) returns immediately.
+                # Note: cancel_futures does not stop an already running thread; the caller
+                # returns, and the orphan thread can still touch the shared executor.
+                executor = ThreadPoolExecutor(max_workers=1)
+                future = executor.submit(func, *args, **kwargs)
+                try:
+                    return future.result(timeout=timeout_seconds)
+                except FuturesTimeoutError:
+                    raise ExecutionTimeoutError(
+                        f"Code execution exceeded the maximum execution time of {timeout_seconds} seconds"
+                    )
+                finally:
+                    executor.shutdown(wait=False, cancel_futures=True)
+
             try:
                 return func(*args, **kwargs)
             finally:
-                signal.alarm(0)
+                elapsed_whole = int(time.monotonic() - start_time)
                 signal.signal(signal.SIGALRM, old_handler)
+                # Bugfix: previously signal.alarm(0) cancelled any outer alarm.
+                # Now restore the remaining whole seconds of the outer alarm under
+                # the previous handler, never canceling with 0 when an outer alarm existed.
+                if previous_alarm > 0:
+                    remaining = max(1, previous_alarm - elapsed_whole)
+                    signal.alarm(remaining)
+                else:
+                    signal.alarm(0)
 
         return wrapper
 
     return decorator
 
 
-def get_iterable(obj):
-    if isinstance(obj, list):
-        return obj
-    elif hasattr(obj, "__iter__"):
-        return list(obj)
-    else:
-        raise InterpreterError("Object is not iterable")
+
 
 
 def fix_final_answer_code(code: str) -> str:
@@ -401,27 +440,14 @@ def fix_final_answer_code(code: str) -> str:
     return code
 
 
-def build_import_tree(authorized_imports: list[str]) -> dict[str, Any]:
-    tree = {}
-    for import_path in authorized_imports:
-        parts = import_path.split(".")
-        current = tree
-        for part in parts:
-            if part not in current:
-                current[part] = {}
-            current = current[part]
-    return tree
-
-
 def check_import_authorized(import_to_check: str, authorized_imports: list[str]) -> bool:
-    current_node = build_import_tree(authorized_imports)
-    for part in import_to_check.split("."):
-        if "*" in current_node:
-            return True
-        if part not in current_node:
-            return False
-        current_node = current_node[part]
-    return True
+    if not import_to_check:
+        return False
+    # Bugfix: import_authorized and check_import_authorized previously diverged
+    # on package parents, aliases, and wildcards. Delegate directly to import_authorized.
+    from plugin.scripting.sandbox import import_authorized
+
+    return import_authorized(import_to_check, authorized_imports)
 
 
 def evaluate_attribute(
@@ -457,6 +483,45 @@ def evaluate_unaryop(
         raise InterpreterError(f"Unary operation {expression.op.__class__.__name__} is not supported.")
 
 
+def _build_signature(
+    ast_args: ast.arguments,
+    state: dict[str, Any],
+    static_tools: dict[str, Callable],
+    custom_tools: dict[str, Callable],
+    authorized_imports: list[str],
+) -> inspect.Signature:
+    # Evaluate positional and keyword defaults at definition time in the defining scope.
+    # Storing them on the signature prevents call-time re-evaluation and supports shared mutable defaults.
+    evaluated_defaults = [
+        evaluate_ast(d, state, static_tools, custom_tools, authorized_imports)
+        for d in ast_args.defaults
+    ]
+    pos_names = [a.arg for a in ast_args.posonlyargs] + [a.arg for a in ast_args.args]
+    defaults_map = dict(zip(pos_names[-len(evaluated_defaults):], evaluated_defaults))
+
+    evaluated_kw_defaults = [
+        evaluate_ast(d, state, static_tools, custom_tools, authorized_imports) if d is not None else None
+        for d in ast_args.kw_defaults
+    ]
+
+    params = []
+    for a in ast_args.posonlyargs:
+        default = defaults_map.get(a.arg, inspect.Parameter.empty)
+        params.append(inspect.Parameter(a.arg, inspect.Parameter.POSITIONAL_ONLY, default=default))
+    for a in ast_args.args:
+        default = defaults_map.get(a.arg, inspect.Parameter.empty)
+        params.append(inspect.Parameter(a.arg, inspect.Parameter.POSITIONAL_OR_KEYWORD, default=default))
+    if ast_args.vararg:
+        params.append(inspect.Parameter(ast_args.vararg.arg, inspect.Parameter.VAR_POSITIONAL))
+    for a, d in zip(ast_args.kwonlyargs, evaluated_kw_defaults):
+        default = d if d is not None else inspect.Parameter.empty
+        params.append(inspect.Parameter(a.arg, inspect.Parameter.KEYWORD_ONLY, default=default))
+    if ast_args.kwarg:
+        params.append(inspect.Parameter(ast_args.kwarg.arg, inspect.Parameter.VAR_KEYWORD))
+
+    return inspect.Signature(params)
+
+
 def evaluate_lambda(
     lambda_expression: ast.Lambda,
     state: dict[str, Any],
@@ -464,12 +529,15 @@ def evaluate_lambda(
     custom_tools: dict[str, Callable],
     authorized_imports: list[str],
 ) -> Callable:
-    args = [arg.arg for arg in lambda_expression.args.args]
+    sig = _build_signature(
+        lambda_expression.args, state, static_tools, custom_tools, authorized_imports
+    )
 
-    def lambda_func(*values: Any) -> Any:
+    def lambda_func(*values: Any, **kwargs: Any) -> Any:
+        bound = sig.bind(*values, **kwargs)
+        bound.apply_defaults()
         new_state = state.copy()
-        for arg, value in zip(args, values):
-            new_state[arg] = value
+        new_state.update(bound.arguments)
         return evaluate_ast(
             lambda_expression.body,
             new_state,
@@ -478,7 +546,9 @@ def evaluate_lambda(
             authorized_imports,
         )
 
+    lambda_func.__signature__ = sig
     return lambda_func
+
 
 
 def evaluate_while(
@@ -489,17 +559,24 @@ def evaluate_while(
     authorized_imports: list[str],
 ) -> None:
     iterations = 0
+    broke = False
     while evaluate_ast(while_loop.test, state, static_tools, custom_tools, authorized_imports):
         for node in while_loop.body:
             try:
                 evaluate_ast(node, state, static_tools, custom_tools, authorized_imports)
             except BreakException:
-                return None
+                broke = True
+                break
             except ContinueException:
                 break
+        if broke:
+            break
         iterations += 1
         if iterations > MAX_WHILE_ITERATIONS:
             raise InterpreterError(f"Maximum number of {MAX_WHILE_ITERATIONS} iterations in While loop exceeded")
+    if not broke and while_loop.orelse:
+        for node in while_loop.orelse:
+            evaluate_ast(node, state, static_tools, custom_tools, authorized_imports)
     return None
 
 
@@ -509,46 +586,26 @@ def create_function(
     static_tools: dict[str, Callable],
     custom_tools: dict[str, Callable],
     authorized_imports: list[str],
+    class_cell: list[type | None] | None = None,
 ) -> Callable:
+    if func_def.decorator_list:
+        raise InterpreterError("Decorators are not supported in the sandbox")
+
     source_code = ast.unparse(func_def)
+    sig = _build_signature(func_def.args, state, static_tools, custom_tools, authorized_imports)
 
     def new_func(*args: Any, **kwargs: Any) -> Any:
+        bound = sig.bind(*args, **kwargs)
+        bound.apply_defaults()
         func_state = state.copy()
-        arg_names = [arg.arg for arg in func_def.args.args]
-        default_values = [
-            evaluate_ast(d, state, static_tools, custom_tools, authorized_imports) for d in func_def.args.defaults
-        ]
+        func_state.update(bound.arguments)
+        if class_cell is not None:
+            func_state["__class_cell__"] = class_cell
 
-        # Apply default values
-        defaults = dict(zip(arg_names[-len(default_values) :], default_values))
-
-        # Set positional arguments
-        for name, value in zip(arg_names, args):
-            func_state[name] = value
-
-        # Set keyword arguments
-        for name, value in kwargs.items():
-            func_state[name] = value
-
-        # Handle variable arguments
-        if func_def.args.vararg:
-            vararg_name = func_def.args.vararg.arg
-            func_state[vararg_name] = args
-
-        if func_def.args.kwarg:
-            kwarg_name = func_def.args.kwarg.arg
-            func_state[kwarg_name] = kwargs
-
-        # Set default values for arguments that were not provided
-        for name, value in defaults.items():
-            if name not in func_state:
-                func_state[name] = value
-
-        # Update function state with self and __class__
+        # Update function state with self
         if func_def.args.args and func_def.args.args[0].arg == "self":
             if args:
                 func_state["self"] = args[0]
-                func_state["__class__"] = args[0].__class__
 
         result = None
         try:
@@ -566,6 +623,7 @@ def create_function(
     new_func.__ast__ = func_def
     new_func.__source__ = source_code
     new_func.__name__ = func_def.name
+    new_func.__signature__ = sig
 
     return new_func
 
@@ -577,8 +635,9 @@ def evaluate_function_def(
     custom_tools: dict[str, Callable],
     authorized_imports: list[str],
 ) -> Callable:
+    # Function definitions store the function only in state, not custom_tools.
+    # This prevents top-level or nested functions from leaking into shared tools.
     fn = create_function(func_def, state, static_tools, custom_tools, authorized_imports)
-    custom_tools[func_def.name] = fn
     state[func_def.name] = fn
     return fn
 
@@ -591,17 +650,29 @@ def evaluate_class_def(
     custom_tools: dict[str, Callable],
     authorized_imports: list[str],
 ) -> type:
+    if class_def.decorator_list:
+        raise InterpreterError("Decorators are not supported in the sandbox")
+
     class_name = class_def.name
     bases = [evaluate_ast(base, state, static_tools, custom_tools, authorized_imports) for base in class_def.bases]
 
     # Determine the metaclass to use
     # If any base class has a custom metaclass, use it
-    metaclass = type
-    for base in bases:
-        base_metaclass = type(base)
-        if base_metaclass is not type:
-            metaclass = base_metaclass
-            break
+    # Evaluate keywords (e.g. metaclass=)
+    metaclass = None
+    for kw in class_def.keywords:
+        if kw.arg == "metaclass":
+            metaclass = evaluate_ast(kw.value, state, static_tools, custom_tools, authorized_imports)
+        else:
+            raise InterpreterError(f"Unsupported class keyword argument '{kw.arg}'")
+
+    if metaclass is None:
+        metaclass = type
+        for base in bases:
+            base_metaclass = type(base)
+            if base_metaclass is not type:
+                metaclass = base_metaclass
+                break
 
     # Use __prepare__ if the metaclass provides it (e.g., Enum uses _EnumDict)
     if hasattr(metaclass, "__prepare__"):
@@ -609,43 +680,55 @@ def evaluate_class_def(
     else:
         class_dict = {}
 
+    class_cell: list[type | None] = [None]
+    eval_state = state.copy()
+    eval_state.update(class_dict)
+
     for stmt in class_def.body:
         if isinstance(stmt, ast.FunctionDef):
-            class_dict[stmt.name] = evaluate_ast(stmt, state, static_tools, custom_tools, authorized_imports)
+            fn = create_function(
+                stmt, state, static_tools, custom_tools, authorized_imports, class_cell=class_cell
+            )
+            class_dict[stmt.name] = fn
+            eval_state[stmt.name] = fn
         elif isinstance(stmt, ast.AnnAssign):
             if stmt.value:
-                value = evaluate_ast(stmt.value, state, static_tools, custom_tools, authorized_imports)
+                value = evaluate_ast(stmt.value, eval_state, static_tools, custom_tools, authorized_imports)
             target = stmt.target
             # Handle target types for annotation
             if isinstance(target, ast.Name):
                 # Simple variable annotation like "x: int"
-                annotation = evaluate_ast(stmt.annotation, state, static_tools, custom_tools, authorized_imports)
+                annotation = evaluate_ast(stmt.annotation, eval_state, static_tools, custom_tools, authorized_imports)
                 class_dict.setdefault("__annotations__", {})[target.id] = annotation
                 # Assign value if provided
                 if stmt.value:
                     class_dict[target.id] = value
+                    eval_state[target.id] = value
             elif isinstance(target, ast.Attribute):
                 # Attribute annotation like "obj.attr: int"
-                obj = evaluate_ast(target.value, class_dict, static_tools, custom_tools, authorized_imports)
+                obj = evaluate_ast(target.value, eval_state, static_tools, custom_tools, authorized_imports)
                 # If there's a value assignment, set the attribute
                 if stmt.value:
+                    _reject_shared_object_mutation(obj)
                     setattr(obj, target.attr, value)
             elif isinstance(target, ast.Subscript):
                 # Subscript annotation like "dict[key]: int"
-                container = evaluate_ast(target.value, class_dict, static_tools, custom_tools, authorized_imports)
-                index = evaluate_ast(target.slice, state, static_tools, custom_tools, authorized_imports)
+                container = evaluate_ast(target.value, eval_state, static_tools, custom_tools, authorized_imports)
+                index = evaluate_ast(target.slice, eval_state, static_tools, custom_tools, authorized_imports)
                 # If there's a value assignment, set the item
                 if stmt.value:
                     container[index] = value
             else:
                 raise InterpreterError(f"Unsupported AnnAssign target in class body: {type(target).__name__}")
         elif isinstance(stmt, ast.Assign):
-            value = evaluate_ast(stmt.value, state, static_tools, custom_tools, authorized_imports)
+            value = evaluate_ast(stmt.value, eval_state, static_tools, custom_tools, authorized_imports)
             for target in stmt.targets:
                 if isinstance(target, ast.Name):
                     class_dict[target.id] = value
+                    eval_state[target.id] = value
                 elif isinstance(target, ast.Attribute):
-                    obj = evaluate_ast(target.value, class_dict, static_tools, custom_tools, authorized_imports)
+                    obj = evaluate_ast(target.value, eval_state, static_tools, custom_tools, authorized_imports)
+                    _reject_shared_object_mutation(obj)
                     setattr(obj, target.attr, value)
         elif isinstance(stmt, ast.Pass):
             pass
@@ -661,6 +744,7 @@ def evaluate_class_def(
             raise InterpreterError(f"Unsupported statement in class body: {stmt.__class__.__name__}")
 
     new_class = metaclass(class_name, tuple(bases), class_dict)
+    class_cell[0] = new_class
     state[class_name] = new_class
     return new_class
 
@@ -682,6 +766,40 @@ def evaluate_annassign(
     return None
 
 
+AUGASSIGN_OPERATORS: dict[type[ast.operator], Callable[[Any, Any], Any]] = {
+    ast.Add: operator.iadd,
+    ast.Sub: operator.isub,
+    ast.Mult: operator.imul,
+    ast.Div: operator.itruediv,
+    ast.FloorDiv: operator.ifloordiv,
+    ast.Mod: operator.imod,
+    ast.Pow: operator.ipow,
+    ast.MatMult: operator.imatmul,
+    ast.LShift: operator.ilshift,
+    ast.RShift: operator.irshift,
+    ast.BitAnd: operator.iand,
+    ast.BitOr: operator.ior,
+    ast.BitXor: operator.ixor,
+}
+
+
+BINOP_OPERATORS: dict[type[ast.operator], Callable[[Any, Any], Any]] = {
+    ast.Add: operator.add,
+    ast.Sub: operator.sub,
+    ast.Mult: operator.mul,
+    ast.Div: operator.truediv,
+    ast.FloorDiv: operator.floordiv,
+    ast.Mod: operator.mod,
+    ast.Pow: operator.pow,
+    ast.MatMult: operator.matmul,
+    ast.LShift: operator.lshift,
+    ast.RShift: operator.rshift,
+    ast.BitAnd: operator.and_,
+    ast.BitOr: operator.or_,
+    ast.BitXor: operator.xor,
+}
+
+
 def evaluate_augassign(
     expression: ast.AugAssign,
     state: dict[str, Any],
@@ -689,67 +807,39 @@ def evaluate_augassign(
     custom_tools: dict[str, Callable],
     authorized_imports: list[str],
 ) -> Any:
-    def get_current_value(target: ast.AST) -> Any:
-        if isinstance(target, ast.Name):
-            return state.get(target.id, 0)
-        elif isinstance(target, ast.Subscript):
-            obj = evaluate_ast(target.value, state, static_tools, custom_tools, authorized_imports)
-            key = evaluate_ast(target.slice, state, static_tools, custom_tools, authorized_imports)
-            return obj[key]
-        elif isinstance(target, ast.Attribute):
-            obj = evaluate_ast(target.value, state, static_tools, custom_tools, authorized_imports)
-            return getattr(obj, target.attr)
-        elif isinstance(target, ast.Tuple):
-            return tuple(get_current_value(elt) for elt in target.elts)
-        elif isinstance(target, ast.List):
-            return [get_current_value(elt) for elt in target.elts]
-        else:
-            raise InterpreterError("AugAssign not supported for {type(target)} targets.")
+    target = expression.target
+    obj = None
+    key = None
 
-    current_value = get_current_value(expression.target)
+    if isinstance(target, ast.Name):
+        current_value = evaluate_name(target, state, static_tools, custom_tools, authorized_imports)
+    elif isinstance(target, ast.Subscript):
+        obj = evaluate_ast(target.value, state, static_tools, custom_tools, authorized_imports)
+        key = evaluate_ast(target.slice, state, static_tools, custom_tools, authorized_imports)
+        current_value = obj[key]
+    elif isinstance(target, ast.Attribute):
+        obj = evaluate_ast(target.value, state, static_tools, custom_tools, authorized_imports)
+        current_value = getattr(obj, target.attr)
+    else:
+        raise InterpreterError(f"Cannot assign to {type(target).__name__}")
+
     value_to_add = evaluate_ast(expression.value, state, static_tools, custom_tools, authorized_imports)
 
-    if isinstance(expression.op, ast.Add):
-        if isinstance(current_value, list):
-            if not isinstance(value_to_add, list):
-                raise InterpreterError(f"Cannot add non-list value {value_to_add} to a list.")
-            current_value += value_to_add
-        else:
-            current_value += value_to_add
-    elif isinstance(expression.op, ast.Sub):
-        current_value -= value_to_add
-    elif isinstance(expression.op, ast.Mult):
-        current_value *= value_to_add
-    elif isinstance(expression.op, ast.Div):
-        current_value /= value_to_add
-    elif isinstance(expression.op, ast.Mod):
-        current_value %= value_to_add
-    elif isinstance(expression.op, ast.Pow):
-        current_value **= value_to_add
-    elif isinstance(expression.op, ast.FloorDiv):
-        current_value //= value_to_add
-    elif isinstance(expression.op, ast.BitAnd):
-        current_value &= value_to_add
-    elif isinstance(expression.op, ast.BitOr):
-        current_value |= value_to_add
-    elif isinstance(expression.op, ast.BitXor):
-        current_value ^= value_to_add
-    elif isinstance(expression.op, ast.LShift):
-        current_value <<= value_to_add
-    elif isinstance(expression.op, ast.RShift):
-        current_value >>= value_to_add
-    else:
+    op_func = AUGASSIGN_OPERATORS.get(type(expression.op))
+    if op_func is None:
         raise InterpreterError(f"Operation {type(expression.op).__name__} is not supported.")
+    current_value = op_func(current_value, value_to_add)
 
-    # Update the state: current_value has been updated in-place
-    set_value(
-        expression.target,
-        current_value,
-        state,
-        static_tools,
-        custom_tools,
-        authorized_imports,
-    )
+    # Update target in-place without re-evaluating target.value or target.slice
+    if isinstance(target, ast.Name):
+        if target.id in static_tools:
+            raise InterpreterError(f"Cannot assign to name '{target.id}': doing this would erase the existing tool!")
+        state[target.id] = current_value
+    elif isinstance(target, ast.Subscript):
+        obj[key] = current_value
+    elif isinstance(target, ast.Attribute):
+        _reject_shared_object_mutation(obj)
+        setattr(obj, target.attr, current_value)
 
     return current_value
 
@@ -785,33 +875,10 @@ def evaluate_binop(
     left_val = evaluate_ast(binop.left, state, static_tools, custom_tools, authorized_imports)
     right_val = evaluate_ast(binop.right, state, static_tools, custom_tools, authorized_imports)
 
-    # Determine the operation based on the type of the operator in the BinOp
-    if isinstance(binop.op, ast.Add):
-        return left_val + right_val
-    elif isinstance(binop.op, ast.Sub):
-        return left_val - right_val
-    elif isinstance(binop.op, ast.Mult):
-        return left_val * right_val
-    elif isinstance(binop.op, ast.Div):
-        return left_val / right_val
-    elif isinstance(binop.op, ast.Mod):
-        return left_val % right_val
-    elif isinstance(binop.op, ast.Pow):
-        return left_val**right_val
-    elif isinstance(binop.op, ast.FloorDiv):
-        return left_val // right_val
-    elif isinstance(binop.op, ast.BitAnd):
-        return left_val & right_val
-    elif isinstance(binop.op, ast.BitOr):
-        return left_val | right_val
-    elif isinstance(binop.op, ast.BitXor):
-        return left_val ^ right_val
-    elif isinstance(binop.op, ast.LShift):
-        return left_val << right_val
-    elif isinstance(binop.op, ast.RShift):
-        return left_val >> right_val
-    else:
-        raise NotImplementedError(f"Binary operation {type(binop.op).__name__} is not implemented.")
+    op_func = BINOP_OPERATORS.get(type(binop.op))
+    if op_func is None:
+        raise InterpreterError(f"Binary operation {type(binop.op).__name__} is not supported.")
+    return op_func(left_val, right_val)
 
 
 def evaluate_assign(
@@ -822,19 +889,8 @@ def evaluate_assign(
     authorized_imports: list[str],
 ) -> Any:
     result = evaluate_ast(assign.value, state, static_tools, custom_tools, authorized_imports)
-    if len(assign.targets) == 1:
-        target = assign.targets[0]
+    for target in assign.targets:
         set_value(target, result, state, static_tools, custom_tools, authorized_imports)
-    else:
-        expanded_values = []
-        for tgt in assign.targets:
-            if isinstance(tgt, ast.Starred):
-                expanded_values.extend(result)
-            else:
-                expanded_values.append(result)
-
-        for tgt, val in zip(assign.targets, expanded_values):
-            set_value(tgt, val, state, static_tools, custom_tools, authorized_imports)
     return result
 
 
@@ -850,16 +906,32 @@ def set_value(
         if target.id in static_tools:
             raise InterpreterError(f"Cannot assign to name '{target.id}': doing this would erase the existing tool!")
         state[target.id] = value
-    elif isinstance(target, ast.Tuple):
-        if not isinstance(value, tuple):
-            if hasattr(value, "__iter__") and not isinstance(value, (str, bytes)):
-                value = tuple(value)
-            else:
-                raise InterpreterError("Cannot unpack non-tuple value")
-        if len(target.elts) != len(value):
-            raise InterpreterError("Cannot unpack tuple of wrong size")
-        for i, elem in enumerate(target.elts):
-            set_value(elem, value[i], state, static_tools, custom_tools, authorized_imports)
+    elif isinstance(target, (ast.Tuple, ast.List)):
+        if not hasattr(value, "__iter__"):
+            raise InterpreterError("Cannot unpack non-iterable value")
+        seq = list(value)
+        elts = target.elts
+        starred_indices = [i for i, elem in enumerate(elts) if isinstance(elem, ast.Starred)]
+        if len(starred_indices) > 1:
+            raise InterpreterError("multiple starred expressions in assignment")
+        elif len(starred_indices) == 1:
+            star_idx = starred_indices[0]
+            before = star_idx
+            after = len(elts) - 1 - star_idx
+            if len(seq) < before + after:
+                raise InterpreterError("Cannot unpack tuple of wrong size")
+            for i in range(before):
+                set_value(elts[i], seq[i], state, static_tools, custom_tools, authorized_imports)
+            mid_len = len(seq) - after
+            starred_val = seq[before:mid_len]
+            set_value(elts[star_idx].value, starred_val, state, static_tools, custom_tools, authorized_imports)
+            for i in range(after):
+                set_value(elts[star_idx + 1 + i], seq[mid_len + i], state, static_tools, custom_tools, authorized_imports)
+        else:
+            if len(elts) != len(seq):
+                raise InterpreterError("Cannot unpack tuple of wrong size")
+            for elem, item in zip(elts, seq):
+                set_value(elem, item, state, static_tools, custom_tools, authorized_imports)
     elif isinstance(target, ast.Subscript):
         obj = evaluate_ast(target.value, state, static_tools, custom_tools, authorized_imports)
         key = evaluate_ast(target.slice, state, static_tools, custom_tools, authorized_imports)
@@ -868,6 +940,8 @@ def set_value(
         obj = evaluate_ast(target.value, state, static_tools, custom_tools, authorized_imports)
         _reject_shared_object_mutation(obj)
         setattr(obj, target.attr, value)
+    else:
+        raise InterpreterError(f"Cannot assign to {type(target).__name__}")
 
 
 def _reject_numpy_code_exec(func: Any, args: list[Any], kwargs: dict[str, Any]) -> None:
@@ -929,6 +1003,8 @@ def evaluate_call(
     elif isinstance(call.func, ast.Attribute):
         obj = evaluate_ast(call.func.value, state, static_tools, custom_tools, authorized_imports)
         func_name = call.func.attr
+        if is_forbidden_dunder_attribute(func_name):
+            raise InterpreterError(f"Forbidden access to dunder attribute: {func_name}")
         if not hasattr(obj, func_name):
             raise InterpreterError(f"Object {obj} has no attribute {func_name}")
         func = getattr(obj, func_name)
@@ -942,6 +1018,8 @@ def evaluate_call(
             func = custom_tools[func_name]
         elif func_name in ERRORS:
             func = ERRORS[func_name]
+        elif func_name == "super":
+            func = "super"
         else:
             raise InterpreterError(
                 f"Forbidden function evaluation: '{call.func.id}' is not among the explicitly allowed tools or defined/imported in the preceding code"
@@ -971,10 +1049,11 @@ def evaluate_call(
             # Normal keyword argument
             kwargs[keyword.arg] = evaluate_ast(keyword.value, state, static_tools, custom_tools, authorized_imports)
 
-    if func_name == "super":
+    if isinstance(call.func, ast.Name) and func_name == "super":
         if not args:
-            if "__class__" in state and "self" in state:
-                return super(state["__class__"], state["self"])
+            cell = state.get("__class_cell__")
+            if cell is not None and cell[0] is not None and "self" in state:
+                return super(cell[0], state["self"])
             else:
                 raise InterpreterError("super() needs at least one argument")
         cls = args[0]
@@ -987,8 +1066,21 @@ def evaluate_call(
             return super(cls, instance)
         else:
             raise InterpreterError("super() takes at most 2 arguments")
-    elif func_name == "print":
-        state["_print_outputs"] += " ".join(map(str, args)) + "\n"
+    elif func is static_tools.get("print"):
+        # The print hijack runs only when the resolved callable is the injected
+        # custom_print tool (not an obj.print() method or user def print).
+        unknown = set(kwargs.keys()) - {"sep", "end", "file", "flush"}
+        if unknown:
+            raise TypeError(f"print() got an unexpected keyword argument '{next(iter(unknown))}'")
+        if kwargs.get("file") is not None:
+            raise InterpreterError("print() file= is unsupported in the sandbox")
+        sep = kwargs.get("sep", " ")
+        if sep is None:
+            sep = " "
+        end = kwargs.get("end", "\n")
+        if end is None:
+            end = "\n"
+        state["_print_outputs"] += sep.join(map(str, args)) + end
         return None
     else:  # Assume it's a callable object
         if (inspect.getmodule(func) == builtins) and inspect.isbuiltin(func) and (func not in static_tools.values()):
@@ -1023,15 +1115,13 @@ def evaluate_subscript(
     custom_tools: dict[str, Callable],
     authorized_imports: list[str],
 ) -> Any:
-    index = evaluate_ast(subscript.slice, state, static_tools, custom_tools, authorized_imports)
+    # Evaluate container before index to match Python evaluation order.
+    # Previously, indexing caught KeyError/IndexError/TypeError and wrapped
+    # them in InterpreterError, preventing user try/except from catching them.
     value = evaluate_ast(subscript.value, state, static_tools, custom_tools, authorized_imports)
-    try:
-        return value[index]
-    except (KeyError, IndexError, TypeError) as e:
-        error_message = f"Could not index {value} with '{index}': {type(e).__name__}: {e}"
-        if isinstance(index, str) and isinstance(value, Mapping):
-            error_message += _close_match_hint(index, list(value.keys()), label="indexes")
-        raise InterpreterError(error_message) from e
+    index = evaluate_ast(subscript.slice, state, static_tools, custom_tools, authorized_imports)
+    return value[index]
+
 
 
 def evaluate_name(
@@ -1053,6 +1143,20 @@ def evaluate_name(
     raise InterpreterError(f"The variable `{name.id}` is not defined{hint}.")
 
 
+COMPARE_OPERATORS: dict[type[ast.cmpop], Callable[[Any, Any], bool]] = {
+    ast.Eq: operator.eq,
+    ast.NotEq: operator.ne,
+    ast.Lt: operator.lt,
+    ast.LtE: operator.le,
+    ast.Gt: operator.gt,
+    ast.GtE: operator.ge,
+    ast.Is: operator.is_,
+    ast.IsNot: operator.is_not,
+    ast.In: lambda left, right: left in right,
+    ast.NotIn: lambda left, right: left not in right,
+}
+
+
 def evaluate_condition(
     condition: ast.Compare,
     state: dict[str, Any],
@@ -1060,34 +1164,15 @@ def evaluate_condition(
     custom_tools: dict[str, Callable],
     authorized_imports: list[str],
 ) -> bool | object:
-    result = True
+    result: bool | object = True
     left = evaluate_ast(condition.left, state, static_tools, custom_tools, authorized_imports)
-    for i, (op, comparator) in enumerate(zip(condition.ops, condition.comparators)):
-        op = type(op)
+    for i, (op_node, comparator) in enumerate(zip(condition.ops, condition.comparators)):
+        op_type = type(op_node)
+        op_func = COMPARE_OPERATORS.get(op_type)
+        if op_func is None:
+            raise InterpreterError(f"Unsupported comparison operator: {op_type.__name__}")
         right = evaluate_ast(comparator, state, static_tools, custom_tools, authorized_imports)
-        if op == ast.Eq:
-            current_result = left == right
-        elif op == ast.NotEq:
-            current_result = left != right
-        elif op == ast.Lt:
-            current_result = left < right
-        elif op == ast.LtE:
-            current_result = left <= right
-        elif op == ast.Gt:
-            current_result = left > right
-        elif op == ast.GtE:
-            current_result = left >= right
-        elif op == ast.Is:
-            current_result = left is right
-        elif op == ast.IsNot:
-            current_result = left is not right
-        elif op == ast.In:
-            current_result = left in right
-        elif op == ast.NotIn:
-            current_result = left not in right
-        else:
-            raise InterpreterError(f"Unsupported comparison operator: {op}")
-
+        current_result = op_func(left, right)
         if current_result is False:
             return False
         result = current_result if i == 0 else (result and current_result)
@@ -1126,6 +1211,7 @@ def evaluate_for(
 ) -> Any:
     result = None
     iterator = evaluate_ast(for_loop.iter, state, static_tools, custom_tools, authorized_imports)
+    broke = False
     for counter in iterator:
         set_value(
             for_loop.target,
@@ -1141,9 +1227,17 @@ def evaluate_for(
                 if line_result is not None:
                     result = line_result
             except BreakException:
-                return result
+                broke = True
+                break
             except ContinueException:
                 break
+        if broke:
+            break
+    if not broke and for_loop.orelse:
+        for node in for_loop.orelse:
+            line_result = evaluate_ast(node, state, static_tools, custom_tools, authorized_imports)
+            if line_result is not None:
+                result = line_result
     return result
 
 
@@ -1270,8 +1364,13 @@ def evaluate_try(
                 matched = True
                 if handler.name:
                     state[handler.name] = e
-                for stmt in handler.body:
-                    evaluate_ast(stmt, state, static_tools, custom_tools, authorized_imports)
+                stack: list[Exception] = state.setdefault("_active_exceptions", [])
+                stack.append(e)
+                try:
+                    for stmt in handler.body:
+                        evaluate_ast(stmt, state, static_tools, custom_tools, authorized_imports)
+                finally:
+                    stack.pop()
                 break
         if not matched:
             raise e
@@ -1295,7 +1394,11 @@ def evaluate_raise(
     if raise_node.exc is not None:
         exc = evaluate_ast(raise_node.exc, state, static_tools, custom_tools, authorized_imports)
     else:
-        exc = None
+        stack = state.get("_active_exceptions", [])
+        if not stack:
+            raise InterpreterError("Re-raise is not supported without an active exception")
+        exc = stack[-1]
+
     if raise_node.cause is not None:
         cause = evaluate_ast(raise_node.cause, state, static_tools, custom_tools, authorized_imports)
     else:
@@ -1334,17 +1437,31 @@ def evaluate_with(
     custom_tools: dict[str, Callable],
     authorized_imports: list[str],
 ) -> None:
+    # Context managers enter one by one; if a later __enter__ raises, previous
+    # managers must be exited in reverse. Previously, optional_vars used raw .id
+    # (crashing on tuple/list unpacks) and suppressing managers swallowed returns.
     contexts = []
-    for item in with_node.items:
-        context_expr = evaluate_ast(item.context_expr, state, static_tools, custom_tools, authorized_imports)
-        enter_result = context_expr.__enter__()
-        contexts.append(context_expr)
-        if item.optional_vars:
-            state[item.optional_vars.id] = enter_result
+    try:
+        for item in with_node.items:
+            context_expr = evaluate_ast(item.context_expr, state, static_tools, custom_tools, authorized_imports)
+            enter_result = context_expr.__enter__()
+            contexts.append(context_expr)
+            if item.optional_vars:
+                set_value(item.optional_vars, enter_result, state, static_tools, custom_tools, authorized_imports)
+    except BaseException:
+        for context in reversed(contexts):
+            context.__exit__(None, None, None)
+        raise
 
     try:
         for stmt in with_node.body:
             evaluate_ast(stmt, state, static_tools, custom_tools, authorized_imports)
+    except (InterpreterSignal, FinalAnswerException, ExecutionTimeoutError):
+        # A suppressing manager must not cancel a return, break, continue,
+        # final_answer(), or timeout alarm.
+        for context in reversed(contexts):
+            context.__exit__(None, None, None)
+        raise
     except Exception as e:
         # exc_info tracks the active exception as we unwind (from innermost context manager)
         # Resetting it to (None, None, None) signals suppression to the remaining outer managers
@@ -1360,6 +1477,7 @@ def evaluate_with(
     else:
         for context in reversed(contexts):
             context.__exit__(None, None, None)
+
 
 
 def _dangerous_module_name(name: str) -> bool:
@@ -1448,32 +1566,66 @@ def get_safe_module(raw_module, authorized_imports, visited=None):
     return safe_module
 
 
-def evaluate_import(expression, state, authorized_imports):
+def evaluate_import(
+    expression: ast.Import | ast.ImportFrom,
+    state: dict[str, Any],
+    authorized_imports: list[str],
+    static_tools: dict[str, Callable] | None = None,
+) -> None:
+    import sys
+
+    tools = static_tools if static_tools is not None else {}
+
     if isinstance(expression, ast.Import):
         for alias in expression.names:
-            if check_import_authorized(alias.name, authorized_imports):
-                raw_module = import_module(alias.name)
-                state[alias.asname or alias.name] = get_safe_module(raw_module, authorized_imports)
-            else:
+            if not check_import_authorized(alias.name, authorized_imports):
                 # Bugfix: keep import-failure messages short; dumping authorized_imports exposes duckdb.
                 raise InterpreterError(f"Import of {alias.name} is not allowed.")
+            raw_leaf = import_module(alias.name)
+            if alias.asname:
+                target_name = alias.asname
+                if target_name in tools and target_name not in _IMPORT_OVERRIDABLE_TOOLS:
+                    raise InterpreterError(
+                        f"Cannot assign to name '{target_name}': doing this would erase the existing tool!"
+                    )
+                state[target_name] = get_safe_module(raw_leaf, authorized_imports)
+            else:
+                top_name = alias.name.split(".", 1)[0]
+                if top_name in tools and top_name not in _IMPORT_OVERRIDABLE_TOOLS:
+                    raise InterpreterError(
+                        f"Cannot assign to name '{top_name}': doing this would erase the existing tool!"
+                    )
+                state[top_name] = get_safe_module(sys.modules[top_name], authorized_imports)
         return None
     elif isinstance(expression, ast.ImportFrom):
+        if expression.level != 0 or expression.module is None:
+            raise InterpreterError("Relative imports are not allowed.")
         if check_import_authorized(expression.module, authorized_imports):
             raw_module = __import__(expression.module, fromlist=[alias.name for alias in expression.names])
             module = get_safe_module(raw_module, authorized_imports)
             if expression.names[0].name == "*":  # Handle "from module import *"
                 if hasattr(module, "__all__"):  # If module has __all__, import only those names
                     for name in module.__all__:
+                        if name in tools:
+                            # Silently skip names in static_tools (overridable or not)
+                            continue
                         state[name] = getattr(module, name)
                 else:  # If no __all__, import all public names (those not starting with '_')
                     for name in dir(module):
                         if not name.startswith("_"):
+                            if name in tools:
+                                # Silently skip names in static_tools (overridable or not)
+                                continue
                             state[name] = getattr(module, name)
             else:  # regular from imports
                 for alias in expression.names:
+                    target_name = alias.asname or alias.name
+                    if target_name in tools and target_name not in _IMPORT_OVERRIDABLE_TOOLS:
+                        raise InterpreterError(
+                            f"Cannot assign to name '{target_name}': doing this would erase the existing tool!"
+                        )
                     if hasattr(module, alias.name):
-                        state[alias.asname or alias.name] = getattr(module, alias.name)
+                        state[target_name] = getattr(module, alias.name)
                     else:
                         raise InterpreterError(f"Module {expression.module} has no attribute {alias.name}")
         else:
@@ -1526,13 +1678,10 @@ def evaluate_delete(
             else:
                 raise InterpreterError(f"Cannot delete name '{target.id}': name is not defined")
         elif isinstance(target, ast.Subscript):
-            # Handle index/key deletion (del x[y])
+            # Handle index/key deletion (del x[y]); propagate KeyError/IndexError/TypeError directly
             obj = evaluate_ast(target.value, state, static_tools, custom_tools, authorized_imports)
             index = evaluate_ast(target.slice, state, static_tools, custom_tools, authorized_imports)
-            try:
-                del obj[index]
-            except (TypeError, KeyError, IndexError) as e:
-                raise InterpreterError(f"Cannot delete index/key: {str(e)}")
+            del obj[index]
         else:
             raise InterpreterError(f"Deletion of {type(target).__name__} targets is not supported")
 
@@ -1586,7 +1735,13 @@ def evaluate_ast(
         # Constant -> just return the value
         return expression.value
     elif isinstance(expression, ast.Tuple):
-        return tuple((evaluate_ast(elt, *common_params) for elt in expression.elts))
+        result_tuple = []
+        for elt in expression.elts:
+            if isinstance(elt, ast.Starred):
+                result_tuple.extend(evaluate_ast(elt.value, *common_params))
+            else:
+                result_tuple.append(evaluate_ast(elt, *common_params))
+        return tuple(result_tuple)
     elif isinstance(expression, ast.GeneratorExp):
         return evaluate_generatorexp(expression, *common_params)
     elif isinstance(expression, ast.ListComp):
@@ -1617,10 +1772,19 @@ def evaluate_ast(
     elif isinstance(expression, ast.FunctionDef):
         return evaluate_function_def(expression, *common_params)
     elif isinstance(expression, ast.Dict):
-        # Dict -> evaluate all keys and values
-        keys = (evaluate_ast(k, *common_params) for k in expression.keys)
-        values = (evaluate_ast(v, *common_params) for v in expression.values)
-        return dict(zip(keys, values))
+        # Dict -> evaluate all keys and values, supporting {**d} unpack when key is None
+        result_dict = {}
+        for k, v in zip(expression.keys, expression.values):
+            if k is None:
+                val = evaluate_ast(v, *common_params)
+                if not isinstance(val, dict):
+                    raise InterpreterError(f"Cannot unpack non-dict value in dict literal: {type(val).__name__}")
+                result_dict.update(val)
+            else:
+                key = evaluate_ast(k, *common_params)
+                val = evaluate_ast(v, *common_params)
+                result_dict[key] = val
+        return result_dict
     elif isinstance(expression, ast.Expr):
         # Expression -> evaluate the content
         return evaluate_ast(expression.value, *common_params)
@@ -1630,6 +1794,12 @@ def evaluate_ast(
     elif isinstance(expression, ast.FormattedValue):
         # Formatted value (part of f-string) -> evaluate the content and format it
         value = evaluate_ast(expression.value, *common_params)
+        if expression.conversion == 115:
+            value = str(value)
+        elif expression.conversion == 114:
+            value = repr(value)
+        elif expression.conversion == 97:
+            value = ascii(value)
         # Early return if no format spec
         if not expression.format_spec:
             return value
@@ -1644,8 +1814,14 @@ def evaluate_ast(
     elif isinstance(expression, ast.JoinedStr):
         return "".join([str(evaluate_ast(v, *common_params)) for v in expression.values])
     elif isinstance(expression, ast.List):
-        # List -> evaluate all elements
-        return [evaluate_ast(elt, *common_params) for elt in expression.elts]
+        # List -> evaluate all elements, expanding starred elements
+        result_list = []
+        for elt in expression.elts:
+            if isinstance(elt, ast.Starred):
+                result_list.extend(evaluate_ast(elt.value, *common_params))
+            else:
+                result_list.append(evaluate_ast(elt, *common_params))
+        return result_list
     elif isinstance(expression, ast.Name):
         # Name -> pick up the value in the state
         return evaluate_name(expression, *common_params)
@@ -1669,7 +1845,7 @@ def evaluate_ast(
     elif isinstance(expression, ast.While):
         return evaluate_while(expression, *common_params)
     elif isinstance(expression, (ast.Import, ast.ImportFrom)):
-        return evaluate_import(expression, state, authorized_imports)
+        return evaluate_import(expression, state, authorized_imports, static_tools=static_tools)
     elif isinstance(expression, ast.ClassDef):
         return evaluate_class_def(expression, *common_params)
     elif isinstance(expression, ast.Try):
@@ -1681,7 +1857,13 @@ def evaluate_ast(
     elif isinstance(expression, ast.With):
         return evaluate_with(expression, *common_params)
     elif isinstance(expression, ast.Set):
-        return set((evaluate_ast(elt, *common_params) for elt in expression.elts))
+        result_set = set()
+        for elt in expression.elts:
+            if isinstance(elt, ast.Starred):
+                result_set.update(evaluate_ast(elt.value, *common_params))
+            else:
+                result_set.add(evaluate_ast(elt, *common_params))
+        return result_set
     elif isinstance(expression, ast.Return):
         raise ReturnException(evaluate_ast(expression.value, *common_params) if expression.value else None)
     elif isinstance(expression, ast.Pass):
@@ -1848,38 +2030,13 @@ class LocalPythonExecutor(PythonExecutor):
         # WriterAgent vendored change (2026-05): upstream HuggingFace smolagents calls
         # _check_authorized_imports_are_installed() here, which runs find_spec() on every
         # whitelisted top-level module at executor construction ("Non-installed authorized
-        # modules: …"). We disabled that pre-flight probe (see commented-out call and method
-        # below—kept for upstream diff reference). Import policy is whitelist-only:
+        # modules: …"). We disabled that pre-flight probe. Import policy is whitelist-only:
         # evaluate_import → check_import_authorized → import_module at the line that imports.
         # If a whitelisted package is missing, the user gets a normal ModuleNotFoundError
         # wrapped as InterpreterError when their code actually imports it—not at init.
-        # self._check_authorized_imports_are_installed()
         self.static_tools = None
         self.additional_functions = additional_functions or {}
         self.timeout_seconds = timeout_seconds
-
-    # --- WriterAgent: upstream pre-flight install check (disabled; kept for patch reference) ---
-    # def _check_authorized_imports_are_installed(self):
-    #     """
-    #     Check that all authorized imports are installed on the system.
-    #
-    #     Handles wildcard imports ("*") and partial star-pattern imports (e.g., "os.*").
-    #
-    #     Raises:
-    #         InterpreterError: If any of the authorized modules are not installed.
-    #     """
-    #     from importlib.util import find_spec
-    #
-    #     missing_modules = [
-    #         base_module
-    #         for imp in self.authorized_imports
-    #         if imp != "*" and find_spec(base_module := imp.split(".")[0]) is None
-    #     ]
-    #     if missing_modules:
-    #         raise InterpreterError(
-    #             f"Non-installed authorized modules: {', '.join(missing_modules)}. "
-    #             f"Please install these modules or remove them from the authorized imports list."
-    #         )
 
     def __call__(self, code_action: str) -> CodeOutput:
         output, is_final_answer = evaluate_python_code(
