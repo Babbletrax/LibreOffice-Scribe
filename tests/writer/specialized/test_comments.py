@@ -17,7 +17,7 @@ def test_read_annotation_falls_back_to_paragraph_context():
     field.getPropertyValue.side_effect = lambda p: {"Author": "Rev", "Content": "note"}.get(p, "")
     doc_svc = MagicMock()
     doc_svc.find_paragraph_for_range.return_value = 7
-    with patch("plugin.writer.search._enclosing_paragraph_text", return_value="  the clause the comment covers  "):
+    with patch("plugin.writer.search.enclosing_paragraph_text", return_value="  the clause the comment covers  "):
         entry = _read_annotation(field, [], MagicMock(), doc_svc)
     assert entry["anchor_preview"] == "the clause the comment covers"
     assert entry["anchor_is_paragraph_context"] is True

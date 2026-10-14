@@ -965,6 +965,8 @@ Parameters: `pattern` (required), `regex` (default **false**), `case_sensitive` 
 `max_results` (default 20), `return_offsets` (default **false** — body literal offsets only; no regex,
 no shapes/comments). Invalid regex with zero hits returns `code: INVALID_REGEX`.
 
+`max_results` must be a positive integer. Body, table, and text frame searches use LibreOffice/ICU regex, while floating shapes and comments use Python `re` after a Python `re.compile` validation check; `SEARCH_FAILED` includes the underlying exception text. A zero-width match stops the text-model walk, preserves `status: "ok"`, and sets `truncated: true` with a warning. A global cap of 10000 matches covers body text plus shapes and comments. `return_offsets=true` drops non-body `XText` hits (such as headers, footers, tables, and frames) while counting tracked deletions in the offset space.
+
 `apply_document_content` `dry_run=true` previews edit-reachable matches plus shape/comment counts
 (see `edit_reach_note` in the result). Replaceable body/table/frame rows include `occurrence` (0-based,
 the index to pass back); shape/comment rows do not. `replaceable_count` is the edit-path index space.

@@ -137,3 +137,27 @@ def test_advanced_search_tool():
 @native_test
 def test_get_index_stats():
     return
+
+
+@native_test
+@with_native_doc("writer")
+def test_search_in_document_zero_width_regex_is_truncated(ctx, doc):
+    text = doc.getText()
+    cursor = text.createTextCursor()
+    cursor.setString("Hello")
+    tool = SearchInDocument()
+    mock_ctx = MockContext(doc, ctx)
+
+    # In this LibreOffice environment, ICU findFirst for "^" returns None (0 hits)
+    # rather than an empty TextRange hit. The zero-width contract is verified in
+    # unit tests (test_search_in_document_zero_width_sets_truncated).
+    sd = doc.createSearchDescriptor()
+    sd.SearchString = "^"
+    sd.SearchRegularExpression = True
+    found = doc.findFirst(sd)
+    assert found is None
+
+    res = tool.execute(mock_ctx, pattern="^", regex=True)
+    assert res["status"] == "ok"
+    assert res["count"] == 0
+    assert res["matches"] == []
