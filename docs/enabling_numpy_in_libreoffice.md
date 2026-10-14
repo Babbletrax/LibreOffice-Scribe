@@ -601,7 +601,7 @@ Without the index argument, repeated evaluations in the same recalc pass return 
 
 #### Dynamic auto-spill {#dynamic-auto-spill}
 
-Desktop spill is the `scripting.python_auto_spill` setting. Collabora Online single-cell spill: [engine spill plan](calc/collabora-engine-spill-plan.md). When rows or columns are inserted, the modify listener detects the coordinate delta and remaps the spill registry instead of clearing neighbor cells. A multi-cell selection in the UI does not suppress auto-spill when the formula origin cell is unique on the sheet. When spilled cells are cleared due to formula deletion or replacement, hard number formatting attributes are dropped along with cell contents.
+Desktop spill is the `scripting.python_auto_spill` setting. Collabora Online single-cell spill: [engine spill plan](calc/collabora-engine-spill-plan.md). When rows or columns are inserted, the modify listener detects the coordinate delta and remaps the spill registry instead of clearing neighbor cells. A multi-cell selection does not suppress auto-spill when the formula origin is unique and is not itself a multi-cell array formula. A `{=PY()}` / `{=PYTHON()}` array formula (Ctrl+Shift+Enter, `setArrayFormula`) skips spill because `collapseToCurrentArray` on that origin spans the block, and repeated evaluations in that pass return successive list elements. When the origin cannot be located, spill is not written. When spilled cells are cleared because the formula was deleted or replaced, hard number formats are cleared with the values.
 
 ### Usage
 

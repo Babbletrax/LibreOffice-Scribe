@@ -51,25 +51,36 @@ def test_python_matrix_via_index_argument(ctx, doc):
 @native_test
 @with_native_doc("calc")
 def test_python_matrix_via_session_counter(ctx, doc):
-    """Without index arg, repeated evals of one unique origin emit successive list elements.
+    """Without an index, repeated evals of one array-formula origin emit successive elements.
 
-    Auto-spill is skipped when the current selection is a multi-cell range (matrix formula).
+    Ctrl+Shift+Enter stores one array formula over the block (setArrayFormula)
+    before Calc interprets it. Spill is skipped because collapseToCurrentArray
+    on that origin spans A1:A3, not because the selection is a range. The
+    selection here is that same range, which is the selection after the block
+    is entered. An ordinary setFormula cell with a range selected must return
+    the corner every time; see
+    test_ordinary_formula_multi_cell_selection_returns_corner.
     """
     from plugin.calc.python.addin import PythonFunction
-    from plugin.calc.python.function import clear_python_addin_cache
+    from plugin.calc.python.function import clear_in_memory_spill_state, clear_python_addin_cache
+    from plugin.calc.python.workbook_lifecycle import _lifecycle_key
 
     code = "result = [2, 3, 5]"
     sheet = doc.getCurrentController().getActiveSheet()
-    sheet.getCellByPosition(0, 0).setFormula('=PYTHON("result = [2, 3, 5]")')
-    doc.getCurrentController().select(sheet.getCellRangeByPosition(0, 0, 0, 2))
+    range_obj = sheet.getCellRangeByPosition(0, 0, 0, 2)
+    range_obj.setArrayFormula('=PYTHON("result = [2, 3, 5]")')
+    doc.getCurrentController().select(range_obj)
     clear_python_addin_cache()
 
     func = PythonFunction(ctx)
-    with unittest.mock.patch("plugin.calc.python.function.run_code_in_user_venv") as mock_run:
-        mock_run.return_value = {"status": "ok", "result": [2, 3, 5]}
-        assert func.python(doc, code) == 2.0
-        assert func.python(doc, code) == 3.0
-        assert func.python(doc, code) == 5.0
+    try:
+        with unittest.mock.patch("plugin.calc.python.function.run_code_in_user_venv") as mock_run:
+            mock_run.return_value = {"status": "ok", "result": [2, 3, 5]}
+            assert func.python(doc, code) == 2.0
+            assert func.python(doc, code) == 3.0
+            assert func.python(doc, code) == 5.0
+    finally:
+        clear_in_memory_spill_state(lifecycle_key=_lifecycle_key(doc))
 
 
 @native_test
@@ -91,3 +102,34 @@ def test_python_matrix_array_formula_block_with_single_cell_selected(ctx, doc):
         assert func.python(doc, code) == 2.0
         assert func.python(doc, code) == 3.0
         assert func.python(doc, code) == 5.0
+
+
+@native_test
+@with_native_doc("calc")
+def test_ordinary_formula_multi_cell_selection_returns_corner(ctx, doc):
+    """A range selection does not suppress spill when the formula cell is a normal formula.
+
+    setFormula writes only A1. Selecting A1:A3 is not an array formula, so
+    Decision 7 spills and every call returns the corner. Requires
+    scripting.python_auto_spill at its default true. The 0.1s spill timer is
+    cancelled so it does not write after the document closes.
+    """
+    from plugin.calc.python.addin import PythonFunction
+    from plugin.calc.python.function import clear_in_memory_spill_state, clear_python_addin_cache
+    from plugin.calc.python.workbook_lifecycle import _lifecycle_key
+
+    code = "result = [2, 3, 5]"
+    sheet = doc.getCurrentController().getActiveSheet()
+    sheet.getCellByPosition(0, 0).setFormula('=PYTHON("result = [2, 3, 5]")')
+    doc.getCurrentController().select(sheet.getCellRangeByPosition(0, 0, 0, 2))
+    clear_python_addin_cache()
+
+    func = PythonFunction(ctx)
+    try:
+        with unittest.mock.patch("plugin.calc.python.function.run_code_in_user_venv") as mock_run:
+            mock_run.return_value = {"status": "ok", "result": [2, 3, 5]}
+            assert func.python(doc, code) == 2.0
+            assert func.python(doc, code) == 2.0
+            assert func.python(doc, code) == 2.0
+    finally:
+        clear_in_memory_spill_state(lifecycle_key=_lifecycle_key(doc))
