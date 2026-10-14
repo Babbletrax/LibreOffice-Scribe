@@ -28,7 +28,7 @@ import io
 import logging
 import re
 import sys
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
     from com.sun.star.awt import FontWeight
@@ -83,6 +83,20 @@ def _uno_range_address(cell_or_range: Any) -> Any:
     ra.StartRow = cell_addr.Row
     ra.EndRow = cell_addr.Row
     return ra
+
+
+def _quiet_probe_cleanup(action: Callable[[], None], what: str) -> None:
+    """Best-effort probe teardown that still surfaces a disposed document."""
+    # Bugfix: probe cleanup in prepare_array_formula_if_needed swallowed DisposedException.
+    # This happened because bare except blocks masked document disposal during array probes.
+    # Routing cleanup through _quiet_probe_cleanup re-raises disposed exceptions while
+    # suppressing other errors.
+    try:
+        action()
+    except Exception as e:
+        if is_disposed_exception(e):
+            raise
+        log.debug("%s failed during array probe cleanup", what, exc_info=True)
 
 
 def _parse_formula_or_values_string(s: str, *, single_cell_range: bool = False) -> list[Any] | None:
@@ -555,6 +569,16 @@ class CellManipulator:
         """
         try:
             cell_range = self.bridge.resolve_range_or_address(range_str)
+            addr = _uno_range_address(cell_range)
+            width = int(addr.EndColumn) - int(addr.StartColumn) + 1
+            # Bugfix: sort_column was not checked against range width, and ascending/has_header
+            # accepted non-bools. This happened because arguments were passed directly to UNO's
+            # sort descriptor without bounds checking. Verifying sort_column fits within the
+            # range width and validating boolean types prevents crashes or sorting wrong columns.
+            if type(sort_column) is not int or sort_column < 0 or sort_column >= width:
+                raise CalcError(f"sort_column must be an integer from 0 to {width - 1} for this range ({width} columns).")
+            if type(ascending) is not bool or type(has_header) is not bool:
+                raise CalcError("ascending and has_header must be booleans")
 
             import uno  # noqa: F401  # pyright: ignore[reportUnusedImport] – needed in UNO context
 
@@ -578,6 +602,8 @@ class CellManipulator:
             return f"Range {range_str} sorted {direction} by column {sort_column}."
         except Exception as e:
             if is_disposed_exception(e):
+                raise
+            if isinstance(e, CalcError):
                 raise
             log.exception("Sort failed for %s", range_str)
             raise CalcError(str(e)) from e
@@ -632,7 +658,14 @@ class CellManipulator:
         if value is None:
             return "", "", meta
 
-        if isinstance(value, (int, float)) and not isinstance(value, bool):
+        # Bugfix: bool is a subclass of int, and str(True) is the text "True".
+        # JSON arrays round-trip true/false to real bools. Classifying bool as
+        # numeric 1.0 or 0.0 stores real boolean numbers in Calc cells.
+        if isinstance(value, bool):
+            meta["kind"] = "number"
+            return (1.0 if value else 0.0), "", meta
+
+        if isinstance(value, (int, float)):
             meta["kind"] = "number"
             return value, "", meta
 
@@ -813,21 +846,12 @@ class CellManipulator:
                     return (rows, cols)
                 finally:
                     if hidden_context_entered and undo_mgr:
-                        try:
-                            undo_mgr.leaveUndoContext()
-                        except Exception:
-                            pass
+                        _quiet_probe_cleanup(undo_mgr.leaveUndoContext, "leaveUndoContext")
                     elif undo_mgr and not was_possible:
-                        try:
-                            undo_mgr.clear()
-                        except Exception:
-                            pass
+                        _quiet_probe_cleanup(undo_mgr.clear, "clear")
 
                     if not was_modified:
-                        try:
-                            doc.setModified(False)
-                        except Exception:
-                            pass
+                        _quiet_probe_cleanup(lambda: doc.setModified(False), "setModified")
         return None
 
     def write_formula_range(self, range_str: str, formula_or_values: Any, array: Any = None, *, literal_text: bool = False, premeasured_array_size: tuple[int, int] | None = None) -> str | dict[str, Any]:

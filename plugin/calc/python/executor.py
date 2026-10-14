@@ -35,7 +35,8 @@ from plugin.framework.tool import ToolBaseDummy
 if TYPE_CHECKING:
     from plugin.framework.tool import ToolContext
 
-from plugin.framework.errors import WriterAgentException
+from plugin.framework.errors import WriterAgentException, is_disposed_exception
+from plugin.scripting.payload_codec import wire_str_key
 from plugin.scripting.import_policy import format_inprocess_import_policy_for_prompt
 from plugin.scripting.sandbox import CALC_AUTHORIZED_IMPORTS
 from plugin.calc.bridge import CalcBridge
@@ -46,8 +47,6 @@ log = logging.getLogger("writeragent.calc.python.executor")
 
 _SPREADSHEET_SERVICE = "com.sun.star.sheet.SpreadsheetDocument"
 _CALC_HELPER_ERROR = "lp, get_range, set_range, and data_range only work in a Calc spreadsheet."
-# Tuples become lists, and containers are deeply walked. Any leaf json.dumps cannot accept is stringified.
-_JSON_RESULT_TYPES = (str, int, float, bool, list, dict)
 
 
 def _is_spreadsheet(doc: Any) -> bool:
@@ -76,8 +75,12 @@ class PythonExecutor:
 
     def __init__(self) -> None:
         self.executor = LocalPythonExecutor(additional_authorized_imports=list(CALC_AUTHORIZED_IMPORTS))
+        # static_tools started as None, evaluate_python_code substituted {},
+        # and every builtin call raised Forbidden function evaluation.
+        # send_tools is what merges BASE_PYTHON_TOOLS.
+        self.executor.send_tools({})
 
-    def inject_helpers(self, bridge: CalcBridge, manipulator: CellManipulator, inspector: CellInspector, *, spreadsheet: bool = True) -> None:
+    def inject_helpers(self, manipulator: CellManipulator, inspector: CellInspector, *, spreadsheet: bool = True) -> None:
         """Injects document interaction helpers into the environment."""
 
         def _require_calc(helper: str) -> None:
@@ -98,15 +101,18 @@ class PythonExecutor:
                 if data and data[0]:
                     return data[0][0]["value"]
                 return None
-            except ExecutionTimeoutError:
-                # Let ExecutionTimeoutError leave the cell. The sandbox arms
-                # SIGALRM once (local_python_executor.timeout). Swallowing it
-                # here leaves the alarm unset, and a loop of lp('A1') never
-                # returns to the UI thread.
-                raise
             except Exception as exc:
+                # ExecutionTimeoutError is a BaseException and must not be wrapped:
+                # catching it here disarms SIGALRM, and a loop of lp() never returns.
+                # WriterAgentException (_require_calc) and a disposed document must
+                # keep their type. Wrapping them as CALC_READ_ERROR hid disposal and
+                # relabeled UNSUPPORTED_OPERATION.
+                if isinstance(exc, WriterAgentException) or is_disposed_exception(exc):
+                    raise
                 log.exception("lp_helper failed for address %s", addr)
-                raise WriterAgentException(f"lp failed to read address '{addr}': {exc}", code="CALC_READ_ERROR") from exc
+                raise WriterAgentException(
+                    f"lp failed to read address '{addr}': {exc}", code="CALC_READ_ERROR"
+                ) from exc
 
         def set_range_helper(addr: str, data: Any) -> str | dict[str, Any]:
             """Write values back to the spreadsheet."""
@@ -115,6 +121,11 @@ class PythonExecutor:
 
         self.executor.send_variables({"lp": lp_helper, "Sheet": lp_helper, "get_range": lp_helper, "set_range": set_range_helper})
 
+    def inject_data(self, data: Any) -> None:
+        """Bind the tool's ``data_range`` values as ``data`` in this executor."""
+        self.executor.send_variables({"data": data})
+
+    # Tuples become lists, and containers are deeply walked. Any leaf json.dumps cannot accept is stringified.
     def _normalize_value(self, val: Any, seen: set[int]) -> Any:
         if val is None or isinstance(val, (str, int, float, bool)):
             return val
@@ -131,10 +142,13 @@ class PythonExecutor:
             seen.add(val_id)
             try:
                 # Dict keys that are not strings: stringify the key. json.dumps rejects non-string keys.
-                return {
-                    str(k) if not isinstance(k, str) else k: self._normalize_value(v, seen)
-                    for k, v in val.items()
-                }
+                # {1: "a", "1": "b"} used to keep only "b" because both keys became "1".
+                # wire_str_key raises instead of dropping a value.
+                used: set[str] = set()
+                out: dict[str, Any] = {}
+                for k, v in val.items():
+                    out[wire_str_key(k, used)] = self._normalize_value(v, seen)
+                return out
             finally:
                 seen.remove(val_id)
         # Deep-walk containers; convert tuples to lists and stringify leaves that json.dumps cannot take.
@@ -149,6 +163,22 @@ class PythonExecutor:
             return None
         return self._normalize_value(result, set())
 
+    def _captured_stdout(self) -> str:
+        state = getattr(self.executor, "state", None)
+        if not isinstance(state, dict):
+            return ""
+        return str(state.get("_print_outputs") or "")
+
+    def last_stdout(self) -> str:
+        return self._captured_stdout()
+
+    def _execution_error(self, text: str) -> WriterAgentException:
+        logs = self._captured_stdout()
+        msg = f"Execution Error: {text}"
+        if logs.strip():
+            msg = f"{msg}\nstdout:\n{logs}"
+        return WriterAgentException(msg, code="PYTHON_EXECUTION_ERROR")
+
     def execute_with_return(self, code_snippet: str) -> Any:
         """Execute *code_snippet*; return the last expression value (REPL-style ``_`` is not kept for the next call)."""
         try:
@@ -157,23 +187,25 @@ class PythonExecutor:
             return self.format_result(result)
         except InterpreterError as e:
             log.warning("Sandbox execution error: %s (snippet length %d)", str(e), len(code_snippet))
-            raise WriterAgentException(f"Execution Error: {str(e)}", code="PYTHON_EXECUTION_ERROR") from e
+            raise self._execution_error(str(e)) from e
         except WriterAgentException:
             raise
         except Exception as e:
+            if is_disposed_exception(e):
+                raise
             log.exception("Error executing Python code (snippet length %d)", len(code_snippet))
-            raise WriterAgentException(f"Execution Error: {str(e)}", code="PYTHON_EXECUTION_ERROR") from e
+            raise self._execution_error(str(e)) from e
         except ExecutionTimeoutError as e:
             # ExecutionTimeoutError is a BaseException, so it bypasses `except Exception`.
             # Catch it here so the timeout does not escape unhandled into LibreOffice.
             log.exception("Sandbox execution timeout: \n%s", code_snippet)
-            raise WriterAgentException(f"Execution Error: {str(e)}", code="PYTHON_EXECUTION_ERROR") from e
+            raise self._execution_error(str(e)) from e
         except (SystemExit, KeyboardInterrupt) as e:
             # User code can raise SystemExit or KeyboardInterrupt (BaseExceptions).
             # Convert them to WriterAgentException naming the exception type; never catch GeneratorExit.
             log.exception("Sandbox execution stopped by %s: \n%s", type(e).__name__, code_snippet)
             msg = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
-            raise WriterAgentException(f"Execution Error: {msg}", code="PYTHON_EXECUTION_ERROR") from e
+            raise self._execution_error(msg) from e
 
 
 
@@ -208,7 +240,7 @@ class ExecutePythonScript(ToolBaseDummy):
         bridge = CalcBridge(ctx.doc)
         manipulator = CellManipulator(bridge)
         inspector = CellInspector(bridge)
-        executor.inject_helpers(bridge, manipulator, inspector, spreadsheet=spreadsheet)
+        executor.inject_helpers(manipulator, inspector, spreadsheet=spreadsheet)
 
         # Inject data if data_range is provided
         if data_range:
@@ -219,19 +251,30 @@ class ExecutePythonScript(ToolBaseDummy):
                     py_data = py_data[0]
                 elif all(len(row) == 1 for row in py_data):
                     py_data = [row[0] for row in py_data]
-                executor.executor.send_variables({"data": py_data})
+                executor.inject_data(py_data)
             except Exception as exc:
+                if isinstance(exc, WriterAgentException) or is_disposed_exception(exc):
+                    raise
                 log.exception("Failed to inject data_range %s", data_range)
-                return {"status": "error", "message": f"Failed to read data_range {data_range}: {exc}"}
+                return self._tool_error(f"Failed to read data_range {data_range}: {exc}", code="CALC_READ_ERROR")
 
         result = executor.execute_with_return(code)
+        stdout = executor.last_stdout()
 
         # write_formula_range returns a summary string or an array-formula dict.
         write_status: str | dict[str, Any] = ""
         if target_range and result is not None:
             try:
                 write_status = manipulator.write_formula_range(target_range, result)
-            except Exception as e:
-                write_status = f"Warning: Failed to write to {target_range}: {str(e)}"
+            except Exception as exc:
+                if isinstance(exc, WriterAgentException) or is_disposed_exception(exc):
+                    raise
+                log.exception("Failed to write to %s", target_range)
+                return self._tool_error(
+                    f"Failed to write to {target_range}: {exc}",
+                    code="CALC_WRITE_ERROR",
+                    result=result,
+                    stdout=stdout,
+                )
 
-        return {"status": "ok", "result": result, "write_status": write_status}
+        return {"status": "ok", "result": result, "stdout": stdout, "write_status": write_status}

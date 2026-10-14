@@ -334,7 +334,7 @@ def test_managed_subprocess_env_and_wrapper(monkeypatch):
     # 4. command_wrapper
     managed4 = ms.ManagedSubprocess(
         ["orig", "arg"],
-        command_wrapper=lambda cmd: ["wrapped", *cmd],
+        command_wrapper=lambda cmd, **_kwargs: ["wrapped", *cmd],
     )
     managed4.start()
     managed4.close()
@@ -352,6 +352,41 @@ def test_managed_subprocess_env_and_wrapper(monkeypatch):
     managed5.start()
     managed5.close()
     assert captured_cmd == ["orig", "arg2"]
+
+
+def test_command_wrapper_receives_env_and_cwd(monkeypatch):
+    import plugin.framework.managed_subprocess as ms
+
+    recorded: list[tuple[list[str], dict[str, str] | None, str | None]] = []
+
+    def mock_wrapper(cmd: list[str], *, env: dict[str, str] | None = None, cwd: str | None = None) -> list[str]:
+        recorded.append((cmd, env, cwd))
+        return cmd
+
+    proc = MagicMock()
+    proc.poll.return_value = None
+    proc.stdin = MagicMock()
+    proc.stdout = MagicMock()
+    proc.stderr = MagicMock()
+    popen = MagicMock(return_value=proc)
+    monkeypatch.setattr(ms.subprocess, "Popen", popen)
+    monkeypatch.setattr(ms, "start_stderr_drain", lambda *a, **k: None)
+
+    managed = ms.ManagedSubprocess(
+        ["orig", "arg"],
+        command_wrapper=mock_wrapper,
+        env={"ONLY": "1"},
+        base_env={},
+        cwd="/tmp",
+    )
+    managed.start()
+    managed.close()
+
+    assert len(recorded) == 1
+    cmd, env, cwd = recorded[0]
+    assert cmd == ["orig", "arg"]
+    assert env == {"ONLY": "1"}
+    assert cwd == "/tmp"
 
 
 def test_kill_process_tree_win32_uses_taskkill(monkeypatch):

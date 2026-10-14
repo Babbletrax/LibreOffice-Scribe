@@ -12,7 +12,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from plugin.framework.async_stream import StreamQueueKind, run_stream_drain_loop
+from plugin.framework.stream_batch import StreamQueueKind
+from plugin.framework.async_stream import run_stream_drain_loop
 from tests.framework.stream_test_helpers import (
     DummyToolkit,
     _RecordingRearm,
@@ -353,9 +354,9 @@ def test_drain_scheduler_override_none_uses_blocking_path(monkeypatch: pytest.Mo
     blocking_calls: list[object] = []
     real_blocking = stream_mod._run_stream_drain_blocking
 
-    def spy_blocking(state, toolkit_arg, stop_checker, flush_pending):
+    def spy_blocking(state, toolkit_arg, stop_checker, flush_pending, *args, **kwargs):
         blocking_calls.append(toolkit_arg)
-        return real_blocking(state, toolkit_arg, stop_checker, flush_pending)
+        return real_blocking(state, toolkit_arg, stop_checker, flush_pending, *args, **kwargs)
 
     private_executor = qe.QueueExecutor()
     pumps: list[object] = []
@@ -690,3 +691,95 @@ def test_new_drain_owns_deferrals_made_after_it_starts() -> None:
         assert seen == ["b"]
     finally:
         _clear_event_drain()
+
+
+def test_on_drain_started_runs_only_after_first_slice_is_armed() -> None:
+    rearm = _RecordingRearm()
+    q: queue.Queue = queue.Queue()
+    started = []
+    job_done = [False]
+    applied: list[str] = []
+    try:
+        run_stream_drain_loop(
+            q,
+            DummyToolkit(),
+            job_done,
+            lambda text, _thinking: applied.append(text),
+            on_stream_done=lambda _item: True,
+            on_stopped=lambda: None,
+            on_error=lambda _e: None,
+            rearm=rearm,
+            on_drain_started=lambda: started.append(1),
+        )
+        assert started == [1]
+        assert len(rearm.pending) == 1
+        assert rearm.pending[0][0] == "now"
+        q.put((StreamQueueKind.STREAM_DONE, None))
+        rearm.pump()
+        assert job_done[0] is True
+    finally:
+        _clear_event_drain()
+
+
+def test_failed_arm_does_not_call_on_drain_started() -> None:
+    class _FailingPostRearm:
+        def __init__(self) -> None:
+            self.closed = 0
+
+        def post(self, fn: object) -> None:
+            raise RuntimeError("arm boom")
+
+        def post_after(self, delay: float, fn: object) -> None:
+            del delay, fn
+
+        def close(self) -> None:
+            self.closed += 1
+
+    rearm = _FailingPostRearm()
+    q: queue.Queue = queue.Queue()
+    started = []
+    job_done = [False]
+    errors: list[object] = []
+    try:
+        run_stream_drain_loop(
+            q,
+            None,
+            job_done,
+            lambda _text, _thinking: None,
+            on_stream_done=lambda _item: True,
+            on_stopped=lambda: None,
+            on_error=lambda payload: errors.append(payload),
+            rearm=rearm,
+            on_drain_started=lambda: started.append(1),
+        )
+        assert started == []
+        assert job_done[0] is True
+        assert len(errors) == 1
+        assert rearm.closed == 1
+    finally:
+        _clear_event_drain()
+
+
+def test_idle_rearm_gives_up_after_max_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    from plugin.framework import async_stream
+
+    monkeypatch.setattr(async_stream, "_IDLE_REARM_MAX_FAILURES", 3)
+    monkeypatch.setattr(async_stream, "_DRAIN_IDLE_REARM_SEC", 0.01)
+    monkeypatch.setattr(async_stream, "_IDLE_REARM_RETRY_MAX_SEC", 0.01)
+
+    thread = async_stream._IdleRearmThread()
+    calls = []
+    give_up_event = __import__("threading").Event()
+
+    def failing_fire() -> None:
+        calls.append(time.monotonic())
+        raise RuntimeError("always boom")
+
+    try:
+        thread.arm(0.01, failing_fire, on_give_up=give_up_event.set)
+        assert give_up_event.wait(timeout=2.0)
+        assert len(calls) == 3
+        time.sleep(0.1)
+        assert len(calls) == 3
+    finally:
+        thread.stop()

@@ -18,7 +18,7 @@
 
 from typing import Any, ClassVar
 
-from plugin.framework.async_stream import StreamQueueKind
+from plugin.framework.stream_batch import StreamQueueKind
 from plugin.framework.errors import format_error_payload
 from plugin.acp.base import AgentBackend
 

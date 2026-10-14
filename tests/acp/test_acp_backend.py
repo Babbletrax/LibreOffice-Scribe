@@ -20,7 +20,7 @@ from plugin.acp.claude_simple import ClaudeBackend
 from plugin.acp.grok_simple import GrokBackend
 from plugin.acp.hermes_simple import HermesBackend
 from plugin.acp.opencode_simple import OpenCodeBackend
-from plugin.framework.async_stream import StreamQueueKind
+from plugin.framework.stream_batch import StreamQueueKind
 from plugin.version import EXTENSION_VERSION
 
 

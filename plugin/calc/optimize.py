@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from plugin.framework.tool import ToolBaseDummy
 from plugin.framework.errors import ToolExecutionError
-from plugin.scripting.optimize import HELPER_NAMES
+from plugin.scripting.optimize import HELPER_NAMES, HELPER_PARAM_HELP
 
 if TYPE_CHECKING:
     from plugin.framework.tool import ToolContext
@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 log = logging.getLogger("writeragent.calc")
 
 _OPTIMIZE_DATA_HELPERS = ", ".join(sorted(HELPER_NAMES))
+_PARAM_TEXT = " ".join(f"{name}: {HELPER_PARAM_HELP[name]}" for name in sorted(HELPER_PARAM_HELP))
 
 
 class OptimizeDataTool(ToolBaseDummy):
@@ -30,13 +31,14 @@ class OptimizeDataTool(ToolBaseDummy):
         f"Helpers: {_OPTIMIZE_DATA_HELPERS}. "
         "Use data_range (A1 address string, e.g. 'Sheet1.A1:D1000') for bulk data. "
         "The host extracts and shapes the data before it reaches the optimization code. "
-        "This tool is intended for the analysis/optimization domain; pass range addresses only."
+        "This tool is intended for the analysis/optimization domain; pass range addresses only. "
+        f"Parameter reference: {_PARAM_TEXT}"
     )
     parameters: dict[str, Any] | None = {
         "type": "object",
         "properties": {
             "helper": {"type": "string", "description": "Optimization helper name (e.g. optimize_portfolio, linear_programming)."},
-            "params": {"type": "object", "description": "Helper-specific parameters."},
+            "params": {"type": "object", "description": _PARAM_TEXT},
             "data_range": {"type": "string", "description": "A1 range address to optimize (e.g. 'Sheet1.A1:D1000')."},
             "output_range": {"type": "string", "description": "Optional A1 anchor cell to write formatted results (Calc only)."},
             "headers": {"type": "boolean", "description": "First row contains column names (default true)."},
@@ -53,7 +55,6 @@ class OptimizeDataTool(ToolBaseDummy):
         p = copy.deepcopy(self.parameters)
         if p and "properties" in p:
             props = cast("dict[str, Any]", p["properties"])
-            props.pop("data", None)
             if "data_range" in props:
                 props["data_range"]["description"] = "A1 range address (e.g. 'Sheet1.A1:D1000'). This is the only way to supply data. The host extracts the values out-of-band."
         return p
@@ -81,7 +82,7 @@ class OptimizeDataTool(ToolBaseDummy):
 
         dr = str(data_range).strip() if data_range else None
         params = kwargs.get("params") if isinstance(kwargs.get("params"), dict) else None
-        headers = bool(kwargs.get("headers", True)) if "headers" in kwargs else True
+        headers = bool(kwargs.get("headers", True))
         task_hint = str(kwargs["task_hint"]) if kwargs.get("task_hint") else None
         output_range = str(kwargs["output_range"]).strip() if kwargs.get("output_range") else None
 
@@ -108,6 +109,7 @@ class OptimizeDataTool(ToolBaseDummy):
             try:
                 execute_on_main_thread(_write)
             except Exception as exc:
-                return self._tool_error(f"Optimization succeeded but sheet write failed: {exc}")
+                result = dict(result)
+                result["sheet_write_error"] = str(exc)
 
         return result

@@ -244,9 +244,11 @@ If a streamed tool-loop round ends with no `content` and no `tool_calls`, the si
 
 We chose the **lightweight, dependency-free** approach:
 
-- We copied **[`accumulate_delta`](https://github.com/openai/openai-python/blob/main/src/openai/lib/streaming/_deltas.py)** from the OpenAI Python SDK into **`plugin/framework/stream_delta.py`** (re-exported from `async_stream`).
+- We copied **[`accumulate_delta`](https://github.com/openai/openai-python/blob/main/src/openai/lib/streaming/_deltas.py)** from the OpenAI Python SDK into **`plugin/framework/stream_delta.py`**.
 - This function handles the complex logic of merging partial tool call arguments (which can be split across many chunks) and concatenating content strings.
 - logic: `accumulate_delta(snapshot, delta)` -> updates snapshot in place.
+
+The worker starts from `on_drain_started` after the drain is armed; `get_toolkit` may be `None` on the event-driven path.
 
 This avoids adding the heavy `openai` dependency to the LibreOffice extension while ensuring 100% compatibility with OpenAI-style streaming deltas.
 

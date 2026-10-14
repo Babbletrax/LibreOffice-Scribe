@@ -188,7 +188,7 @@ Empty defaults + `_catch_and_log` so Python exceptions do not leak into the C++ 
 | `BaseDocumentEventListener` | `XDocumentEventListener` |
 | `BaseActivationEventListener` | Calc `XActivationEventListener` |
 
-Dummy parents when PyUNO is absent (unit tests). New listeners should subclass these, not raw `unohelper.Base`.
+Dummy parents when PyUNO is absent (unit tests). Subclass overrides of UNO callbacks are wrapped by scanning base methods marked `_CATCH_LOGGED_ATTR`. There is no hand-maintained callback name list. New listeners should subclass these, not raw `unohelper.Base`.
 
 ### 1.9 Visual property helpers
 

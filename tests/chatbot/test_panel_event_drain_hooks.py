@@ -20,7 +20,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from plugin.chatbot.panel import ChatSession, SendButtonListener
-from plugin.framework.async_stream import StreamQueueKind, run_stream_drain_loop
+from plugin.framework.stream_batch import StreamQueueKind
+from plugin.framework.async_stream import run_stream_drain_loop
 from tests.chatbot.test_panel import _make_send_listener
 
 

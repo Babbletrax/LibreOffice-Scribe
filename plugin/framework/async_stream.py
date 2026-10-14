@@ -46,12 +46,10 @@ import queue
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Any, TypeAlias, Callable, cast
+from typing import Any, Callable, cast
 
 from plugin.framework.worker_pool import run_in_background
-from plugin.framework.blocking_wait import BlockingPumpKind as BlockingPumpKind, BlockingWaitStopped as BlockingWaitStopped, run_blocking_in_thread as run_blocking_in_thread
-from plugin.framework.stream_batch import BatchingStreamQueue as BatchingStreamQueue, StreamQueueKind as StreamQueueKind
-from plugin.framework.stream_delta import accumulate_delta as accumulate_delta, coalesce_split_tool_calls as coalesce_split_tool_calls
+from plugin.framework.stream_batch import BatchingStreamQueue, StreamQueueKind
 from plugin.framework.deal_shim import DEAL_MAX_TOKEN, UNDER_CROSSHAIR, ascii_bounded, deal
 from plugin.framework.errors import format_error_payload
 from plugin.framework.async_drain_guard import acquire_drain_owner, release_drain_owner
@@ -77,9 +75,6 @@ def _format_agent_tool_stream_line(prefix: str, data: Any) -> str:
     except Exception:
         body = str(data)
     return "\n%s %s\n" % (prefix, body)
-
-
-StreamQueueItem: TypeAlias = tuple[StreamQueueKind, ...]
 
 
 def put_stream_queue_stopped(q: queue.Queue[Any]) -> None:
@@ -139,6 +134,13 @@ class _DrainState:
         # crosshair: off
         self.flush_buffers()
         self.close_thinking()
+
+    def notify_stopped(self) -> None:
+        self.job_done[0] = True
+        try:
+            self.on_stopped()
+        except Exception:
+            log.exception("on_stopped failed")
 
 
 def _drain_ready(q: queue.Queue[Any], max_items: int | None = 50) -> list[Any]:
@@ -277,11 +279,7 @@ def _handle_stopped(state: _DrainState, _data: Any, _item: Any) -> None:
     # into on_error. Running on_stopped before job_done lets that raise
     # fall into _process_batch's except, which calls on_error, so Stop
     # shows as a stream failure.
-    state.job_done[0] = True
-    try:
-        state.on_stopped()
-    except Exception:
-        log.exception("on_stopped failed")
+    state.notify_stopped()
 
 
 def _handle_error(state: _DrainState, data: Any, _item: Any) -> None:
@@ -401,11 +399,7 @@ def _finish_on_stop(state: _DrainState, flush_pending: Callable[[], None] | None
     # This helper sits outside _process_batch's try. Running on_stopped
     # before job_done turns that raise into _notify_drain_failure or
     # _report_slice_error, so a checker Stop shows as a stream error.
-    state.job_done[0] = True
-    try:
-        state.on_stopped()
-    except Exception:
-        log.exception("on_stopped failed")
+    state.notify_stopped()
 
 
 def _process_batch(state: _DrainState, items: list[Any], stop_checker: Callable[[], bool] | None, flush_pending: Callable[[], None] | None = None) -> None:
@@ -516,6 +510,7 @@ def _process_batch(state: _DrainState, items: list[Any], stop_checker: Callable[
 # so an empty stream does not spin the main thread.
 _DRAIN_IDLE_REARM_SEC = 0.1
 _IDLE_REARM_RETRY_MAX_SEC = 1.0
+_IDLE_REARM_MAX_FAILURES = 8
 
 # LibreOffice evidence: on Qt (vcl/qt5/QtInstance.cxx ImplYield), macOS
 # (vcl/osx/salinst.cxx DoYield) and Windows (PostMessage SAL_MSG_USEREVENT
@@ -575,6 +570,7 @@ class _IdleRearmThread:
     _cv: threading.Condition
     _deadline: float | None
     _fire: Callable[[], None] | None
+    _on_give_up: Callable[[], None] | None
     _generation: int
     _failures: int
     _started: bool
@@ -585,12 +581,13 @@ class _IdleRearmThread:
         self._cv = threading.Condition()
         self._deadline = None
         self._fire = None
+        self._on_give_up = None
         self._generation = 0
         self._failures = 0
         self._started = False
         self._stopped = False
 
-    def arm(self, delay: float, fire: Callable[[], None]) -> None:
+    def arm(self, delay: float, fire: Callable[[], None], on_give_up: Callable[[], None] | None = None) -> None:
         # crosshair: off
         with self._cv:
             if self._stopped:
@@ -598,6 +595,7 @@ class _IdleRearmThread:
             self._generation += 1
             self._failures = 0
             self._fire = fire
+            self._on_give_up = on_give_up
             self._deadline = time.monotonic() + delay
             if not self._started:
                 run_in_background(self._run, name="drain-rearm", dedicated=True)
@@ -611,6 +609,7 @@ class _IdleRearmThread:
             self._failures = 0
             self._deadline = None
             self._fire = None
+            self._on_give_up = None
             self._cv.notify()
 
     def stop(self) -> None:
@@ -619,6 +618,7 @@ class _IdleRearmThread:
             self._stopped = True
             self._deadline = None
             self._fire = None
+            self._on_give_up = None
             self._cv.notify()
 
     def _run(self) -> None:
@@ -651,17 +651,33 @@ class _IdleRearmThread:
                 # (owner held, Send stuck on Stop, Stop cannot recover).
                 # Re-queue the same fire with capped backoff unless the drain
                 # stopped or re-armed meanwhile.
+                give_up = False
+                give_up_cb = None
                 delay = None
                 failures = 0
                 with self._cv:
                     if not self._stopped and self._deadline is None and self._generation == generation:
                         self._failures += 1
                         failures = self._failures
-                        delay = min(_IDLE_REARM_RETRY_MAX_SEC, _DRAIN_IDLE_REARM_SEC * 2**min(failures - 1, 4))
-                        self._deadline = time.monotonic() + delay
-                        self._fire = fire
-                        self._cv.notify()
-                if delay is None:
+                        if self._failures >= _IDLE_REARM_MAX_FAILURES:
+                            # Bugfix: unbounded 1 s retries held the drain owner until process
+                            # exit when addCallback stayed dead (dispose/shutdown).
+                            self._fire = None
+                            give_up = True
+                            give_up_cb = self._on_give_up
+                        else:
+                            delay = min(_IDLE_REARM_RETRY_MAX_SEC, _DRAIN_IDLE_REARM_SEC * 2**min(failures - 1, 4))
+                            self._deadline = time.monotonic() + delay
+                            self._fire = fire
+                            self._cv.notify()
+                if give_up:
+                    log.warning("drain idle re-arm failed %d times; giving up", failures)
+                    if give_up_cb is not None:
+                        try:
+                            give_up_cb()
+                        except Exception:
+                            log.exception("drain idle give-up callback failed")
+                elif delay is None:
                     log.debug("drain idle re-arm failed after stop/re-arm; not retrying", exc_info=True)
                 elif failures == 1:
                     log.exception("drain idle re-arm failed")
@@ -703,6 +719,7 @@ class _AsyncCallbackRearm:
     _closed: bool
     _callback: Any
     _timer: _IdleRearmThread
+    _on_idle_give_up: Callable[[], None] | None
 
     def __init__(self, service: Any) -> None:
         # crosshair: off
@@ -713,6 +730,10 @@ class _AsyncCallbackRearm:
         # Created on the main thread. The timer thread only calls addCallback.
         self._callback = _new_xcallback(self._notify)
         self._timer = _IdleRearmThread()
+        self._on_idle_give_up = None
+
+    def bind_idle_give_up(self, fn: Callable[[], None]) -> None:
+        self._on_idle_give_up = fn
 
     def _enqueue(self, fn: Callable[[], None]) -> None:
         """Queue one slice. A second writer cannot replace it.
@@ -765,7 +786,7 @@ class _AsyncCallbackRearm:
 
     def post_after(self, delay: float, fn: Callable[[], None]) -> None:
         # crosshair: off
-        self._timer.arm(delay, lambda: self._enqueue(fn))
+        self._timer.arm(delay, lambda: self._enqueue(fn), on_give_up=self._on_idle_give_up)
 
     def close(self) -> None:
         # crosshair: off
@@ -775,6 +796,7 @@ class _AsyncCallbackRearm:
             self._pending.clear()
             self._callback = None
             self._service = None
+            self._on_idle_give_up = None
 
 
 class _EventDrain:
@@ -789,18 +811,27 @@ class _EventDrain:
     _scheduler: Any
     _stop_checker: Callable[[], bool] | None
     _flush_pending: Callable[[], None] | None
+    _on_started: Callable[[], None] | None
     epilogues: list[Callable[[], None]]
     closed: bool
     _held: bool
     _generation: int
     _immediate_streak: int
 
-    def __init__(self, state: _DrainState, scheduler: Any, stop_checker: Callable[[], bool] | None, flush_pending: Callable[[], None] | None) -> None:
+    def __init__(
+        self,
+        state: _DrainState,
+        scheduler: Any,
+        stop_checker: Callable[[], bool] | None,
+        flush_pending: Callable[[], None] | None,
+        on_started: Callable[[], None] | None = None,
+    ) -> None:
         # crosshair: off
         self._state = state
         self._scheduler = scheduler
         self._stop_checker = stop_checker
         self._flush_pending = flush_pending
+        self._on_started = on_started
         self.epilogues = []
         self.closed = False
         self._held = False
@@ -814,6 +845,9 @@ class _EventDrain:
         acquire_drain_owner("stream")
         self._held = True
         _event_drain = self
+        bind = getattr(self._scheduler, "bind_idle_give_up", None)
+        if callable(bind):
+            bind(self._on_idle_rearm_exhausted)
         try:
             self._schedule_next(idle=False)
         except Exception as exc:
@@ -821,6 +855,30 @@ class _EventDrain:
             self._report_slice_error(exc)
             self._state.job_done[0] = True
             self._finish()
+            return
+        if self._on_started is not None:
+            # Bugfix: the worker used to start before the first slice was armed,
+            # so a failed addCallback left an LLM/tool thread writing into an
+            # unread queue with no drain to see Stop.
+            try:
+                self._on_started()
+            except Exception as exc:
+                log.exception("drain on_drain_started failed")
+                self._report_slice_error(exc)
+                self._state.job_done[0] = True
+                self._finish()
+
+    def _on_idle_rearm_exhausted(self) -> None:
+        from plugin.framework.queue_executor import default_executor
+
+        default_executor.post(self._abort_idle_rearm_exhausted, bound_scope=None)
+
+    def _abort_idle_rearm_exhausted(self) -> None:
+        if self.closed:
+            return
+        self._report_slice_error(RuntimeError("event drain idle re-arm failed %d times" % _IDLE_REARM_MAX_FAILURES))
+        self._state.job_done[0] = True
+        self._finish()
 
     def _schedule_next(self, *, idle: bool, delay: float | None = None) -> None:
         # crosshair: off
@@ -981,7 +1039,23 @@ def _notify_drain_failure(
         log.exception("Failed to notify error handler")
 
 
-def run_stream_drain_loop(q: Any, toolkit: Any, job_done: Any, apply_chunk_fn: Any, on_stream_done: Any, on_stopped: Any, on_error: Any, on_status_fn: Any = None, show_search_thinking: bool = False, on_approval_required: Any = None, stop_checker: Any = None, flush_pending: Any = None, *, rearm: Any = None) -> None:
+def run_stream_drain_loop(
+    q: queue.Queue[Any],
+    toolkit: Any,
+    job_done: list[bool],
+    apply_chunk_fn: Callable[[str, bool], None],
+    on_stream_done: Callable[..., Any],
+    on_stopped: Callable[[], None],
+    on_error: Callable[[Any], Any],
+    on_status_fn: Callable[[str], None] | None = None,
+    show_search_thinking: bool = False,
+    on_approval_required: Callable[..., None] | None = None,
+    stop_checker: Callable[[], bool] | None = None,
+    flush_pending: Callable[[], None] | None = None,
+    *,
+    rearm: Any = None,
+    on_drain_started: Callable[[], None] | None = None,
+) -> None:
     """
     Main-thread drain: batches items from the queue, manages thinking/chunk
     buffers, and dispatches to callbacks.
@@ -1007,22 +1081,22 @@ def run_stream_drain_loop(q: Any, toolkit: Any, job_done: Any, apply_chunk_fn: A
     - (STATUS, text): Passed to on_status_fn(text).
     - (STREAM_DONE, response): Calls on_stream_done(item). Returns True if job finished.
     - (NEXT_TOOL,): Internal trigger for multi-round loops. Calls
-      on_stream_done(item) but does not stop the drain mid-batch. A true
-      return is applied only after items already pulled are handled. A false
-      return keeps the drain pumping for the next round.
+    on_stream_done(item) but does not stop the drain mid-batch. A true
+    return is applied only after items already pulled are handled. A false
+    return keeps the drain pumping for the next round.
     - (TOOL_DONE, call_id, func_name, args_str, res): Handled by orchestration (if used).
     - (TOOL_THINKING, text): Thinking tokens from a tool (e.g. web search).
     - (FINAL_DONE, text): Final non-tool response.
     - (APPROVAL_REQUIRED, ...): HITL; call on_approval_required(item). If no
-      handler is registered, the approval event is set and no dialog is shown.
+    handler is registered, the approval event is set and no dialog is shown.
     - (STOPPED, ignored): Calls on_stopped() (second element unused).
     - (ERROR, payload): Calls on_error(payload). If on_error returns True, the
-      drain keeps running (handler recovered, e.g. STT fallback spawned a new
-      worker on this queue) but drops the rest of the batch already pulled.
-      A true NEXT_TOOL return earlier in that batch does not end the recovery.
-      Any other return value ends the loop. If on_error itself raises, it is
-      not called again. A dispatch handler that raises is the same contract
-      (inline on_error, no re-queue, no on_stream_done).
+    drain keeps running (handler recovered, e.g. STT fallback spawned a new
+    worker on this queue) but drops the rest of the batch already pulled.
+    A true NEXT_TOOL return earlier in that batch does not end the recovery.
+    Any other return value ends the loop. If on_error itself raises, it is
+    not called again. A dispatch handler that raises is the same contract
+    (inline on_error, no re-queue, no on_stream_done).
     - (TOOL_CALL, payload): Agent-backend tool block; shown as text via apply_chunk_fn.
     - (TOOL_RESULT, payload): Agent-backend tool result block; shown as text via apply_chunk_fn.
     """
@@ -1034,12 +1108,12 @@ def run_stream_drain_loop(q: Any, toolkit: Any, job_done: Any, apply_chunk_fn: A
     clear_drain_capture()
     scheduler = rearm if rearm is not None else _make_drain_rearm()
     if scheduler is None:
-        _run_stream_drain_blocking(state, toolkit, stop_checker, flush_pending)
+        _run_stream_drain_blocking(state, toolkit, stop_checker, flush_pending, on_drain_started=on_drain_started)
         return
     try:
         # Same-name "stream" re-entry is allowed. acquire_drain_owner raises
         # NestedDrainOwnerError for a different owner (for example MCP).
-        _EventDrain(state, scheduler, stop_checker, flush_pending).start()
+        _EventDrain(state, scheduler, stop_checker, flush_pending, on_started=on_drain_started).start()
     except Exception as exc:
         # Drop the callback the same way a finished drain does. acquire
         # raises before _held, so _finish never closes the re-arm and the
@@ -1092,7 +1166,13 @@ def _make_drain_rearm() -> _AsyncCallbackRearm | None:
         return None
 
 
-def _run_stream_drain_blocking(state: _DrainState, toolkit: Any, stop_checker: Any, flush_pending: Any) -> None:
+def _run_stream_drain_blocking(
+    state: _DrainState,
+    toolkit: Any,
+    stop_checker: Any,
+    flush_pending: Any,
+    on_drain_started: Callable[[], None] | None = None,
+) -> None:
     """Blocking drain used when ``AsyncCallback`` cannot take the next slice.
 
     Unit tests and the eval harness have no VCL callback to return to.
@@ -1108,6 +1188,8 @@ def _run_stream_drain_blocking(state: _DrainState, toolkit: Any, stop_checker: A
         # VCL. Rejecting any existing owner, including "stream", makes
         # dual-deck peer sends raise NestedDrainOwnerError.
         with drain_owner_scope("stream"):
+            if on_drain_started is not None:
+                on_drain_started()
             while not job_done[0]:
                 if stop_checker and stop_checker():
                     log.info("run_stream_drain_loop: Stop requested via checker.")
@@ -1281,6 +1363,10 @@ def run_async_worker_with_drain(
 ) -> None:
     """Run a background worker and drain its queue on the main thread.
 
+    The worker starts after the drain is armed (event) or after the blocking
+    owner is taken; a drain that fails to start never starts the worker.
+    Toolkit may be ``None``.
+
     ``q`` is a ``queue.Queue`` or a producer batcher with ``raw`` and
     ``flush``. The drain reads ``raw`` and calls ``flush`` on Stop and
     before the terminal item.
@@ -1358,16 +1444,6 @@ def run_async_worker_with_drain(
     from plugin.framework.uno_context import get_toolkit
 
     toolkit = get_toolkit(ctx)
-    if toolkit is None:
-        from plugin.framework.errors import UnoObjectError
-
-        err = UnoObjectError(f"Failed to create toolkit for {name}")
-        if on_error_fn:
-            try:
-                on_error_fn(format_error_payload(err))
-            except Exception:
-                log.exception("Failed to notify error handler for toolkit creation failure")
-        return
 
     # Refuse before spawn: this helper refuses every current owner, including
     # "stream", before spawning a worker thread. The underlying drain would
@@ -1386,8 +1462,6 @@ def run_async_worker_with_drain(
             except Exception:
                 log.exception("Failed to notify error handler for nested drain")
         return
-
-    run_in_background(worker_wrapper, daemon=True, name=name, dedicated=True)
 
     def on_stream_done_wrapper(item: Any) -> bool:
         if on_done_fn:
@@ -1433,37 +1507,51 @@ def run_async_worker_with_drain(
     # the 250ms batcher. This helper accepted a batcher and only flushed it
     # in the worker finally, so Stop could return with up to one interval
     # of already-produced text still buffered.
-    run_stream_drain_loop(_real_q, toolkit, job_done, resolved_apply_chunk, on_stream_done=on_stream_done_wrapper, on_stopped=resolved_on_stopped, on_error=resolved_on_error, on_status_fn=on_status_fn, on_approval_required=on_approval_required, stop_checker=stop_checker, flush_pending=_flush)
+    def _spawn_worker() -> None:
+        run_in_background(worker_wrapper, daemon=True, name=name, dedicated=True)
+
+    run_stream_drain_loop(
+        _real_q,
+        toolkit,
+        job_done,
+        resolved_apply_chunk,
+        on_stream_done=on_stream_done_wrapper,
+        on_stopped=resolved_on_stopped,
+        on_error=resolved_on_error,
+        on_status_fn=on_status_fn,
+        on_approval_required=on_approval_required,
+        stop_checker=stop_checker,
+        flush_pending=_flush,
+        on_drain_started=_spawn_worker,
+    )
 
 
-def _run_client_stream(
+def run_stream_completion_async(
     ctx: Any,
-    client_call: Callable[..., None],
+    client: Any,
+    prompt: Any,
+    system_prompt: Any,
+    max_tokens: Any,
     apply_chunk_fn: Callable[[str, bool], None] | None,
     on_done_fn: Callable[..., None] | None,
     on_error_fn: Callable[[Any], None] | None,
     on_status_fn: Callable[[str], None] | None = None,
     stop_checker: Callable[[], bool] | None = None,
-    name: str = "stream-client",
-    include_status: bool = False,
 ) -> None:
-    """Shared adapter: run *client_call* in a worker streaming into the queue.
-
-    ``client_call`` is a client method pre-bound with all positional args;
-    it receives the standard streaming callback kwargs
-    (``append_callback``, ``append_thinking_callback``, optional
-    ``status_callback``, and ``stop_checker``).
-    """
+    """High-level helper for simple non-tool streams (always chat completions)."""
     # crosshair: off
     # Batch CHUNK/THINKING so Extend/Edit selection does not wake the drain
     # per token. STATUS still flushes (BatchingStreamQueue boundary).
     batched = BatchingStreamQueue(queue.Queue(), batch_interval=0.25)
 
     def worker(q: queue.Queue[Any]) -> None:
-        kwargs: dict[str, Any] = {"append_callback": lambda t: q.put((StreamQueueKind.CHUNK, t)), "append_thinking_callback": lambda t: q.put((StreamQueueKind.THINKING, t)), "stop_checker": stop_checker}
-        if include_status:
-            kwargs["status_callback"] = lambda t: q.put((StreamQueueKind.STATUS, t))
-        client_call(**kwargs)
+        kwargs: dict[str, Any] = {
+            "append_callback": lambda t: q.put((StreamQueueKind.CHUNK, t)),
+            "append_thinking_callback": lambda t: q.put((StreamQueueKind.THINKING, t)),
+            "status_callback": lambda t: q.put((StreamQueueKind.STATUS, t)),
+            "stop_checker": stop_checker,
+        }
+        client.stream_completion(prompt, system_prompt, max_tokens, **kwargs)
         if stop_checker and stop_checker():
             put_stream_queue_stopped(q)
 
@@ -1475,16 +1563,6 @@ def _run_client_stream(
         on_error_fn=on_error_fn,
         on_status_fn=on_status_fn,
         stop_checker=stop_checker,
-        name=name,
+        name="stream-completion",
         q=batched,
     )
-
-
-def run_stream_completion_async(ctx: Any, client: Any, prompt: Any, system_prompt: Any, max_tokens: Any, apply_chunk_fn: Any, on_done_fn: Any, on_error_fn: Any, on_status_fn: Any = None, stop_checker: Any = None) -> None:
-    """High-level helper for simple non-tool streams (always chat completions)."""
-    # crosshair: off
-
-    def client_call(**cb_kwargs: Any) -> None:
-        client.stream_completion(prompt, system_prompt, max_tokens, **cb_kwargs)
-
-    _run_client_stream(ctx, client_call, apply_chunk_fn=apply_chunk_fn, on_done_fn=on_done_fn, on_error_fn=on_error_fn, on_status_fn=on_status_fn, stop_checker=stop_checker, name="stream-completion", include_status=True)

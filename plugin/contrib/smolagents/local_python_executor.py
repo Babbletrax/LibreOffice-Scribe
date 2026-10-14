@@ -1961,6 +1961,14 @@ def evaluate_python_code(
             is_final_answer = True
             return e.value, is_final_answer
         except Exception as e:
+            from plugin.framework.errors import is_disposed_exception
+
+            # lp() used to catch DisposedException, wrap it as CALC_READ_ERROR,
+            # and this handler then wrapped that as InterpreterError, so a closed
+            # document became PYTHON_EXECUTION_ERROR. Re-raising here lets
+            # execute_with_return see the disposal.
+            if is_disposed_exception(e):
+                raise
             state["_print_outputs"].value = truncate_content(
                 str(state["_print_outputs"]), max_length=max_print_outputs_length
             )

@@ -1546,7 +1546,7 @@ def test_llm_request_lane_uncontended_does_not_call_status():
 
 
 def test_llm_request_lane_stop_while_waiting():
-    from plugin.framework.async_stream import BlockingWaitStopped
+    from plugin.framework.blocking_wait import BlockingWaitStopped
     from plugin.framework.queue_executor import llm_request_lane, _LLM_REQUEST_LOCK
 
     # Block the lane

@@ -83,8 +83,8 @@ def do_extend_selection(ctx: Any, model: Any, input_box_fn: Any) -> None:
         track_reviewable=review_recording_enabled(ctx),
     )
 
-    # A chunk already in hand is a document write and lands. Stop aborts the
-    # network read inside stream_completion, not this append.
+    # Extend/Edit has no Stop control; a chunk already in hand is a document write
+    # and lands (session.append_chunk).
     def apply_chunk(chunk_text: str, is_thinking: bool = False) -> None:
         if not is_thinking:
             session.append_chunk(chunk_text)
@@ -98,7 +98,8 @@ def do_extend_selection(ctx: Any, model: Any, input_box_fn: Any) -> None:
         session.abort_and_restore()
         msgbox(ctx, title, _(format_error_message(e)))
 
-    # Stop is read from ctx inside stream_completion. Do not pass a separate checker.
+    # Extend/Edit has no Stop control; a chunk already in hand is a document write
+    # and lands (session.append_chunk).
     stream_completion(ctx, client, prompt, system_prompt, max_tokens, apply_chunk, on_done, on_error)
 
 
@@ -129,8 +130,8 @@ def do_edit_selection(ctx: Any, model: Any, input_box_fn: Any) -> None:
         track_reviewable=review_recording_enabled(ctx),
     )
 
-    # A chunk already in hand is a document write and lands. Stop aborts the
-    # network read inside stream_completion, not this append.
+    # Extend/Edit has no Stop control; a chunk already in hand is a document write
+    # and lands (session.append_chunk).
     def apply_chunk(chunk_text: str, is_thinking: bool = False) -> None:
         if not is_thinking:
             session.append_chunk(chunk_text)
@@ -144,5 +145,6 @@ def do_edit_selection(ctx: Any, model: Any, input_box_fn: Any) -> None:
         session.abort_and_restore()
         msgbox(ctx, title, _(format_error_message(e)))
 
-    # Stop is read from ctx inside stream_completion. Do not pass a separate checker.
+    # Extend/Edit has no Stop control; a chunk already in hand is a document write
+    # and lands (session.append_chunk).
     stream_completion(ctx, client, prompt, system_prompt, max_tokens, apply_chunk, on_done, on_error)

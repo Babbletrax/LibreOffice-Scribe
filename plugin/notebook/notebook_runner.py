@@ -16,7 +16,7 @@ from plugin.chatbot.dialogs import msgbox
 from plugin.doc.doc_type import is_writer
 from plugin.doc.text_helpers import clone_text_range
 from plugin.framework.errors import is_disposed_exception, is_document_disposed
-from plugin.framework.async_stream import run_blocking_in_thread
+from plugin.framework.blocking_wait import run_blocking_in_thread
 from plugin.framework.i18n import _
 from plugin.framework.uno_context import get_active_document
 from plugin.notebook import form_lookup

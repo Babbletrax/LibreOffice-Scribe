@@ -718,7 +718,7 @@ def _optimize_cases() -> list[DomainDemoCase]:
             id="optimize_portfolio",
             domain="optimize",
             helper="optimize_portfolio",
-            description="Mean-variance portfolio weights",
+            description="Minimum-variance portfolio weights",
             input_grid=PORTFOLIO_RETURNS_GRID,
             params={"returns_col": ["AAPL", "MSFT", "GOOG"]},
             python_expr=_optimize_expr(

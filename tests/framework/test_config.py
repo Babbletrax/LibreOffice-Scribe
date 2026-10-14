@@ -348,22 +348,66 @@ class TestConfigSyncFileIO:
         assert isinstance(_cache.data, dict)
 
     def test_unchanged_broken_file_logs_once(self, caplog):
+        from plugin.framework import config as config_mod
+
         broken = "{ invalid json 1"
         with open(self.config_path, "w", encoding="utf-8") as f:
             f.write(broken)
         reset_config_for_tests()
-        with caplog.at_level(logging.ERROR):
+        real_repair = config_mod._try_repair_config_dict
+        repair_calls = 0
+
+        def counting_repair(text):
+            nonlocal repair_calls
+            repair_calls += 1
+            return real_repair(text)
+
+        with caplog.at_level(logging.WARNING), patch("plugin.framework.config._try_repair_config_dict", side_effect=counting_repair):
             for unused in range(3):
                 assert get_config("text_model") == ""
             errors = [rec for rec in caplog.records if rec.levelno == logging.ERROR]
             assert len(errors) == 1
+            warnings = [rec for rec in caplog.records if rec.levelno == logging.WARNING and "could not be auto-repaired" in rec.message]
+            assert len(warnings) == 1
+            assert repair_calls == 1
 
-            broken2 = "{ invalid json 2"
+            broken2 = "{ invalid json 2 with longer text"
             with open(self.config_path, "w", encoding="utf-8") as f:
                 f.write(broken2)
             assert get_config("text_model") == ""
             errors2 = [rec for rec in caplog.records if rec.levelno == logging.ERROR]
             assert len(errors2) == 2
+            warnings2 = [rec for rec in caplog.records if rec.levelno == logging.WARNING and "could not be auto-repaired" in rec.message]
+            assert len(warnings2) == 2
+            assert repair_calls == 2
+
+    def test_warm_cache_corrupt_file_is_not_reparsed(self):
+        from plugin.framework import config as config_mod
+        from plugin.framework.config import _cache
+
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            json.dump({"text_model": "good-model"}, f)
+        reset_config_for_tests()
+        assert get_config("text_model") == "good-model"
+
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            f.write("{ not json")
+
+        _cache.mtime_last_checked = 0.0
+        assert get_config("text_model") == "good-model"
+
+        real_repair = config_mod._try_repair_config_dict
+        repair_calls = 0
+
+        def counting_repair(text):
+            nonlocal repair_calls
+            repair_calls += 1
+            return real_repair(text)
+
+        _cache.mtime_last_checked = 0.0
+        with patch("plugin.framework.config._try_repair_config_dict", side_effect=counting_repair):
+            assert get_config("text_model") == "good-model"
+            assert repair_calls == 0
 
     def test_config_trailing_comma_auto_repair(self):
         broken = '{"text_model": "gpt",}'
@@ -518,14 +562,69 @@ class TestConfigSyncFileIO:
         assert data.get("text_model") == "keep-me"
         assert data.get("temperature") == 1.0
 
+    def test_update_dotted_key_ignores_unrelated_flat_suffix(self):
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            json.dump({"endpoint": "http://keep.example"}, f)
+        reset_config_for_tests()
+        recorded = []
+
+        def fn(val):
+            recorded.append(val)
+            return val
+
+        update_config("notamodule.endpoint", fn)
+        assert recorded == [None]
+        data = self._load_written()
+        assert data == {"endpoint": "http://keep.example"}
+
     def test_set_unrelated_dotted_key_keeps_flat_endpoint(self):
         with open(self.config_path, "w", encoding="utf-8") as f:
             json.dump({"endpoint": "http://keep.example", "text_model": "m"}, f)
         reset_config_for_tests()
-        set_config("notamodule.endpoint", "http://other.example")
+        with patch.object(global_event_bus, "emit") as mock_emit:
+            set_config("notamodule.endpoint", "http://other.example")
+            assert mock_emit.call_count == 1
+            assert mock_emit.call_args.kwargs["key"] == "notamodule.endpoint"
+            assert mock_emit.call_args.kwargs["value"] == "http://other.example"
+            assert mock_emit.call_args.kwargs["old_value"] is None
         data = self._load_written()
         assert data.get("endpoint") == "http://keep.example"
         assert data.get("notamodule.endpoint") == "http://other.example"
+
+    def test_update_audio_stt_model_does_not_read_legacy_flat(self):
+        from plugin.framework.client.model_fetcher import get_stt_model
+
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            json.dump({"stt_model": "whisper-legacy"}, f)
+        reset_config_for_tests()
+        recorded = []
+
+        def fn(val):
+            recorded.append(val)
+            return val
+
+        update_config("audio.stt_model", fn)
+        assert recorded == [""]
+        data = self._load_written()
+        assert data.get("stt_model") == "whisper-legacy"
+        assert "audio.stt_model" not in data
+        assert get_config("audio.stt_model") == ""
+        assert get_stt_model() == "whisper-legacy"
+
+    def test_remove_legacy_stt_only_old_value_is_dotted_default(self):
+        from plugin.framework.config import remove_config
+
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            json.dump({"stt_model": "whisper-legacy"}, f)
+        reset_config_for_tests()
+        with patch.object(global_event_bus, "emit") as mock_emit:
+            remove_config("audio.stt_model")
+            assert mock_emit.call_count == 1
+            assert mock_emit.call_args.kwargs["key"] == "audio.stt_model"
+            assert mock_emit.call_args.kwargs["old_value"] == ""
+        data = self._load_written()
+        assert "stt_model" not in data
+        assert "audio.stt_model" not in data
 
     def test_remove_audio_stt_model_drops_legacy_stt_model(self):
         from plugin.framework.config import remove_config
@@ -1189,6 +1288,17 @@ class TestConfigSyncFileIO:
         for key, value in original.items():
             assert (data[key]) == (value)
 
+    def test_set_config_non_json_value_raises_config_error(self):
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            json.dump({"text_model": "keep"}, f)
+        reset_config_for_tests()
+        with pytest.raises(ConfigError) as exc_info:
+            set_config("custom_blob", {1, 2})
+        assert exc_info.value.code == "CONFIG_SAVE_ERROR"
+        data = self._load_written()
+        assert data.get("text_model") == "keep"
+        assert "custom_blob" not in data
+
 
 class TestRobustNumericParsing:
 
@@ -1396,6 +1506,20 @@ class TestRobustNumericParsing:
             })
         assert (ok)
         assert (err) == ("")
+
+
+def test_get_config_before_init_warns_once(caplog):
+    reset_config_for_tests()
+    with patch("plugin.framework.config._config_path", side_effect=ConfigError("no path", "CONFIG_PATH_ERROR")):
+        with caplog.at_level(logging.WARNING):
+            assert get_config("text_model") == ""
+            assert get_config("text_model") == ""
+            warnings = [rec for rec in caplog.records if rec.levelno == logging.WARNING and "before init_config" in rec.message]
+            assert len(warnings) == 1
+
+            assert get_config("request_timeout") == 120
+            warnings_after = [rec for rec in caplog.records if rec.levelno == logging.WARNING and "before init_config" in rec.message]
+            assert len(warnings_after) == 1
 
 
 def test_set_config_raises_when_path_empty():

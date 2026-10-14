@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-"""deal / Hypothesis / CrossHair (FQN) for async_stream.accumulate_delta."""
+"""deal / Hypothesis / CrossHair (FQN) for stream_delta.accumulate_delta."""
 
 from __future__ import annotations
 
@@ -17,7 +17,8 @@ import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-from plugin.framework.async_stream import accumulate_delta, _format_agent_tool_stream_line
+from plugin.framework.stream_delta import accumulate_delta
+from plugin.framework.async_stream import _format_agent_tool_stream_line
 
 
 def test_format_agent_tool_stream_line_basic() -> None:

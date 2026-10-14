@@ -14,8 +14,10 @@ from typing import Any
 from plugin.scripting._lazy_venv import install_lazy_dir, make_getattr
 from plugin.scripting.client import run_forecast as client_run_forecast
 from plugin.scripting.helper_domain import (
+    DomainFacadeConfig,
     header_prefix,
     is_status_helper_result,
+    make_template_api,
     run_trusted_calc_data_helper,
 )
 
@@ -24,6 +26,12 @@ from plugin.scripting.calc_functions_common import (
 )
 
 FORECAST_HEADER_PREFIX = header_prefix("forecast")
+
+HELPER_PARAM_HELP: dict[str, str] = {
+    "forecast_time_series": "periods (int, default 12, capped at 10000), model (auto, holt_winters, arima, or moving_average; default auto), date_col (default Date), value_col (default Value), seasonal_periods (optional int). Date cells may be ISO strings, Calc serial numbers, or calendar years 1900-2200. model=auto uses Holt-Winters when at least two seasonal cycles are present, otherwise ARIMA(1,1,1), otherwise a flat moving average.",
+    "decompose_time_series": "date_col (default Date), value_col (default Value), model (additive or multiplicative; default additive), period (optional int; inferred from the dates when omitted).",
+    "anomaly_detection_time_series": "date_col (default Date), value_col (default Value), period (optional int), method (stl_residual only), threshold (float, default 3), include_all (bool, default false).",
+}
 
 _DEFAULT_PARAMS: dict[str, dict[str, Any]] = {
     "forecast_time_series": {
@@ -68,9 +76,6 @@ install_lazy_dir(globals(), _FORECAST_VENV_EXPORTS)
 
 
 # --- Templates ---
-
-from plugin.scripting.helper_domain import DomainFacadeConfig, make_template_api
-
 
 _API = make_template_api(
     DomainFacadeConfig(

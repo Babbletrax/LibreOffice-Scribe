@@ -219,6 +219,10 @@ def _compile_allowlist(authorized_imports: tuple[str, ...]) -> tuple[frozenset[s
     exact: set[str] = set()
     wildcards: list[str] = []
     for entry in authorized_imports:
+        if entry == "writeragent.*":
+            # The blanket authorized every alias, including plugin.framework.config,
+            # so it is not an allow. Explicit writeragent.X entries still compile.
+            continue
         if entry == "*":
             wildcards.append("")
         elif entry.endswith(".*"):
@@ -255,20 +259,10 @@ def import_authorized(name: str, authorized_imports: Sequence[str]) -> bool:
     # crosshair: off
     tuple_imports = tuple(authorized_imports)
     exact, wildcards = _compile_allowlist(tuple_imports)
-
-    real = _alias_real_module(name)
-    if real is None:
-        return _matches_allowlist(name, exact, wildcards)
-
-    if _matches_allowlist(real, exact, wildcards):
+    if _matches_allowlist(name, exact, wildcards):
         return True
-
-    if "writeragent.*" in tuple_imports:
-        without_blanket = tuple(item for item in tuple_imports if item != "writeragent.*")
-        exact_no_blanket, wildcards_no_blanket = _compile_allowlist(without_blanket)
-        return _matches_allowlist(name, exact_no_blanket, wildcards_no_blanket)
-
-    return _matches_allowlist(name, exact, wildcards)
+    real = _alias_real_module(name)
+    return real is not None and _matches_allowlist(real, exact, wildcards)
 
 
 # In-process LO embedded sandbox (execute_python_script) — stdlib-only extras beyond BASE_BUILTIN_MODULES.
@@ -276,11 +270,53 @@ CALC_AUTHORIZED_IMPORTS: tuple[str, ...] = tuple(sorted(set(BASE_BUILTIN_MODULES
 
 # --- Subprocess environment ---
 
-_BLOCKED_ENV_TOKENS = frozenset({"KEY", "TOKEN", "SECRET", "PASSWORD", "AUTH", "CREDENTIAL"})
+_BLOCKED_ENV_TOKENS = frozenset(
+    {
+        "KEY",
+        "KEYS",
+        "TOKEN",
+        "TOKENS",
+        "SECRET",
+        "SECRETS",
+        "PASSWORD",
+        "PASSWORDS",
+        "PASSWD",
+        "PASSPHRASE",
+        "PASSPHRASES",
+        "PAT",
+        "PWD",
+        "CREDENTIAL",
+        "CREDENTIALS",
+        "AUTH",
+        "AUTHORIZATION",
+        "WEBHOOK",
+        "WEBHOOKS",
+        "KEYRING",
+        "KEYFILE",
+        "KEYSTORE",
+        "KEYTAB",
+    }
+)
+
+_GLUED_CREDENTIAL_TOKENS = frozenset(
+    {
+        "APIKEY",
+        "APITOKEN",
+        "SECRETKEY",
+        "ACCESSKEY",
+        "ACCESSKEYID",
+        "PRIVATEKEY",
+        "AUTHKEY",
+        "AUTHTOKEN",
+        "APPKEY",
+        "APPTOKEN",
+        "APISECRET",
+    }
+)
+
 # XAUTHORITY contains AUTH but is the X11 cookie path, not a credential name.
-_ENV_CREDENTIAL_ALLOW = frozenset({"XAUTHORITY"})
-# Token prefixes that are known non-credential device or system names (e.g. KEYBOARD_*).
-_ENV_TOKEN_ALLOW = frozenset({"KEYBOARD"})
+# PWD is the shell cwd, not a password.
+_ENV_CREDENTIAL_ALLOW = frozenset({"XAUTHORITY", "PWD"})
 
 # LibreOffice sets PYTHONHOME/PYTHONPATH to its bundled stdlib; letting these
 # leak into a venv subprocess causes SRE module mismatch and import failures.
@@ -295,10 +331,16 @@ _BLOCKED_ENV_EXACT = {
     "PYTHONUSERBASE",
     "PYTHONBREAKPOINT",
     "PYTHONINSPECT",
+    "PYTHONEXECUTABLE",
+    "PYTHONNOUSERSITE",
     "LD_LIBRARY_PATH",
     "LD_PRELOAD",
     "LD_AUDIT",
     "DYLD_INSERT_LIBRARIES",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FRAMEWORK_PATH",
+    "DYLD_FALLBACK_LIBRARY_PATH",
+    "DYLD_FALLBACK_FRAMEWORK_PATH",
     "DATABASE_URL",
     "WRITERAGENT_COMPUTE_WORKER",
 }
@@ -356,12 +398,13 @@ _DEAL_BASENAME_LEN = 8 if UNDER_CROSSHAIR else DEAL_MAX_PATH
 
 
 def _env_name_is_credential(name: str) -> bool:
-    """True when an env name is a credential, matched on ``_`` tokens.
+    """True when an env name is a credential, matched on exact ``_`` tokens.
 
-    Match tokens that equal, start with, or end with a blocked word.
-    Prefix-only matching let OPENAI_APIKEY, GITHUB_APITOKEN, AWS_SECRETKEY,
-    and DATABASE_URL/*_DSN through, and blocked KEYBOARD_*. KEYBOARD tokens
-    are allowed. DATABASE_URL and names ending in _DSN are blocked.
+    Prefix and suffix matching blocked TOKENIZERS_PARALLELISM, MONKEY,
+    TURKEY, SECRETARY, and KEYWORD, and let MYSQL_PWD, PASSPHRASE, PASSWD,
+    GITHUB_PAT, and SLACK_WEBHOOK_URL through. Whole tokens plus the glued
+    set fix both. PWD itself stays allowed because it is the shell cwd, not
+    a password.
     """
     nu = name.upper()
     if nu in _ENV_CREDENTIAL_ALLOW:
@@ -370,16 +413,8 @@ def _env_name_is_credential(name: str) -> bool:
         return True
     tokens = [part for part in nu.replace("-", "_").split("_") if part]
     for token in tokens:
-        if any(token == allowed or token.startswith(allowed) for allowed in _ENV_TOKEN_ALLOW):
-            continue
-        for word in _BLOCKED_ENV_TOKENS:
-            if (
-                token == word
-                or token.startswith(word)
-                or token.endswith(word)
-                or token.endswith(word + "S")
-            ):
-                return True
+        if token in _BLOCKED_ENV_TOKENS or token in _GLUED_CREDENTIAL_TOKENS:
+            return True
     return False
 
 
@@ -483,22 +518,58 @@ def optimize_popen_pipes(proc: subprocess.Popen[Any]) -> None:
 # Hypothesis and venv-path tests pass Unicode argv/paths; ascii_bounded would reject them.
 # Argv uses DEAL_MAX_ARGV (venv -c probes are longer than DEAL_MAX_PATH filesystem caps).
 @deal.pre(
-    lambda cmd: isinstance(cmd, list)
+    lambda cmd, env=None, cwd=None, watch_bus=False: isinstance(cmd, list)
     and len(cmd) <= DEAL_MAX_CMD_ARGS
     and all(str_bounded(x, DEAL_MAX_ARGV) for x in cmd)
+    and (
+        env is None
+        or (
+            isinstance(env, dict)
+            and all(isinstance(k, str) and isinstance(v, str) for k, v in env.items())
+        )
+    )
+    and (cwd is None or isinstance(cwd, str))
 )
 @deal.post(lambda result: isinstance(result, list) and all(isinstance(x, str) for x in result))
-@deal.ensure(lambda cmd, result: len(result) >= len(cmd) and (result[-len(cmd):] == cmd if cmd else True))
-def wrap_command_for_sandbox(cmd: list[str]) -> list[str]:
+@deal.ensure(
+    lambda cmd, env=None, cwd=None, watch_bus=False, result=None: isinstance(result, list)
+    and len(result) >= len(cmd)
+    and (result[-len(cmd):] == cmd if cmd else True)
+)
+def wrap_command_for_sandbox(
+    cmd: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    cwd: str | None = None,
+    watch_bus: bool = False,
+) -> list[str]:
     """Prepend ``flatpak-spawn --host`` when running inside a Flatpak sandbox.
 
-    Snap confinement with ``classic``/``home`` plugs typically allows direct
-    subprocess access, so Snap commands are returned unchanged.
+    ``watch_bus=True`` inserts ``--watch-bus`` so ``Popen.kill()`` on
+    ``flatpak-spawn`` also ends the host child; the default is false so a
+    bus drop does not kill the venv worker.
+    ``flatpak-spawn --host`` does not forward the Popen env or cwd.
+    ``--env`` without ``--clear-env`` would still leave host-session secrets
+    in the child. Callers that omit ``env`` (harper, vale, headless soffice)
+    keep the host session. Snap confinement with ``classic``/``home`` plugs
+    typically allows direct subprocess access, so Snap commands are returned
+    unchanged.
     """
     sandbox = detect_sandbox()
-    if sandbox == "flatpak":
-        return ["flatpak-spawn", "--host"] + cmd
-    return cmd
+    if sandbox != "flatpak":
+        return cmd
+    argv = ["flatpak-spawn", "--host"]
+    if watch_bus:
+        argv.append("--watch-bus")
+    if env is not None:
+        argv.append("--clear-env")
+    if isinstance(cwd, str) and cwd:
+        argv.append("--directory=" + cwd)
+    if env is not None:
+        for key, value in env.items():
+            argv.append(f"--env={key}={value}")
+    argv.extend(cmd)
+    return argv
 
 
 def _reset_cache() -> None:  # pyright: ignore[reportUnusedFunction]  # test helper to clear sandbox path cache
@@ -674,35 +745,6 @@ def resolve_libreoffice_python() -> Optional[str]:
     return None
 
 
-def _python_candidates_in_bin_dir(bin_dir: str) -> list[str]:
-    # crosshair: off
-    # cover-all 33689813185 leftover: os.listdir python3.* combinatorics (~313 ex). Doable later: closed bin names.
-    """Return candidate interpreter paths under a venv ``bin/`` or ``Scripts/`` directory."""
-    candidates: list[str] = []
-    if os.name == "nt":
-        candidates.extend(
-            [
-                os.path.join(bin_dir, "python.exe"),
-                os.path.join(bin_dir, "python"),
-                os.path.join(bin_dir, "python3"),
-            ]
-        )
-    else:
-        for name in ("python", "python3"):
-            candidates.append(os.path.join(bin_dir, name))
-    # os.listdir raises OSError on a race or an unreadable directory. Same
-    # guard as _bundled_lo_python_candidates.
-    if os.path.isdir(bin_dir):
-        try:
-            entries = sorted(os.listdir(bin_dir))
-        except OSError:
-            entries = []
-        for entry in entries:
-            if entry.startswith("python3."):
-                candidates.append(os.path.join(bin_dir, entry))
-    return candidates
-
-
 def _python_candidates_at_env_root(env_dir: str) -> list[str]:
     # crosshair: off
     # cover-all 33689813185 leftover: env-root path combinatorics. Doable later.
@@ -717,6 +759,24 @@ def _python_candidates_at_env_root(env_dir: str) -> list[str]:
         os.path.join(env_dir, "python"),
         os.path.join(env_dir, "python3"),
     ]
+
+
+def _python_candidates_in_bin_dir(bin_dir: str) -> list[str]:
+    # crosshair: off
+    # cover-all 33689813185 leftover: os.listdir python3.* combinatorics (~313 ex). Doable later: closed bin names.
+    """Return candidate interpreter paths under a venv ``bin/`` or ``Scripts/`` directory."""
+    candidates = _python_candidates_at_env_root(bin_dir)
+    # os.listdir raises OSError on a race or an unreadable directory. Same
+    # guard as _bundled_lo_python_candidates.
+    if os.path.isdir(bin_dir):
+        try:
+            entries = sorted(os.listdir(bin_dir))
+        except OSError:
+            entries = []
+        for entry in entries:
+            if entry.startswith("python3."):
+                candidates.append(os.path.join(bin_dir, entry))
+    return candidates
 
 
 def _first_executable_python(candidates: list[str]) -> str | None:

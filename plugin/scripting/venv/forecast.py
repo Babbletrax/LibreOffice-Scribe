@@ -21,6 +21,11 @@ from plugin.scripting.venv.coerce import (
     missing_package_error as _missing_package_error,
     resolve_df as _resolve_df,
     table_from_df as _table_from_df,
+    parse_date_column,
+    coerce_int,
+    coerce_optional_int,
+    coerce_float,
+    coerce_bool,
 )
 
 log = logging.getLogger(__name__)
@@ -59,9 +64,13 @@ def _prepare_time_series(
         return None, None, _error_result("UNKNOWN_COLUMN", f"Column {value_col!r} not found", helper=helper)
 
     work = df[[date_col, value_col]].copy()
-    work[date_col] = pd.to_datetime(work[date_col], errors="coerce")
+    work[date_col] = parse_date_column(work[date_col])
     work[value_col] = pd.to_numeric(work[value_col], errors="coerce")
+    n_before_drop = len(work)
     work = work.dropna(subset=[date_col, value_col]).sort_values(date_col)
+    dropped = n_before_drop - len(work)
+    if dropped > 0:
+        coerced.metadata["rows_dropped"] = int(dropped)
     if work.empty:
         return None, None, _error_result("INSUFFICIENT_DATA", "No valid date/value rows after coercion", helper=helper)
 
@@ -74,8 +83,6 @@ def _prepare_time_series(
         coerced.metadata["duplicate_dates_collapsed"] = int(collapsed)
 
     series = work.set_index(date_col)[value_col]
-    if not series.index.is_monotonic_increasing:
-        series = series.sort_index()
     if len(series) < _MIN_FORECAST_POINTS:
         return None, None, _error_result(
             "INSUFFICIENT_DATA",
@@ -85,9 +92,19 @@ def _prepare_time_series(
     return coerced, series, None
 
 
+def _dropped_row_flags(coerced: CoerceResult | None) -> list[str]:
+    if coerced is None:
+        return []
+    dropped = coerced.metadata.get("rows_dropped")
+    if dropped and int(dropped) > 0:
+        return [f"Dropped {int(dropped)} rows with an unparseable date or value"]
+    return []
+
+
 # One seasonal cycle for a regular calendar. Annual and sub-hour series have
 # no cycle we can safely guess, so they stay trend-only unless the caller
-# passes a period.
+# passes a period. BH is business hours 09:00-17:00, and 24 is neither a
+# business day nor a business week of those hours, so those series stay trend-only.
 _SEASON_BY_FREQ_BASE: dict[str, int] = {
     "D": 7,
     "C": 7,
@@ -104,8 +121,9 @@ _SEASON_BY_FREQ_BASE: dict[str, int] = {
     "QS": 4,
     "BQ": 4,
     "BQS": 4,
+    "BQE": 4,
+    "SME": 24,
     "H": 24,
-    "BH": 24,
 }
 
 
@@ -203,30 +221,91 @@ def _duplicate_date_flags(coerced: CoerceResult | None) -> list[str]:
     return [f"Aggregated {int(collapsed)} duplicate date rows by mean"]
 
 
-def _future_index(series: Any, periods: int) -> tuple[Any, str]:
-    """Dates after the last observation, and the frequency label used.
-
-    Weekday-only sheets often have no inferred frequency (the Friday–Monday
-    gap breaks ``infer_freq``). The median gap is still one day, which used
-    to emit Saturday and Sunday forecast dates.
-    """
+def _spacing(series: Any) -> tuple[Any, str, bool]:
     import pandas as pd
 
-    last_date = series.index[-1]
     freq = pd.infer_freq(series.index)
     if freq is not None:
-        step = pd.tseries.frequencies.to_offset(freq)
-        label = str(freq)
+        return pd.tseries.frequencies.to_offset(freq), str(freq), False
+
+    deltas = series.index.to_series().diff().dropna()
+    pos_deltas = deltas[deltas > pd.Timedelta(0)]
+    step = pos_deltas.median() if not pos_deltas.empty else (deltas.median() if not deltas.empty else pd.Timedelta(days=30))
+
+    if _weekday_daily(series, step):
+        return pd.tseries.frequencies.to_offset("B"), "B", False
+
+    if pos_deltas.empty:
+        days = 30.0
+        irregular = False
     else:
-        deltas = series.index.to_series().diff().dropna()
-        step = deltas.median() if not deltas.empty else pd.Timedelta(days=30)
-        if _weekday_daily(series, step):
-            step = pd.tseries.frequencies.to_offset("B")
-            label = "B"
-        else:
-            label = "median_step"
+        days = float(step.total_seconds() / 86400.0)
+        max_delta = pos_deltas.max()
+        min_delta = pos_deltas.min()
+        irregular = bool((max_delta > 1.5 * step) or (min_delta < 0.5 * step))
+
+    last_date = series.index[-1]
+    if 27 <= days <= 32:
+        if last_date.day == 1:
+            return pd.tseries.frequencies.to_offset("MS"), "MS", irregular
+        if last_date.day >= 28:
+            return pd.tseries.frequencies.to_offset("ME"), "ME", irregular
+        return pd.DateOffset(months=1), "month", irregular
+
+    if 85 <= days <= 95:
+        if last_date.month in {3, 6, 9, 12} and last_date.day >= 28:
+            return pd.tseries.frequencies.to_offset("QE"), "QE", irregular
+        if last_date.month in {1, 4, 7, 10} and last_date.day == 1:
+            return pd.tseries.frequencies.to_offset("QS"), "QS", irregular
+        return pd.DateOffset(months=3), "quarter", irregular
+
+    if 360 <= days <= 370:
+        if last_date.month == 12 and last_date.day >= 28:
+            return pd.tseries.frequencies.to_offset("YE"), "YE", irregular
+        if last_date.month == 1 and last_date.day == 1:
+            return pd.tseries.frequencies.to_offset("YS"), "YS", irregular
+        return pd.DateOffset(years=1), "year", irregular
+
+    return step, "median_step", irregular
+
+
+def _future_index(series: Any, periods: int) -> tuple[Any, str]:
+    """Dates after the last observation, and the frequency label used."""
+    import pandas as pd
+
+    step, label, _irregular = _spacing(series)
+    last_date = series.index[-1]
     future = pd.date_range(start=last_date + step, periods=periods, freq=step)
     return future, label
+
+
+def _irregular_date_flag(series: Any) -> str | None:
+    _, _, irregular = _spacing(series)
+    if irregular:
+        return "Dates are irregular, so the forecast assumes equal spacing between observations."
+    return None
+
+
+def _resolve_period(series: Any, period: Any, helper: str) -> tuple[int | None, dict[str, Any] | None]:
+    try:
+        coerced_period = coerce_optional_int(period, name="period")
+    except ValueError as exc:
+        return None, _error_result("INVALID_PARAM", str(exc), helper=helper)
+
+    season = coerced_period if coerced_period is not None else _infer_seasonal_periods(series, None)
+    if season is None or season < 2:
+        return None, _error_result(
+            "INSUFFICIENT_DATA",
+            f"{helper} needs an explicit period, or a date frequency with at least two full seasonal cycles",
+            helper=helper,
+        )
+    if len(series) < season * _MIN_DECOMPOSE_CYCLES:
+        return None, _error_result(
+            "INSUFFICIENT_DATA",
+            f"Need at least {season * _MIN_DECOMPOSE_CYCLES} observations for period={season}; got {len(series)}",
+            helper=helper,
+        )
+    return season, None
 
 
 def _forecast_moving_average(series: Any, *, periods: int) -> tuple[Any, str, dict[str, Any]]:
@@ -312,8 +391,12 @@ def _forecast_holt_winters(series: Any, *, periods: int, seasonal_periods: int) 
     import pandas as pd
     from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
+    # Positional endog: a gapped DatetimeIndex has no frequency, statsmodels
+    # raises No supported index is available, and auto used to substitute a flat
+    # moving average. Dates come from _future_index.
+    endog = pd.Series(series.to_numpy(), index=pd.RangeIndex(len(series)))
     model = ExponentialSmoothing(
-        series,
+        endog,
         trend="add",
         seasonal="add",
         seasonal_periods=seasonal_periods,
@@ -364,7 +447,11 @@ def _forecast_arima(series: Any, *, periods: int) -> tuple[Any, str, dict[str, A
     import pandas as pd
     from statsmodels.tsa.arima.model import ARIMA
 
-    model = ARIMA(series, order=(1, 1, 1))
+    # Positional endog: a gapped DatetimeIndex has no frequency, statsmodels
+    # raises No supported index is available, and auto used to substitute a flat
+    # moving average. Dates come from _future_index.
+    endog = pd.Series(series.to_numpy(), index=pd.RangeIndex(len(series)))
+    model = ARIMA(endog, order=(1, 1, 1))
     fit = model.fit()
     pred = fit.get_forecast(steps=periods)
     forecast_vals = pred.predicted_mean
@@ -405,6 +492,16 @@ def forecast_time_series(
 ) -> dict[str, Any]:
     """Forward predictions on a date-indexed series."""
     helper = "forecast_time_series"
+    try:
+        periods_val = coerce_int(periods, name="periods")
+    except ValueError as exc:
+        return _error_result("INVALID_PARAM", str(exc), helper=helper)
+
+    try:
+        seasonal_periods_val = coerce_optional_int(seasonal_periods, name="seasonal_periods")
+    except ValueError as exc:
+        return _error_result("INVALID_PARAM", str(exc), helper=helper)
+
     coerced, series, err = _prepare_time_series(
         data,
         date_col=date_col,
@@ -419,58 +516,116 @@ def forecast_time_series(
     if series is None:
         return _error_result("INSUFFICIENT_DATA", "No valid time series", helper=helper)
 
-    # A huge horizon used to be passed straight to statsmodels. Same idea as
-    # monte_carlo capping sims at 1_000_000.
-    periods = max(1, min(int(periods), 10_000))
-    model_name = str(model or "auto").strip().lower()
+    capped = periods_val > 10_000
+    periods_clamped = max(1, min(periods_val, 10_000))
     flags: list[str] = _duplicate_date_flags(coerced)
+    if capped:
+        flags.append("periods capped at 10000")
+
+    model_name = str(model or "auto").strip().lower()
+    if model_name not in ("auto", "holt_winters", "arima", "moving_average"):
+        return _error_result(
+            "INVALID_PARAM",
+            f"Unknown model {model_name!r}; must be one of auto, holt_winters, arima, moving_average",
+            helper=helper,
+        )
+
+    if seasonal_periods_val is not None and seasonal_periods_val <= 1:
+        return _error_result(
+            "INVALID_PARAM",
+            "seasonal_periods must be an integer greater than 1",
+            helper=helper,
+        )
 
     if model_name == "moving_average":
-        forecast_df, used_model, metrics = _forecast_moving_average(series, periods=periods)
-    else:
-        if _require_statsmodels(helper) is None and model_name != "moving_average":
-            if model_name == "auto":
-                forecast_df, used_model, metrics = _forecast_moving_average(series, periods=periods)
-                flags.append("statsmodels missing; used moving_average fallback")
-            else:
-                return _missing_package_error(helper, "statsmodels")
+        forecast_df, used_model, metrics = _forecast_moving_average(series, periods=periods_clamped)
+        flags.append("moving_average has no prediction interval")
+    elif _require_statsmodels(helper) is None:
+        if model_name == "auto":
+            forecast_df, used_model, metrics = _forecast_moving_average(series, periods=periods_clamped)
+            flags.append("statsmodels missing; used moving_average fallback")
+            flags.append("moving_average has no prediction interval")
         else:
-            explicit_season = seasonal_periods is not None and int(seasonal_periods) > 1
-            season = _infer_seasonal_periods(series, seasonal_periods)
-            if season is None and model_name == "auto" and not explicit_season:
+            return _missing_package_error(helper, "statsmodels")
+    elif model_name == "holt_winters":
+        season = _infer_seasonal_periods(series, seasonal_periods_val)
+        if season is None:
+            return _error_result(
+                "INSUFFICIENT_DATA",
+                "holt_winters requires seasonal_periods or enough data to infer seasonality",
+                helper=helper,
+            )
+        need = season * 2
+        if len(series) < need:
+            return _error_result(
+                "INSUFFICIENT_DATA",
+                f"Need at least {need} observations for period={season}; got {len(series)}",
+                helper=helper,
+            )
+        try:
+            forecast_df, used_model, metrics, hw_flags = _forecast_holt_winters(
+                series, periods=periods_clamped, seasonal_periods=season
+            )
+            flags.extend(hw_flags)
+        except Exception as exc:
+            return _error_result("FORECAST_FAILED", str(exc), helper=helper)
+    elif model_name == "arima":
+        try:
+            forecast_df, used_model, metrics, arima_flags = _forecast_arima(series, periods=periods_clamped)
+            flags.extend(arima_flags)
+        except Exception as exc:
+            return _error_result("FORECAST_FAILED", str(exc), helper=helper)
+    else:
+        # model_name == "auto"
+        season = _infer_seasonal_periods(series, seasonal_periods_val)
+        has_enough = season is not None and len(series) >= season * 2
+        if has_enough:
+            assert season is not None
+            try:
+                forecast_df, used_model, metrics, hw_flags = _forecast_holt_winters(
+                    series, periods=periods_clamped, seasonal_periods=season
+                )
+                flags.extend(hw_flags)
+            except Exception as exc:
+                try:
+                    forecast_df, used_model, metrics, arima_flags = _forecast_arima(
+                        series, periods=periods_clamped
+                    )
+                    flags.extend(arima_flags)
+                    flags.append(f"primary model failed ({exc}); used arima")
+                except Exception:
+                    forecast_df, used_model, metrics = _forecast_moving_average(
+                        series, periods=periods_clamped
+                    )
+                    flags.append(f"statsmodels forecast failed ({exc}); used moving_average")
+                    flags.append("moving_average has no prediction interval")
+        else:
+            if seasonal_periods_val is not None:
+                need = seasonal_periods_val * 2
+                flags.append(
+                    f"seasonal_periods={seasonal_periods_val} needs at least {need} observations; got {len(series)}; used trend-only"
+                )
+            else:
                 flags.append(_seasonality_skip_reason(series))
             try:
-                if model_name in ("auto", "holt_winters") and season is not None and len(series) >= season * _MIN_DECOMPOSE_CYCLES:
-                    forecast_df, used_model, metrics, hw_flags = _forecast_holt_winters(series, periods=periods, seasonal_periods=season)
-                    flags.extend(hw_flags)
-                elif model_name in ("auto", "arima"):
-                    forecast_df, used_model, metrics, arima_flags = _forecast_arima(series, periods=periods)
-                    flags.extend(arima_flags)
-                elif model_name == "holt_winters":
-                    if season is None:
-                        return _error_result(
-                            "INSUFFICIENT_DATA",
-                            "holt_winters requires seasonal_periods or enough data to infer seasonality",
-                            helper=helper,
-                        )
-                    forecast_df, used_model, metrics, hw_flags = _forecast_holt_winters(series, periods=periods, seasonal_periods=season)
-                    flags.extend(hw_flags)
-                else:
-                    return _error_result("FORECAST_FAILED", f"Unknown model {model_name!r}", helper=helper)
+                forecast_df, used_model, metrics, arima_flags = _forecast_arima(
+                    series, periods=periods_clamped
+                )
+                flags.extend(arima_flags)
             except Exception as exc:
-                if model_name == "auto":
-                    try:
-                        forecast_df, used_model, metrics, arima_flags = _forecast_arima(series, periods=periods)
-                        flags.extend(arima_flags)
-                        flags.append(f"primary model failed ({exc}); used arima")
-                    except Exception:
-                        forecast_df, used_model, metrics = _forecast_moving_average(series, periods=periods)
-                        flags.append(f"statsmodels forecast failed ({exc}); used moving_average")
-                else:
-                    return _error_result("FORECAST_FAILED", str(exc), helper=helper)
+                forecast_df, used_model, metrics = _forecast_moving_average(
+                    series, periods=periods_clamped
+                )
+                flags.append(f"statsmodels forecast failed ({exc}); used moving_average")
+                flags.append("moving_average has no prediction interval")
 
     metrics.setdefault("model", used_model)
-    table = _table_from_df(forecast_df, name="forecast")
+    irreg = _irregular_date_flag(series)
+    if irreg:
+        flags.append(irreg)
+    flags.extend(_dropped_row_flags(coerced))
+
+    table = _table_from_df(forecast_df, name="forecast", max_rows=periods_clamped)
     return _ok_result(helper, metrics=metrics, tables=[table], flags=flags, metadata=coerced.metadata if coerced else {})
 
 
@@ -492,6 +647,10 @@ def decompose_time_series(
     if _require_statsmodels(helper) is None:
         return _missing_package_error(helper, "statsmodels")
 
+    decomp_model = str(model or "additive").strip().lower()
+    if decomp_model not in ("additive", "multiplicative"):
+        return _error_result("INVALID_PARAM", f"model must be additive or multiplicative, got {decomp_model!r}", helper=helper)
+
     coerced, series, err = _prepare_time_series(
         data,
         date_col=date_col,
@@ -506,23 +665,10 @@ def decompose_time_series(
     if series is None:
         return _error_result("INSUFFICIENT_DATA", "No valid time series", helper=helper)
 
-    decomp_model = str(model or "additive").strip().lower()
-    if decomp_model not in ("additive", "multiplicative"):
-        return _error_result("FORECAST_FAILED", f"model must be additive or multiplicative, got {decomp_model!r}", helper=helper)
-
-    season = period if period is not None else _infer_seasonal_periods(series, None)
-    if season is None or season < 2:
-        return _error_result(
-            "INSUFFICIENT_DATA",
-            "decompose_time_series needs an explicit period, or a date frequency with at least two full seasonal cycles",
-            helper=helper,
-        )
-    if len(series) < season * _MIN_DECOMPOSE_CYCLES:
-        return _error_result(
-            "INSUFFICIENT_DATA",
-            f"Need at least {season * _MIN_DECOMPOSE_CYCLES} observations for period={season}; got {len(series)}",
-            helper=helper,
-        )
+    season, period_err = _resolve_period(series, period, helper)
+    if period_err is not None:
+        return period_err
+    assert season is not None
 
     try:
         from statsmodels.tsa.seasonal import seasonal_decompose
@@ -546,11 +692,12 @@ def decompose_time_series(
         "period": season,
         "n_obs": int(len(series)),
     }
+    flags = _duplicate_date_flags(coerced) + _dropped_row_flags(coerced)
     return _ok_result(
         helper,
         metrics=metrics,
         tables=[table],
-        flags=_duplicate_date_flags(coerced),
+        flags=flags,
         metadata=coerced.metadata if coerced else {},
     )
 
@@ -592,7 +739,17 @@ def anomaly_detection_time_series(
 
     method_name = str(method or "stl_residual").strip().lower()
     if method_name != "stl_residual":
-        return _error_result("FORECAST_FAILED", f"Unknown method {method_name!r}; only stl_residual is supported", helper=helper)
+        return _error_result("INVALID_PARAM", f"Unknown method {method_name!r}; only stl_residual is supported", helper=helper)
+
+    try:
+        threshold_val = coerce_float(threshold, name="threshold")
+    except ValueError as exc:
+        return _error_result("INVALID_PARAM", str(exc), helper=helper)
+
+    try:
+        include_all_val = coerce_bool(include_all, name="include_all", default=False)
+    except ValueError as exc:
+        return _error_result("INVALID_PARAM", str(exc), helper=helper)
 
     coerced, series, err = _prepare_time_series(
         data,
@@ -608,19 +765,10 @@ def anomaly_detection_time_series(
     if series is None:
         return _error_result("INSUFFICIENT_DATA", "No valid time series", helper=helper)
 
-    season = period if period is not None else _infer_seasonal_periods(series, None)
-    if season is None or season < 2:
-        return _error_result(
-            "INSUFFICIENT_DATA",
-            "anomaly_detection_time_series needs an explicit period, or a date frequency with at least two full seasonal cycles",
-            helper=helper,
-        )
-    if len(series) < season * _MIN_DECOMPOSE_CYCLES:
-        return _error_result(
-            "INSUFFICIENT_DATA",
-            f"Need at least {season * _MIN_DECOMPOSE_CYCLES} observations for period={season}; got {len(series)}",
-            helper=helper,
-        )
+    season, period_err = _resolve_period(series, period, helper)
+    if period_err is not None:
+        return period_err
+    assert season is not None
 
     try:
         from statsmodels.tsa.seasonal import STL
@@ -632,7 +780,6 @@ def anomaly_detection_time_series(
     expected = stl_result.trend + stl_result.seasonal
     resid = stl_result.resid
     scores = _robust_z_scores(resid.values)
-    threshold_val = float(threshold)
 
     scores_df = pd.DataFrame(
         {
@@ -644,9 +791,19 @@ def anomaly_detection_time_series(
         }
     )
     anomalies_df = scores_df[scores_df["score"].abs() > threshold_val].copy()
-    tables = [_table_from_df(anomalies_df, name="anomalies")]
-    if include_all:
-        tables.append(_table_from_df(scores_df, name="all_scores"))
+
+    flags = _duplicate_date_flags(coerced) + _dropped_row_flags(coerced)
+
+    anomalies_table = _table_from_df(anomalies_df, name="anomalies", max_rows=DATA_TABLE_ROWS)
+    if anomalies_table["truncated"]:
+        flags.append(f"anomalies table shows the first {DATA_TABLE_ROWS} of {len(anomalies_df)} rows")
+    tables = [anomalies_table]
+
+    if include_all_val:
+        scores_table = _table_from_df(scores_df, name="all_scores", max_rows=DATA_TABLE_ROWS)
+        if scores_table["truncated"]:
+            flags.append(f"all_scores table shows the first {DATA_TABLE_ROWS} of {len(scores_df)} rows")
+        tables.append(scores_table)
 
     metrics = {
         "n_anomalies": int(len(anomalies_df)),
@@ -659,7 +816,7 @@ def anomaly_detection_time_series(
         helper,
         metrics=metrics,
         tables=tables,
-        flags=_duplicate_date_flags(coerced),
+        flags=flags,
         metadata=coerced.metadata if coerced else {},
     )
 
@@ -671,31 +828,31 @@ def _dispatch_helper(name: str, data: Any, params: dict[str, Any], *, headers: b
     if name == "forecast_time_series":
         return forecast_time_series(
             data,
-            periods=int(params.get("periods", 12)),
-            model=str(params.get("model", "auto")),
-            date_col=str(params.get("date_col", "Date")),
-            value_col=str(params.get("value_col", "Value")),
+            periods=params.get("periods", 12),
+            model=params.get("model", "auto"),
+            date_col=params.get("date_col", "Date"),
+            value_col=params.get("value_col", "Value"),
             seasonal_periods=params.get("seasonal_periods"),
             **common,
         )
     if name == "decompose_time_series":
         return decompose_time_series(
             data,
-            date_col=str(params.get("date_col", "Date")),
-            value_col=str(params.get("value_col", "Value")),
-            model=str(params.get("model", "additive")),
+            date_col=params.get("date_col", "Date"),
+            value_col=params.get("value_col", "Value"),
+            model=params.get("model", "additive"),
             period=params.get("period"),
             **common,
         )
     if name == "anomaly_detection_time_series":
         return anomaly_detection_time_series(
             data,
-            date_col=str(params.get("date_col", "Date")),
-            value_col=str(params.get("value_col", "Value")),
+            date_col=params.get("date_col", "Date"),
+            value_col=params.get("value_col", "Value"),
             period=params.get("period"),
-            method=str(params.get("method", "stl_residual")),
-            threshold=float(params.get("threshold", 3.0)),
-            include_all=bool(params.get("include_all", False)),
+            method=params.get("method", "stl_residual"),
+            threshold=params.get("threshold", 3.0),
+            include_all=params.get("include_all", False),
             **common,
         )
     return _error_result("UNKNOWN_HELPER", f"Forecast helper {name!r} not found", helper=name)

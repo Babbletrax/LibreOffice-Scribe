@@ -1540,7 +1540,7 @@ def test_anthropic_does_not_merge_tool_result_into_user_text(client):
 
 
 def test_anthropic_stream_tool_use_accumulates(client):
-    from plugin.framework.async_stream import accumulate_delta
+    from plugin.framework.stream_delta import accumulate_delta
 
     events = [
         {"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "t1", "name": "do_work", "input": {}}},
@@ -3123,29 +3123,29 @@ def test_peek_ollama_num_ctx_reads_show_cache_without_http():
 def test_request_json_200_clears_stuck_host_gap(client):
     from plugin.framework.client.request_controls import _host_gap_sec, remember_host_gap
 
-    remember_host_gap("api.openai.com", 12.0)
+    remember_host_gap("api.openai.com:443", 12.0)
     response = MagicMock()
     response.status = 200
     response.read.return_value = b'{"ok": true}'
     body = json.dumps({"model": "gpt-4o"}).encode()
     with patch.object(client, "_send_request", return_value=response), patch.object(client, "_close_if_connection_close"):
         assert client._request_json("POST", "/v1/images/generations", body, {}) == {"ok": True}
-    assert "api.openai.com" not in _host_gap_sec
+    assert "api.openai.com:443" not in _host_gap_sec
 
 
 def test_request_json_200_resets_free_gap_to_floor(client):
     from plugin.framework.client.request_controls import OPENROUTER_FREE_MIN_GAP_SEC, _host_gap_sec, remember_host_gap
 
     client.config["endpoint"] = "https://openrouter.ai/api/v1"
-    remember_host_gap("openrouter.ai:free", 12.0)
+    remember_host_gap("openrouter.ai:443:free", 12.0)
     response = MagicMock()
     response.status = 200
     response.read.return_value = b'{"text": "ok"}'
     body = json.dumps({"model": "deepseek/deepseek-r1:free"}).encode()
     with patch.object(client, "_send_request", return_value=response), patch.object(client, "_close_if_connection_close"):
         client._request_json("POST", "/v1/audio/transcriptions", body, {})
-    assert _host_gap_sec.get("openrouter.ai:free") == OPENROUTER_FREE_MIN_GAP_SEC
-    assert "openrouter.ai" not in _host_gap_sec
+    assert _host_gap_sec.get("openrouter.ai:443:free") == OPENROUTER_FREE_MIN_GAP_SEC
+    assert "openrouter.ai:443" not in _host_gap_sec
 
 
 def test_overload_detection_prefers_code_and_word_boundary():

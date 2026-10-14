@@ -159,12 +159,13 @@ def probe_webview_import(exe: str) -> tuple[bool, str]:
         _PROBE_FAILURE_CACHE[exe] = (time.monotonic() + _PROBE_FAILURE_TTL_SEC, result)
         return result
 
+    env = build_editor_child_env()
     try:
         r = subprocess.run(
-            wrap_command_for_sandbox([exe, "-c", _WEBVIEW_PROBE_CODE]),
+            wrap_command_for_sandbox([exe, "-c", _WEBVIEW_PROBE_CODE], env=env),
             capture_output=True,
             timeout=30,
-            env=build_editor_child_env(),
+            env=env,
             text=True,
             **get_subprocess_creationflags(),
         )
@@ -205,7 +206,10 @@ def spawn_editor_process(exe: str, *, assets_dir: str | None = None) -> subproce
         # call setsid() in the child. The process group is unchanged, so
         # terminate() still kills Qt grandchildren via killpg.
         popen_kw["start_new_session"] = True
-    return cast("subprocess.Popen[bytes]", subprocess.Popen(wrap_command_for_sandbox([exe, _EDITOR_MAIN]), **popen_kw))
+    return cast(
+        "subprocess.Popen[bytes]",
+        subprocess.Popen(wrap_command_for_sandbox([exe, _EDITOR_MAIN], env=env), **popen_kw),
+    )
 
 
 # --- Pipe bridge ---

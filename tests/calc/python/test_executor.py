@@ -114,14 +114,13 @@ MyObj()
 def test_native_helpers():
     # This requires more complex mocking since bridge/manipulator are used
     executor = PythonExecutor()
-    bridge = MagicMock()
     manipulator = MagicMock()
     inspector = MagicMock()
     
     manipulator.safe_get_cell_value.return_value = "HELLO"
     inspector.read_range.side_effect = lambda addr: [[{"value": "HELLO"}]] if addr == "A1" else [[{"value": 1}, {"value": 2}]]
     
-    executor.inject_helpers(bridge, manipulator, inspector)
+    executor.inject_helpers(manipulator, inspector)
     
     # Test reading cell
     assert executor.execute_with_return("lp('A1')") == "HELLO"
@@ -175,12 +174,11 @@ def test_lp_helper_reraises_execution_timeout():
     from plugin.contrib.smolagents.local_python_executor import ExecutionTimeoutError
 
     executor = PythonExecutor()
-    bridge = MagicMock()
     manipulator = MagicMock()
     inspector = MagicMock()
     manipulator.safe_get_cell_value.side_effect = ExecutionTimeoutError("budget")
     inspector.read_range.side_effect = ExecutionTimeoutError("budget")
-    executor.inject_helpers(bridge, manipulator, inspector)
+    executor.inject_helpers(manipulator, inspector)
     lp = executor.executor.state["lp"]
     with pytest.raises(ExecutionTimeoutError):
         lp("A1")
@@ -192,11 +190,10 @@ def test_lp_helper_raises_on_cell_read_errors():
     from plugin.framework.errors import WriterAgentException
 
     executor = PythonExecutor()
-    bridge = MagicMock()
     manipulator = MagicMock()
     inspector = MagicMock()
     inspector.read_range.side_effect = RuntimeError("missing sheet")
-    executor.inject_helpers(bridge, manipulator, inspector)
+    executor.inject_helpers(manipulator, inspector)
     with pytest.raises(WriterAgentException) as excinfo:
         executor.executor.state["lp"]("A1")
     assert "A1" in str(excinfo.value)
@@ -205,11 +202,10 @@ def test_lp_helper_raises_on_cell_read_errors():
 
 def test_lp_helper_sheet_prefix_invokes_read_range():
     executor = PythonExecutor()
-    bridge = MagicMock()
     manipulator = MagicMock()
     inspector = MagicMock()
     inspector.read_range.return_value = [[{"value": 42}]]
-    executor.inject_helpers(bridge, manipulator, inspector)
+    executor.inject_helpers(manipulator, inspector)
 
     val = executor.executor.state["lp"]("Sheet2.A1")
     assert val == 42
@@ -296,6 +292,7 @@ def test_data_range_read_failure_returns_error_result():
 
         res = tool.execute(ctx, code="data[0]", data_range="INVALID_RANGE")
         assert res["status"] == "error"
+        assert res["code"] == "CALC_READ_ERROR"
         assert "INVALID_RANGE" in res["message"]
         assert "Bad range syntax" in res["message"]
         mock_exec.assert_not_called()
@@ -369,4 +366,99 @@ def test_interpreter_error_logs_warning_without_source(caplog: pytest.LogCapture
     assert "SUPER_SECRET_KEY" not in caplog.text
     assert any(r.levelno == logging.WARNING for r in caplog.records)
     assert any("snippet length" in r.message for r in caplog.records)
+
+
+def test_builtins_and_print_stdout() -> None:
+    executor = PythonExecutor()
+    assert executor.execute_with_return("len([1, 2, 3])") == 3
+    assert executor.execute_with_return("sum([1, 2])") == 3
+    assert executor.execute_with_return("sorted([3, 1])") == [1, 3]
+    assert executor.execute_with_return("print('hi')\n5") == 5
+    assert executor.last_stdout() == "hi\n"
+
+
+def test_execute_python_script_returns_stdout() -> None:
+    tool = ExecutePythonScript()
+    ctx = MagicMock()
+    ctx.doc.getURL.return_value = "file:///test.ods"
+    ctx.doc.supportsService.return_value = True
+
+    res = tool.execute(ctx, code="print(1)\n2")
+    assert res["status"] == "ok"
+    assert res["result"] == 2
+    assert res["stdout"] == "1\n"
+
+
+def test_normalize_value_refuses_colliding_keys() -> None:
+    from plugin.framework.errors import WriterAgentException
+
+    executor = PythonExecutor()
+    with pytest.raises(ValueError) as excinfo:
+        executor.format_result({1: "a", "1": "b"})
+    assert "collide" in str(excinfo.value)
+
+    with pytest.raises(WriterAgentException) as exc_info:
+        executor.execute_with_return('{1: "a", "1": "b"}')
+    assert exc_info.value.code == "PYTHON_EXECUTION_ERROR"
+    assert "collide" in str(exc_info.value)
+
+    assert executor.format_result({1: "a", 2: "b"}) == {"1": "a", "2": "b"}
+
+
+def test_lp_helper_reraises_disposed_and_writeragent() -> None:
+    class DummyDisposedException(Exception):
+        pass
+
+    executor = PythonExecutor()
+    manipulator = MagicMock()
+    inspector = MagicMock()
+    inspector.read_range.side_effect = DummyDisposedException("document was closed")
+    executor.inject_helpers(manipulator, inspector)
+
+    with pytest.raises(DummyDisposedException):
+        executor.executor.state["lp"]("A1")
+
+    from plugin.framework.errors import WriterAgentException
+
+    inspector.read_range.side_effect = WriterAgentException("custom failure", code="UNSUPPORTED_OPERATION")
+    with pytest.raises(WriterAgentException) as excinfo:
+        executor.executor.state["lp"]("A1")
+    assert excinfo.value.code == "UNSUPPORTED_OPERATION"
+
+
+def test_target_range_write_failure_is_tool_error() -> None:
+    tool = ExecutePythonScript()
+    ctx = MagicMock()
+    ctx.doc.getURL.return_value = "file:///test.ods"
+    ctx.doc.supportsService.return_value = True
+
+    with unittest.mock.patch("plugin.calc.python.executor.CellManipulator") as MockManip:
+        inst = MockManip.return_value
+        inst.write_formula_range.side_effect = RuntimeError("disk full")
+
+        res = tool.execute(ctx, code="print('logging')\n42", target_range="D1")
+        assert res["status"] == "error"
+        assert res["code"] == "CALC_WRITE_ERROR"
+        assert "disk full" in res["message"]
+        assert "D1" in res["message"]
+        assert res["details"]["result"] == 42
+        assert isinstance(res["details"]["stdout"], str)
+        assert "logging" in res["details"]["stdout"]
+
+
+def test_data_range_disposal_propagates() -> None:
+    class DummyDisposedException(Exception):
+        pass
+
+    tool = ExecutePythonScript()
+    ctx = MagicMock()
+    ctx.doc.getURL.return_value = "file:///test.ods"
+    ctx.doc.supportsService.return_value = True
+
+    with unittest.mock.patch("plugin.calc.python.executor.CellInspector") as MockInspector:
+        inst = MockInspector.return_value
+        inst.read_range.side_effect = DummyDisposedException("disposed doc")
+
+        with pytest.raises(DummyDisposedException):
+            tool.execute(ctx, code="data[0]", data_range="A1:A2")
 

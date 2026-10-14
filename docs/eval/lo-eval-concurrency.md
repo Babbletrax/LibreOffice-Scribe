@@ -41,7 +41,7 @@ model / string threads                eval-lo-lane-N (pool)                _lo_t
 | `set_fallback_ctx(_lo_ctx)` | `LOBackend.start` → `plugin/framework/uno_context.py` | `get_ctx()` is the remote office context, not local pyuno. `stop` restores the previous fallback. Same API as `main_core` / `testing_runner`. |
 | `set_designated_main_thread(_lo_thread)` | `LOBackend.start` → `plugin/framework/thread_guard.py` | One designated UNO thread for the process. `on_main_thread()` is that thread, not `threading.main_thread()`. |
 | `bypass_thread_guard=True` | `tools_lo` → `ToolRegistry.execute` | Eval tools call `tool.execute` on `_lo_thread` directly. They do not go through `execute_on_main_thread`. That path needs a VCL `AsyncCallback` pump; this harness has none, and blocking on it deadlocks (same family as #402). |
-| `WRITERAGENT_EVAL_HARNESS=1` | `LOBackend.start` | Skips menu-icon preload and core menu registration in `plugin/main.py` `bootstrap`. Those call `get_desktop()` in this process and can segfault soffice. |
+| `WRITERAGENT_EVAL_HARNESS=1` | `LOBackend.start` | Skips menu-icon preload, core menu registration, and the desktop terminate listener in `plugin/main.py` `bootstrap`. Those call `get_desktop()` in this process and can segfault soffice. The listener is skipped so the eval client does not register an `XTerminateListener` that runs subprocess shutdown on remote office teardown. |
 | `WRITERAGENT_TESTING` must stay unset | `QueueExecutor._should_run_inline` | `WRITERAGENT_TESTING=1` runs marshalled work on the **caller** thread. That is the wrong thread for this harness. |
 
 `run_dual_lane` submits every LO job to the pool **before** string jobs start. String jobs use a pool of width `-j` on `run_eval.py` (default 1). A string job never waits on the LO queue. The unit contract is in `tests/scripts/test_eval_scheduler.py`: with `workers=2`, two LO sleeps overlap; with `workers=1`, they stay serial; the string sleep overlaps LO and does not wait on the LO queue. That test does not start soffice.
@@ -100,7 +100,7 @@ Feasible in one process. This is the layout to try.
 The agent loop that should run on each pool thread is the one that already exists in `run_llm_chat_eval`:
 
 1. `prepare_example` — one short UNO section, creates **this thread’s** doc.
-2. Many `request_with_tools` — overlap across the pool. Each `run_llm_chat_eval` builds its own `LlmClient`. `LlmHttpTransport` is one keep-alive connection per client and is not safe for two threads to share; per-example clients are the right shape (`http_transport` module docstring). Paid OpenRouter traffic is not spaced by the process-wide host gap; that gap applies after a retry, and the 3s floor is only for `:free` / `openrouter/free`.
+2. Many `request_with_tools` — overlap across the pool. Each `run_llm_chat_eval` builds its own `LlmClient`. `LlmHttpTransport` is one keep-alive connection per client and is not safe for two threads to share; per-example clients are the right shape (`http_transport` module docstring). Paid OpenRouter traffic is not spaced by the process-wide host gap; that gap applies after a retry, the 3s floor is only for OpenRouter `:free` / `openrouter/free`, and the gap key includes the port.
 3. Tool calls — short (or, for the flag, script-long) sections on `_lo_thread`.
 4. Export — short UNO section. Judge HTTP can stay on the agent thread afterward and overlap too.
 

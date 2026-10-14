@@ -73,18 +73,23 @@ _deal_sandbox_code_ok = (
 )
 
 # Statement/expression forms the interpreter refuses outright (see evaluate_ast else branch).
-# ast.Match is standard in Python 3.10+ (required by dataclass slots=True below).
-_FORBIDDEN_NODE_TYPES: tuple[type[ast.AST], ...] = (
+# LO 24.8 ships Python 3.9 as the extension floor; dataclass slots=True raises TypeError
+# and ast.Match is not defined on 3.9 (where match is not a keyword and ast.parse rejects it).
+_FORBIDDEN_TYPES_LIST: list[type[ast.AST]] = [
     ast.AsyncFunctionDef,
     ast.AsyncFor,
     ast.AsyncWith,
     ast.Global,
     ast.Nonlocal,
     ast.NamedExpr,
-    ast.Match,
-)
+]
+_match_type = getattr(ast, "Match", None)
+if _match_type is not None:
+    _FORBIDDEN_TYPES_LIST.append(_match_type)
+_FORBIDDEN_NODE_TYPES: tuple[type[ast.AST], ...] = tuple(_FORBIDDEN_TYPES_LIST)
 
 _DEFAULT_MAX_ENTRIES = 256
+_MAX_CACHED_SOURCE_CHARS = 65536
 
 
 @deal.post(lambda result: result is None or isinstance(result, str))
@@ -117,7 +122,7 @@ def validate_sandbox_ast(module: ast.Module, authorized_imports: Sequence[str]) 
     return None
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class HotEntry:
     """Cached parse + static validation for one code + import-policy key."""
 
@@ -160,18 +165,27 @@ def _format_syntax_error(exc: SyntaxError) -> str:
 
 @deal.pre(lambda code, authorized_imports: _deal_sandbox_code_ok(code) and _deal_sandbox_imports_ok(authorized_imports))
 def _build_entry(code: str, authorized_imports: Sequence[str]) -> HotEntry:
+    # A long 1+1+... chain makes ast.parse or validate_sandbox_ast raise
+    # RecursionError (an Exception). execute_with_return logged it with
+    # log.exception as an internal fault. It is bad user source, so return
+    # a HotEntry error and do not log.
     try:
-        module = ast.parse(code)
-    except SyntaxError as exc:
-        return HotEntry(module=None, error=_format_syntax_error(exc))
-    validation_error = validate_sandbox_ast(module, authorized_imports)
-    return HotEntry(module=module, error=validation_error)
+        try:
+            module = ast.parse(code)
+        except SyntaxError as exc:
+            return HotEntry(module=None, error=_format_syntax_error(exc))
+        validation_error = validate_sandbox_ast(module, authorized_imports)
+        return HotEntry(module=module, error=validation_error)
+    except RecursionError:
+        return HotEntry(module=None, error="Code parsing failed: expression is too deeply nested")
 
 
 @deal.pre(lambda code, authorized_imports: _deal_sandbox_code_ok(code) and _deal_sandbox_imports_ok(authorized_imports))
 def get_hot_entry(code: str, authorized_imports: Sequence[str]) -> HotEntry:
     """Return cached or freshly built parse + static validation for *code*."""
     # crosshair: off  # threading.Lock + OrderedDict hot cache (cover-all 33418536119: sandbox_cache 20906s after PR 523). Engine-hostile; keep off.
+    if len(code) > _MAX_CACHED_SOURCE_CHARS:
+        return _build_entry(code, authorized_imports)
     key = _cache_key(code, authorized_imports)
     with _lock:
         if key in _cache:

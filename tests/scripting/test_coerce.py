@@ -87,3 +87,71 @@ def test_dedupe_column_names_in_coerce():
     assert _dedupe_column_names(["x", "x", "x"]) == ["x", "x_1", "x_2"]
     assert _dedupe_column_names(["", ""]) == ["column", "column_1"]
 
+
+def test_parse_date_column_serial_year_iso_and_mixed():
+    import pandas as pd
+    from plugin.scripting.venv.coerce import parse_date_column
+
+    # serial 45292 -> 2024-01-01
+    s_serial = parse_date_column(pd.Series([45292]))
+    assert s_serial.iloc[0] == pd.Timestamp("2024-01-01")
+
+    # serial 45292.5 -> 2024-01-01 12:00
+    s_half = parse_date_column(pd.Series([45292.5]))
+    assert s_half.iloc[0] == pd.Timestamp("2024-01-01 12:00:00")
+
+    # years 2019, 2020 -> 1 January
+    s_years = parse_date_column(pd.Series([2019, 2020]))
+    assert s_years.iloc[0] == pd.Timestamp("2019-01-01")
+    assert s_years.iloc[1] == pd.Timestamp("2020-01-01")
+
+    # ISO "2024-01-15" stays
+    s_iso = parse_date_column(pd.Series(["2024-01-15"]))
+    assert s_iso.iloc[0] == pd.Timestamp("2024-01-15")
+
+    # mixed [45292.0, "2024-06-01"] is both in 2024 and neither in 1970
+    s_mixed = parse_date_column(pd.Series([45292.0, "2024-06-01"]))
+    assert s_mixed.iloc[0] == pd.Timestamp("2024-01-01")
+    assert s_mixed.iloc[1] == pd.Timestamp("2024-06-01")
+
+    # 0 and -1 are NaT
+    s_neg = parse_date_column(pd.Series([0, -1]))
+    assert pd.isna(s_neg.iloc[0])
+    assert pd.isna(s_neg.iloc[1])
+
+
+def test_table_from_df_nan_is_none():
+    import json
+    import numpy as np
+    import pandas as pd
+    from plugin.scripting.venv.coerce import table_from_df
+
+    df = pd.DataFrame({"a": [1.0, np.nan, 3.0]})
+    table = table_from_df(df, name="test")
+    assert table["rows"] == [[1.0], [None], [3.0]]
+    # json.dumps allow_nan=False must succeed
+    dumped = json.dumps(table["rows"], allow_nan=False)
+    assert dumped == "[[1.0], [null], [3.0]]"
+
+
+def test_records_from_df_nan_is_none():
+    import json
+    import numpy as np
+    import pandas as pd
+    from plugin.scripting.venv.coerce import records_from_df
+
+    df = pd.DataFrame({"a": [1.0, np.nan, 3.0]})
+    records = records_from_df(df)
+    assert records == [{"a": 1.0}, {"a": None}, {"a": 3.0}]
+    dumped = json.dumps(records, allow_nan=False)
+    assert dumped == '[{"a": 1.0}, {"a": null}, {"a": 3.0}]'
+
+
+def test_numeric_columns_string_is_one_name():
+    import pandas as pd
+    from plugin.scripting.venv.coerce import numeric_columns
+
+    df = pd.DataFrame({"AAPL": [1.0, 2.0], "MSFT": [3.0, 4.0]})
+    cols = numeric_columns(df, "AAPL")
+    assert cols == ["AAPL"]
+

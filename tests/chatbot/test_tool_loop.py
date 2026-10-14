@@ -25,7 +25,7 @@ setattr(sys.modules['com.sun.star.awt'], 'XMouseListener', XMouseListener)
 setattr(sys.modules['com.sun.star.awt'], 'XTextListener', XTextListener)
 
 
-from plugin.framework.async_stream import StreamQueueKind  # noqa: E402
+from plugin.framework.stream_batch import StreamQueueKind  # noqa: E402
 
 # Now import the actual ToolCallingMixin class from the module
 from plugin.chatbot.tool_loop import CHAT_STREAM_BATCH_INTERVAL, ToolCallingMixin  # noqa: E402
@@ -150,7 +150,7 @@ def test_stream_done_no_tools(mock_get_config, mock_get_config_int, mock_drain_l
 def test_kickoff_uses_sm_state_round_num(mock_get_config, mock_get_config_int, mock_drain_loop):
     """First LLM worker spawn takes round_num from ToolLoopState, not a host mirror."""
     panel, _session = setup_mock_panel()
-    mock_drain_loop.side_effect = lambda *a, **k: None
+    mock_drain_loop.side_effect = lambda *a, **k: k.get("on_drain_started") and k["on_drain_started"]()
 
     panel._start_tool_calling_async(Mock(), model="mock-model", max_tokens=100, tools=[], execute_tool_fn=Mock())
 
@@ -1117,17 +1117,33 @@ def test_final_stream_keeps_spawn_scope_after_next_send():
 
     _run_captured_llm_worker(spawn)
 
-def test_toolkit_unavailable_persists_assistant_row():
+def test_toolkit_none_starts_drain_and_first_worker():
     from plugin.chatbot.tool_loop_actions import begin_send_turn
     panel, session = setup_mock_panel()
     begin_send_turn(panel, "chat")
 
-    with patch("plugin.chatbot.tool_loop.get_toolkit", return_value=None), patch("plugin.chatbot.tool_loop.get_config_int", return_value=10), patch("plugin.chatbot.tool_loop.get_config", return_value=False):
+    recorded_kwargs = {}
+    def mock_drain(*args, **kwargs):
+        recorded_kwargs.update(kwargs)
+        if len(args) > 1:
+            recorded_kwargs["toolkit"] = args[1]
+        cb = kwargs.get("on_drain_started")
+        if cb is not None:
+            cb()
+
+    with patch("plugin.chatbot.tool_loop.get_toolkit", return_value=None), \
+         patch("plugin.chatbot.tool_loop.get_config_int", return_value=10), \
+         patch("plugin.chatbot.tool_loop.get_config", return_value=False), \
+         patch("plugin.chatbot.tool_loop.run_stream_drain_loop", side_effect=mock_drain), \
+         patch.object(panel, "_spawn_llm_worker", MagicMock()) as mock_spawn:
         panel._start_tool_calling_async(Mock(), model="mock-model", max_tokens=100, tools=[], execute_tool_fn=Mock())
 
-    assert len(session.messages) >= 1
-    assert session.messages[-1]["role"] == "assistant"
-    assert "Toolkit unavailable" in session.messages[-1]["content"]
+    assert recorded_kwargs.get("toolkit") is None
+    mock_spawn.assert_called_once()
+    assert not any(
+        msg.get("role") == "assistant" and "Toolkit unavailable" in str(msg.get("content"))
+        for msg in session.messages
+    )
 
 
 def test_compaction_state_per_turn():

@@ -4,22 +4,29 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 
 """
-UNO Service implementation for WriterAgent configuration.
+UNO Service implementation for WriterAgent configuration. There is no per-instance path.
 """
 
 # crosshair: off
 from __future__ import annotations
 
-import os
 import logging
 from typing import Any, Callable, cast
 from plugin.framework.deal_shim import deal
 
 from plugin.framework.service import ServiceBase
-from plugin.framework.event_bus import global_event_bus
 from plugin.framework.errors import ConfigError
 
-from plugin.framework.config import get_config, set_config, remove_config, get_config_dict, get_current_endpoint, set_api_key_for_endpoint, parse_config_json_text, _config_store, AI_SIMPLE_FIELDS, _normalize_configured_endpoint_with_selector
+from plugin.framework.config import (
+    AI_SIMPLE_FIELDS,
+    _normalize_configured_endpoint_with_selector,
+    get_config,
+    get_config_dict,
+    get_current_endpoint,
+    remove_config,
+    set_api_key_for_endpoint,
+    set_config,
+)
 from plugin.framework.config_schema import get_manifest_modules, as_bool
 
 # get_stt_model / set_image_model / set_text_model stay inside the ai.* branches.
@@ -112,13 +119,11 @@ class ConfigService(ServiceBase):
     _defaults: dict[str, Any]
     _manifest: dict[str, Any]
     _events: Any
-    _config_path: str | None
 
     def __init__(self) -> None:
         self._defaults = {}  # "module.key" -> default_value
         self._manifest = {}  # "module.key" -> field schema
         self._events = None  # EventBus, set after init
-        self._config_path = None  # For testing
 
     def initialize(self, ctx: Any) -> None:
         """Load module.yaml defaults and public flags once.
@@ -176,20 +181,6 @@ class ConfigService(ServiceBase):
 
                 return get_config(field)
 
-        # Test fallback
-        if self._config_path and os.path.exists(self._config_path):
-            try:
-                with open(self._config_path, "r", encoding="utf-8") as f:
-                    data = parse_config_json_text(f.read())
-                    if data is None:
-                        raise ConfigError("Config file must be a JSON object")
-                    if key in data:
-                        return data[key]
-            except OSError as e:
-                log.debug("ConfigService.get IO error for %s: %s", self._config_path, e)
-            except ConfigError as e:
-                log.debug("ConfigService.get ConfigError: %s", e)
-
         try:
             val = get_config(key)
             # Only None is missing. A stored empty string, False, and 0 are
@@ -197,7 +188,7 @@ class ConfigService(ServiceBase):
             if val is not None:
                 return val
         except ConfigError:
-            val = None
+            pass
 
         # A caller-supplied default wins over a registered None default.
         # Otherwise get("mcp.tool_exposure_mode", "delegate") returned None
@@ -247,31 +238,6 @@ class ConfigService(ServiceBase):
                     set_config(field, value, event_key=key)
                 return
 
-        # Test fallback. The store patches this file under the same lock as
-        # production set_config, so a second writer cannot drop keys the way
-        # a load-the-whole-JSON-and-write-it-back did. emit=False because
-        # this method emits the one event below (old_value is the manifest
-        # default, not the store's missing-key None).
-        if self._config_path:
-            # The production read existed to heal via GET before the write,
-            # and the test bus is now the only caller that needs the pre-write value.
-            old_value = self.get(key)
-
-            def _replace(_current: Any) -> Any:
-                return value
-
-            changed = _config_store.apply(
-                self._config_path,
-                [(key, _replace)],
-                emit=False,
-                fail_on_unrepairable=False,
-            )
-
-            if changed:
-                bus = self._events or global_event_bus
-                bus.emit("config:changed", key=key, value=value, old_value=old_value, ctx=None)
-            return
-
         # set_config emits the one config:changed for this write.
         set_config(key, value)
 
@@ -298,34 +264,10 @@ class ConfigService(ServiceBase):
                     remove_config(field, event_key=key)
                 return
 
-        if self._config_path:
-            # Same store as production remove_config. emit=False so this
-            # method emits the one event (test files have no UNO ctx).
-            old_value = self.get(key)
-            try:
-                changed = _config_store.remove(self._config_path, key, emit=False)
-            except ConfigError as e:
-                log.warning("ConfigService.remove config file error for key %s: %s", key, e)
-                return
-            if changed:
-                bus = self._events or global_event_bus
-                bus.emit("config:changed", key=key, value=None, old_value=old_value, ctx=None)
-        else:
-            remove_config(key)
+        remove_config(key)
 
     def get_dict(self) -> dict[str, Any]:
         """Return all config."""
-        # This is a simplification for now
-        if self._config_path and os.path.exists(self._config_path):
-            try:
-                with open(self._config_path, "r", encoding="utf-8") as f:
-                    data = parse_config_json_text(f.read())
-                if not isinstance(data, dict):
-                    return {}
-                return data
-            except OSError as e:
-                log.debug("ConfigService.get_dict config file read error: %s", e)
-                return {}
         return get_config_dict()
 
     @deal.raises(ConfigAccessError)

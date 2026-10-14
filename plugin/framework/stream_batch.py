@@ -21,7 +21,7 @@
 Stop reaches it through ``flush_pending`` on ``run_async_worker_with_drain``.
 
 ``StreamQueueKind`` lives here so this module does not import ``async_stream``.
-``async_stream`` re-exports the enum.
+Callers import ``StreamQueueKind`` from this module.
 """
 
 from __future__ import annotations
@@ -252,13 +252,17 @@ class BatchingStreamQueue:
     def _emit_pending_locked(self) -> None:
         """Emit each contiguous display run, in arrival order. Caller holds lock."""
         # crosshair: off
-        # One joined string per contiguous run, in the order the fragments
-        # arrived. Queuing every CHUNK before every THINKING shows the reply
-        # first when a burst started with thinking.
-        for kind, parts in self._runs:
-            self._raw.put((kind, "".join(parts)))
-        self._runs.clear()
+        # Bugfix: a later "".join used to leave earlier runs in _runs after
+        # they were already put, so the next flush duplicated them. Snapshot-first
+        # makes emit atomic wrt _runs.
+        runs = self._runs
+        self._runs = []
         self._cancel_timer()
+        for kind, parts in runs:
+            try:
+                self._raw.put((kind, "".join(parts)))
+            except Exception:
+                log.exception("BatchingStreamQueue emit run failed")
 
     def put(self, item: Any) -> None:
         """Put an item. CHUNK/THINKING are batched; everything else forces a flush first.

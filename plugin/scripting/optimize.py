@@ -14,8 +14,10 @@ from typing import Any
 from plugin.scripting._lazy_venv import install_lazy_dir, make_getattr
 from plugin.scripting.client import run_optimize as client_run_optimize
 from plugin.scripting.helper_domain import (
+    DomainFacadeConfig,
     header_prefix,
     is_status_helper_result,
+    make_template_api,
     run_trusted_calc_data_helper,
 )
 
@@ -25,6 +27,12 @@ from plugin.scripting.calc_functions_common import (
 
 OPTIMIZE_HEADER_PREFIX = header_prefix("optimize")
 
+HELPER_PARAM_HELP: dict[str, str] = {
+    "optimize_portfolio": "Long-only minimum-variance weights. Each weight is between 0 and 1 and the weights sum to 1. returns_col is a column name or a list; when omitted, every numeric column is used except date-named columns and monotonic unique integer columns such as ids. target_return, when set, is a per-period mean constraint. risk_free_rate (default 0) is used only in the reported Sharpe and does not change the weights. Return and volatility are per period, not annualized. There is no short selling and no max-Sharpe mode.",
+    "linear_programming": "c_col, a_cols (one name or a list), b_col, bounds (one [low, high] pair applied to every variable, default [0, null], or one pair per variable), maximize (bool, default false). Each row is a variable and c_col is its objective coefficient. Each name in a_cols is one <= constraint. b_col supplies one bound per constraint column; a single constraint column may repeat that same bound on every row. Only <= constraints are supported.",
+    "solve_scheduling_problem": "cost_cols is a column name or a list. When omitted, every numeric column is used except date-named columns and monotonic unique integer columns such as ids. The helper minimizes total cost. row_index is the dataframe index of the assigned row after blank rows are removed, not a sheet row number. metrics.unassigned_rows counts rows left over when there are more rows than columns. There is no maximize mode.",
+}
+
 _DEFAULT_PARAMS: dict[str, dict[str, Any]] = {
     "optimize_portfolio": {"returns_col": None, "target_return": None, "risk_free_rate": 0.0},
     "linear_programming": {"c_col": "c", "a_cols": ["a1"], "b_col": "b", "maximize": False},
@@ -32,7 +40,7 @@ _DEFAULT_PARAMS: dict[str, dict[str, Any]] = {
 }
 
 _HELPER_DESCRIPTIONS: dict[str, str] = {
-    "optimize_portfolio": "Mean-variance portfolio optimization",
+    "optimize_portfolio": "Long-only minimum-variance portfolio weights",
     "linear_programming": "Linear programming solver",
     "solve_scheduling_problem": "Assignment problem solver (e.g., workers to tasks)",
 }
@@ -51,9 +59,6 @@ install_lazy_dir(globals(), _OPTIMIZE_VENV_EXPORTS)
 
 
 # --- Templates ---
-
-from plugin.scripting.helper_domain import DomainFacadeConfig, make_template_api
-
 
 _API = make_template_api(
     DomainFacadeConfig(
