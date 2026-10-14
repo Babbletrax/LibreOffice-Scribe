@@ -92,7 +92,7 @@ def test_sync_request_retries_429_then_succeeds():
         result = sync_request("https://api.example/v1/models", timeout=1)
     assert result == {"data": []}
     remember.assert_called()
-    assert remember.call_args[0][0] == "api.example"
+    assert remember.call_args[0][0] == "api.example:443"
 
 
 def test_sync_request_connection_retry_remembers_host_gap():
@@ -114,7 +114,7 @@ def test_sync_request_connection_retry_remembers_host_gap():
         result = sync_request("https://api.example/v1/models", timeout=1)
     assert result == {"data": []}
     remember.assert_called()
-    assert remember.call_args[0][0] == "api.example"
+    assert remember.call_args[0][0] == "api.example:443"
 
 
 def test_sync_request_redacts_x_goog_api_key(caplog):

@@ -53,12 +53,15 @@ RETRY_MAX_ATTEMPTS = 3
 RETRYABLE_HTTP_STATUS = frozenset({429, 503, 529})
 
 
+def _shown_seconds(delay_sec: float) -> int | float:
+    return int(round(delay_sec)) if delay_sec >= 1 else round(max(delay_sec, 0.0), 1)
+
+
 def format_retry_wait_status(delay_sec: float) -> str:
     """Short sidebar status line for the abortable retry wait."""
     from plugin.framework.i18n import _
 
-    shown = int(round(delay_sec)) if delay_sec >= 1 else round(max(delay_sec, 0.0), 1)
-    return _("Provider busy, retrying in {0}s…").format(shown)
+    return _("Provider busy, retrying in {0}s…").format(_shown_seconds(delay_sec))
 
 
 def emit_retry_status(status_callback: Callable[[str], None] | None, delay_sec: float) -> None:
@@ -90,6 +93,33 @@ def parse_retry_after(header: str | None) -> float | None:
     if not math.isfinite(delay):
         return None
     return delay
+
+
+def parse_retry_after_ms(header: str | None) -> float | None:
+    """Parse retry-after-ms header in milliseconds as seconds. Invalid/missing/negative -> None."""
+    if not header:
+        return None
+    text = header.strip()
+    if not text:
+        return None
+    try:
+        val = float(text)
+    except (ValueError, TypeError):
+        return None
+    if not math.isfinite(val) or val < 0:
+        return None
+    return val / 1000.0
+
+
+def retry_after_exceeds_cap(retry_after_sec: float | None) -> bool:
+    """True only when retry_after_sec is not None, finite, and > RETRY_MAX_DELAY_SEC."""
+    return retry_after_sec is not None and math.isfinite(retry_after_sec) and retry_after_sec > RETRY_MAX_DELAY_SEC
+
+
+def over_cap_retry_message(provider_message: str, retry_after_sec: float) -> str:
+    from plugin.framework.i18n import _
+
+    return provider_message + " " + _("Provider asked to wait {0}s, which is above the {1}s retry cap.").format(_shown_seconds(retry_after_sec), _shown_seconds(RETRY_MAX_DELAY_SEC))
 
 
 def _apply_jitter_ms(delay_ms: float, jitter: float | Literal["full"], mode: Literal["symmetric", "positive"], rng: Callable[[], float]) -> float:
@@ -146,8 +176,8 @@ def wait_abortable(delay_sec: float, stop_checker: Callable[[], bool] | None = N
 # Process-wide spacing after a retry: keyed by host so chat, grammar, and
 # Calc =PROMPT() share one cooldown. last_sent starts unset so the first
 # request of a session is never delayed by a stale epoch of 0.
-# OpenRouter :free / openrouter/free are 20 rpm; those jobs use ``{host}:free``
-# so paid OpenRouter traffic is not slowed.
+# OpenRouter :free / openrouter/free are 20 rpm; those jobs use ``{host}:{port}:free``
+# (OpenRouter only) so paid OpenRouter traffic is not slowed.
 OPENROUTER_FREE_MIN_GAP_SEC = 3.0
 _host_gap_lock = threading.Lock()
 _host_gap_sec: dict[str, float] = {}
@@ -160,11 +190,19 @@ def is_openrouter_free_model(model: str | None) -> bool:
     return bool(mid) and (mid.endswith(":free") or mid == "openrouter/free")
 
 
-def pacing_key(host: str, model: str | None = None) -> str:
-    """Host key for gap maps; ``{host}:free`` for OpenRouter free models."""
-    if host and is_openrouter_free_model(model):
-        return f"{host}:free"
-    return host
+def pacing_key(host: str, model: str | None = None, *, port: int | None = None, openrouter: bool = False) -> str:
+    """Host key for gap maps; ``{host}:{port}:free`` for OpenRouter free models."""
+    if not host:
+        return host
+    if port is None:
+        base = host
+    elif ":" in host:
+        base = f"[{host}]:{port}"
+    else:
+        base = f"{host}:{port}"
+    if openrouter and is_openrouter_free_model(model):
+        return f"{base}:free"
+    return base
 
 
 def request_model_from_body(body: object) -> str | None:
@@ -187,10 +225,10 @@ def request_model_from_body(body: object) -> str | None:
     return None
 
 
-def ensure_free_model_pacing(host: str, model: str | None) -> str:
+def ensure_free_model_pacing(host: str, model: str | None, *, port: int | None = None, openrouter: bool = False) -> str:
     """Return the pacing key and seed the 3s :free floor when applicable."""
-    key = pacing_key(host, model)
-    if is_openrouter_free_model(model):
+    key = pacing_key(host, model, port=port, openrouter=openrouter)
+    if key.endswith(":free"):
         remember_host_gap(key, OPENROUTER_FREE_MIN_GAP_SEC)
     return key
 
@@ -199,8 +237,8 @@ def reset_host_pacing_for_tests() -> None:
     with _host_gap_lock:
         _host_gap_sec.clear()
         _host_last_sent.clear()
-        
-        
+
+
 def remember_host_gap(host: str, delay_sec: float) -> None:
     """Stick the retry delay as the minimum gap before the next send to *host*."""
     if not host or not math.isfinite(delay_sec) or delay_sec <= 0:
@@ -242,24 +280,40 @@ def mark_host_sent(host: str, *, monotonic: Callable[[], float] | None = None) -
             _host_last_sent[host] = now
 
 
-def claim_host_send_slot(host: str, *, monotonic: Callable[[], float] | None = None) -> float:
-    """Reserve this caller's send time and return how long it must wait.
-
-    ``remaining_host_gap`` and ``mark_host_sent`` used to take the lock
-    separately. Two jobs could both read a zero wait and send together.
-    The reservation is ``now + wait``; ``mark_host_sent`` only moves it forward.
-    """
+def _reserve_host_send_slot(host: str, *, monotonic: Callable[[], float] | None = None) -> tuple[float, float, float | None]:
     if not host:
-        return 0.0
+        return 0.0, 0.0, None
     now = (monotonic or time.monotonic)()
     with _host_gap_lock:
         gap = _host_gap_sec.get(host, 0.0)
-        last = _host_last_sent.get(host)
+        previous_last = _host_last_sent.get(host)
         wait = 0.0
-        if gap > 0 and last is not None:
-            wait = max(0.0, gap - (now - last))
-        _host_last_sent[host] = now + wait
-        return wait
+        if gap > 0 and previous_last is not None:
+            wait = max(0.0, gap - (now - previous_last))
+        reserved_at = now + wait
+        _host_last_sent[host] = reserved_at
+        return wait, reserved_at, previous_last
+
+
+def _rollback_host_reservation(host: str, reserved_at: float, previous_last: float | None) -> None:
+    if not host:
+        return
+    with _host_gap_lock:
+        if _host_last_sent.get(host) == reserved_at:
+            if previous_last is None:
+                _host_last_sent.pop(host, None)
+            else:
+                _host_last_sent[host] = previous_last
+
+
+def claim_host_send_slot(host: str, *, monotonic: Callable[[], float] | None = None) -> float:
+    """Reserve this caller's send time and return how long it must wait.
+
+    The reservation is ``now + wait``; ``mark_host_sent`` only moves it forward.
+    ``wait_host_gap`` rolls back when Stop aborts the wait and the stamp is still this reservation.
+    """
+    wait, _, _ = _reserve_host_send_slot(host, monotonic=monotonic)
+    return wait
 
 
 def remaining_host_gap(host: str, *, monotonic: Callable[[], float] | None = None) -> float:
@@ -277,7 +331,7 @@ def remaining_host_gap(host: str, *, monotonic: Callable[[], float] | None = Non
 
 def wait_host_gap(host: str, stop_checker: Callable[[], bool] | None = None, status_callback: Callable[[str], None] | None = None, *, monotonic: Callable[[], float] | None = None) -> bool:
     """Wait out a learned per-host gap. False if Stop fired."""
-    remaining = claim_host_send_slot(host, monotonic=monotonic)
+    remaining, reserved_at, previous_last = _reserve_host_send_slot(host, monotonic=monotonic)
     if remaining <= 0:
         return True
     if status_callback is not None:
@@ -293,11 +347,17 @@ def wait_host_gap(host: str, stop_checker: Callable[[], bool] | None = None, sta
         if host.endswith(":free") and stored_gap <= OPENROUTER_FREE_MIN_GAP_SEC:
             from plugin.framework.i18n import _
 
-            shown = int(round(remaining)) if remaining >= 1 else round(max(remaining, 0.0), 1)
-            status_callback(_("Spacing free-model requests, next send in {0}s…").format(shown))
+            status_callback(_("Spacing free-model requests, next send in {0}s…").format(_shown_seconds(remaining)))
         else:
             emit_retry_status(status_callback, remaining)
-    return wait_abortable(remaining, stop_checker, monotonic=monotonic)
+    ok = wait_abortable(remaining, stop_checker, monotonic=monotonic)
+    if not ok:
+        # Bugfix: Stop during the wait left last_sent at now + wait, so the next caller
+        # waited an extra gap. claim_host_send_slot wrote the future stamp before the sleep;
+        # rollback restores the previous stamp only if nobody else has reserved past it.
+        _rollback_host_reservation(host, reserved_at, previous_last)
+        return False
+    return True
 
 
 class RequestPacer:

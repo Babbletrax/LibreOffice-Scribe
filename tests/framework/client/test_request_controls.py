@@ -16,11 +16,13 @@ from plugin.framework.client.request_controls import (
     mark_host_sent,
     pacing_key,
     parse_retry_after,
+    parse_retry_after_ms,
     remaining_host_gap,
     remember_host_gap,
     request_model_from_body,
     reset_host_pacing_for_tests,
     reset_local_unverified_hosts_for_tests,
+    retry_after_exceeds_cap,
     wait_abortable,
     wait_host_gap,
 )
@@ -136,9 +138,14 @@ def test_openrouter_free_pacing_key_covers_suffix_and_auto_router():
     assert is_openrouter_free_model("deepseek/deepseek-r1:free")
     assert is_openrouter_free_model("openrouter/free")
     assert not is_openrouter_free_model("openai/gpt-oss-120b")
-    assert pacing_key("openrouter.ai", "deepseek/deepseek-r1:free") == "openrouter.ai:free"
-    assert pacing_key("openrouter.ai", "openrouter/free") == "openrouter.ai:free"
+    assert pacing_key("openrouter.ai", "deepseek/deepseek-r1:free", openrouter=True) == "openrouter.ai:free"
+    assert pacing_key("openrouter.ai", "openrouter/free", openrouter=True) == "openrouter.ai:free"
+    assert pacing_key("openrouter.ai", "deepseek/deepseek-r1:free") == "openrouter.ai"
     assert pacing_key("openrouter.ai", "openai/gpt-oss-120b") == "openrouter.ai"
+    assert pacing_key("localhost", "llama3:free", port=11434) == "localhost:11434"
+    assert pacing_key("api.openai.com", "x:free", port=443) == "api.openai.com:443"
+    assert pacing_key("openrouter.ai", "x:free", port=443, openrouter=True) == "openrouter.ai:443:free"
+    assert pacing_key("::1", "m", port=11434) == "[::1]:11434"
 
 
 def test_openrouter_free_floor_survives_clear_and_yields_to_larger_429():
@@ -147,7 +154,7 @@ def test_openrouter_free_floor_survives_clear_and_yields_to_larger_429():
     def now() -> float:
         return clock["t"]
 
-    key = ensure_free_model_pacing("openrouter.ai", "openrouter/free")
+    key = ensure_free_model_pacing("openrouter.ai", "openrouter/free", openrouter=True)
     assert key == "openrouter.ai:free"
     mark_host_sent(key, monotonic=now)
     clock["t"] = 101.0
@@ -158,6 +165,12 @@ def test_openrouter_free_floor_survives_clear_and_yields_to_larger_429():
     assert remaining_host_gap(key, monotonic=now) == OPENROUTER_FREE_MIN_GAP_SEC - 1.0
     clear_host_gap("openrouter.ai")
     assert remaining_host_gap("openrouter.ai", monotonic=now) == 0.0
+
+
+def test_free_pacing_not_seeded_off_openrouter():
+    key = ensure_free_model_pacing("localhost", "llama3:free", port=11434)
+    assert key == "localhost:11434"
+    assert remaining_host_gap(key) == 0.0
 
 
 def test_request_model_from_body_reads_model_field():
@@ -205,8 +218,41 @@ def test_emit_retry_status_skips_none():
     assert "2s" in seen[0]
 
 
+def test_parse_retry_after_ms():
+    assert parse_retry_after_ms("1500") == 1.5
+    assert parse_retry_after_ms("0") == 0.0
+    assert parse_retry_after_ms(None) is None
+    assert parse_retry_after_ms("") is None
+    assert parse_retry_after_ms("nope") is None
+    assert parse_retry_after_ms("-5") is None
+
+
+def test_retry_after_exceeds_cap():
+    assert not retry_after_exceeds_cap(None)
+    assert not retry_after_exceeds_cap(30)
+    assert not retry_after_exceeds_cap(30.0)
+    assert retry_after_exceeds_cap(30.1)
+    assert retry_after_exceeds_cap(120)
+
+
+def test_wait_host_gap_stop_rolls_back_reservation():
+    remember_host_gap("localhost", 5.0)
+    mark_host_sent("localhost", monotonic=lambda: 100.0)
+    assert wait_host_gap("localhost", stop_checker=lambda: True, monotonic=lambda: 100.0) is False
+    assert claim_host_send_slot("localhost", monotonic=lambda: 100.0) == 5.0
+
+
+def test_wait_host_gap_stop_does_not_clobber_later_claim():
+    remember_host_gap("localhost", 5.0)
+    mark_host_sent("localhost", monotonic=lambda: 100.0)
+    first_wait = claim_host_send_slot("localhost", monotonic=lambda: 100.0)
+    assert first_wait == 5.0
+    assert wait_host_gap("localhost", stop_checker=lambda: True, monotonic=lambda: 100.0) is False
+    assert remaining_host_gap("localhost", monotonic=lambda: 100.0) == 10.0
+
+
 def test_wait_host_gap_status_callback():
-    key = ensure_free_model_pacing("openrouter.ai", "openrouter/free")
+    key = ensure_free_model_pacing("openrouter.ai", "openrouter/free", openrouter=True)
     mark_host_sent(key, monotonic=lambda: 100.0)
     seen: list[str] = []
     # Key has 3s floor, 1s has elapsed, remaining is 2s.

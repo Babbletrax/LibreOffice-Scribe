@@ -74,8 +74,18 @@ from plugin.framework.url_utils import get_api_version_suffix, normalize_endpoin
 from plugin.framework.errors import format_error_message
 from .errors import _format_http_error_response, append_zai_unknown_model_hint
 from .http_transport import CONNECTION_ERRORS, LlmHttpTransport, parse_strict_json, redact_secrets
-from .request_controls import RETRY_MAX_ATTEMPTS, backoff_delay_sec, clear_host_gap, emit_retry_status, pacing_key, remember_host_gap, request_model_from_body, wait_abortable
-from .stream_normalizer import iterate_sse, normalize_message_content, normalize_delta, accumulate_streaming_thinking, extract_reasoning_replay_from_response, new_streaming_thinking_meta, THINKING_DELTA_KEYS
+from .request_controls import RETRY_MAX_ATTEMPTS, backoff_delay_sec, clear_host_gap, emit_retry_status, remember_host_gap, request_model_from_body, wait_abortable
+from .stream_normalizer import (
+    THINKING_DELTA_KEYS,
+    ThinkTagStreamSplitter,
+    accumulate_streaming_thinking,
+    extract_reasoning_replay_from_response,
+    iterate_sse,
+    new_streaming_thinking_meta,
+    normalize_delta,
+    normalize_message_content,
+    strip_think_tags,
+)
 from .provider_detection import is_openrouter_endpoint
 
 log = logging.getLogger(__name__)
@@ -349,7 +359,6 @@ def _log_http_500_request_diag(client: Any, response: Any, path: str, body: Any,
 
 
 from .openai_shim import get_provider_shim_class
-from .stream_normalizer import ThinkTagStreamSplitter, strip_think_tags
 
 
 class LlmClient:
@@ -363,7 +372,7 @@ class LlmClient:
     def __init__(self, config: dict[str, Any], ctx: Any, cancellation_scope: Any | None = None, *, register_with_send: bool = True) -> None:
         self.config = config
         self.ctx = ctx
-        self._transport = LlmHttpTransport(self._endpoint, self._timeout)
+        self._transport = LlmHttpTransport(self._endpoint, self._timeout, openrouter_getter=lambda: bool(self.config.get("is_openrouter")))
         self._shims: dict[str, BaseProviderShim] = {}
         # Stop before the first byte: close() alone is a no-op when sock is None;
         # the worker must not open a new connection (B13 / llm_request_lane).
@@ -476,7 +485,7 @@ class LlmClient:
                 return "stop", None, sends_left, wait_index
             return "retry", None, sends_left, wait_index
         if wait_index == 0:
-            clear_host_gap(pacing_key(self._current_host(), request_model_from_body(body)))
+            clear_host_gap(self._transport.pacing_key_for_model(request_model_from_body(body)))
         return "ok", response, sends_left, wait_index
 
     def _after_connection_error(self, err: Exception, *, path: str, body: Any, sends_left: int, wait_index: int, stop_checker: Any, status_callback: Any, retry_log_message: str) -> tuple[str, int, int]:
@@ -960,7 +969,7 @@ class LlmClient:
                                 sends_left -= 1
                                 wait_index += 1
                                 delay = backoff_delay_sec(attempt=wait_index)
-                                remember_host_gap(pacing_key(self._current_host(), requested_model), delay)
+                                remember_host_gap(self._transport.pacing_key_for_model(requested_model), delay)
                                 log.warning("Retrying mid-stream error after %.3fs (%s)", delay, stream_err)
                                 emit_retry_status(status_callback, delay)
                                 if not wait_abortable(delay, abort_checker):

@@ -100,7 +100,7 @@ Feasible in one process. This is the layout to try.
 The agent loop that should run on each pool thread is the one that already exists in `run_llm_chat_eval`:
 
 1. `prepare_example` — one short UNO section, creates **this thread’s** doc.
-2. Many `request_with_tools` — overlap across the pool. Each `run_llm_chat_eval` builds its own `LlmClient`. `LlmHttpTransport` is one keep-alive connection per client and is not safe for two threads to share; per-example clients are the right shape (`http_transport` module docstring). Paid OpenRouter traffic is not spaced by the process-wide host gap; that gap applies after a retry, and the 3s floor is only for `:free` / `openrouter/free`.
+2. Many `request_with_tools` — overlap across the pool. Each `run_llm_chat_eval` builds its own `LlmClient`. `LlmHttpTransport` is one keep-alive connection per client and is not safe for two threads to share; per-example clients are the right shape (`http_transport` module docstring). Paid OpenRouter traffic is not spaced by the process-wide host gap; that gap applies after a retry, the 3s floor is only for OpenRouter `:free` / `openrouter/free`, and the gap key includes the port.
 3. Tool calls — short (or, for the flag, script-long) sections on `_lo_thread`.
 4. Export — short UNO section. Judge HTTP can stay on the agent thread afterward and overlap too.
 
