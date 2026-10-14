@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import io
+import logging
 import os
 import subprocess
 import sys
@@ -1332,4 +1334,26 @@ def test_venv_path_change_clears_webview_probe_failure_cache():
     finally:
         launch_mod._PROBE_CACHE.pop(exe, None)
         launch_mod._PROBE_FAILURE_CACHE.pop(exe, None)
+
+
+def test_send_warns_for_a_type_the_child_does_not_queue(caplog):
+    pe = PersistentEditor()
+    mock_proc = MagicMock()
+    mock_proc.poll.return_value = None
+    mock_proc.stdin = io.BytesIO()
+    pe._proc = mock_proc
+
+    with caplog.at_level(logging.WARNING, logger="plugin.scripting.editor_host"):
+        pe.send({"type": "validate_result"})
+
+    assert "is not queued by the editor child" in caplog.text
+    assert "validate_result" in caplog.text
+    initial_len = len(mock_proc.stdin.getvalue())
+    assert initial_len > 0
+
+    caplog.clear()
+    pe.send({"type": "load", "code": "x"})
+    assert "is not queued by the editor child" not in caplog.text
+    assert len(mock_proc.stdin.getvalue()) > initial_len
+
 

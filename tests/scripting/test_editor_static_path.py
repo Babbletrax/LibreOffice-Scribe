@@ -24,5 +24,6 @@ def test_vs_path_cannot_escape_rocher_root(tmp_path):
     assert got == os.path.realpath(root / "loader.js")
     assert monaco_static_path("/vs/../../secret.txt", str(assets), str(root)) is None
     assert monaco_static_path("/vs//etc/passwd", str(assets), str(root)) is None
+    assert monaco_static_path("/vs/", str(assets), str(root)) is None
     assert monaco_static_path("/", str(assets), str(root)) == os.path.join(str(assets), "index.html")
     assert monaco_static_path("/nope", str(assets), str(root)) is None
