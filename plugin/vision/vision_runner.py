@@ -45,7 +45,13 @@ def extract_vision_insert_kwargs(ctx: Any, code: str) -> dict[str, Any]:
 
 def get_selected_image_bytes(ctx: Any, doc: Any) -> bytes:
     """Export the currently selected embedded graphic as raw PNG bytes."""
-    b64 = get_selected_image_base64(doc, ctx)
+    try:
+        b64 = get_selected_image_base64(doc, ctx)
+    except Exception as exc:
+        raise ToolExecutionError(
+            _("Could not export the selected image: {error}").format(error=exc),
+            code="IMAGE_EXPORT_FAILED",
+        ) from exc
     if not b64:
         raise ToolExecutionError(_("Select an embedded image (or a range containing images), then Run again."), code="NO_IMAGE_SELECTED")
     return base64.b64decode(b64)
@@ -61,7 +67,14 @@ def resolve_vision_image_bytes(ctx: Any, doc: Any, *, image_name: str | None = N
         graphic_obj = _get_graphic_object(doc, name)
     if graphic_obj is None:
         raise ToolExecutionError(_("Image '{name}' not found. Use image_list or leave image_name empty and select the graphic.").format(name=name), code="IMAGE_NOT_FOUND", details={"image_name": name})
-    png_bytes = export_graphic_object_to_bytes(ctx, graphic_obj)
+    try:
+        png_bytes = export_graphic_object_to_bytes(ctx, graphic_obj)
+    except Exception as exc:
+        raise ToolExecutionError(
+            _("Image '{name}' could not be exported: {error}").format(name=name, error=exc),
+            code="IMAGE_EXPORT_FAILED",
+            details={"image_name": name},
+        ) from exc
     if not png_bytes:
         raise ToolExecutionError(_("Image '{name}' could not be exported.").format(name=name), code="IMAGE_NOT_FOUND", details={"image_name": name})
     return png_bytes

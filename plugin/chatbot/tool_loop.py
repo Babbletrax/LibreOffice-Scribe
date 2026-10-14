@@ -462,8 +462,8 @@ class ToolCallingMixin:
                     try:
                         from plugin.writer.images.image_tools import get_selected_image_base64
                         b64_image = get_selected_image_base64(doc, self.ctx)
-                    except Exception as e:
-                        log.debug("Failed to get selected image base64: %s", e)
+                    except Exception:
+                        log.exception("Failed to get selected image base64")
 
         if skip_append_user:
             pass
