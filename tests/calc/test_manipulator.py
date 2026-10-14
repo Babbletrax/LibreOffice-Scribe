@@ -206,3 +206,61 @@ def test_re_raise_disposed_exception():
 
     with pytest.raises(DisposedException):
         manipulator.safe_get_cell_value(sheet, "A1")
+
+
+def test_classify_write_cell_boolean():
+    manipulator = CellManipulator(MagicMock())
+    val, formula, meta = manipulator._classify_write_cell(True, None, None)
+    assert val == 1.0
+    assert formula == ""
+    assert meta["kind"] == "number"
+
+    val_f, formula_f, meta_f = manipulator._classify_write_cell(False, None, None)
+    assert val_f == 0.0
+    assert formula_f == ""
+    assert meta_f["kind"] == "number"
+
+    val_str, formula_str, meta_str = manipulator._classify_write_cell("True", None, None)
+    assert val_str == "True"
+    assert formula_str == ""
+    assert meta_str["kind"] == "text"
+
+
+def test_sort_range_bounds_and_valid_types():
+    from unittest.mock import patch
+    bridge = MagicMock()
+    mock_range = MagicMock()
+    mock_addr = SimpleNamespace(StartColumn=0, EndColumn=1, StartRow=0, EndRow=10)
+    bridge.resolve_range_or_address.return_value = mock_range
+
+    manipulator = CellManipulator(bridge)
+    with (
+        patch("plugin.calc.manipulator._uno_range_address", return_value=mock_addr),
+        patch("plugin.calc.manipulator.TableSortField", create=True),
+    ):
+        with pytest.raises(CalcError, match=r"0 to 1"):
+            manipulator.sort_range("A1:B10", sort_column=2)
+        mock_range.createSortDescriptor.assert_not_called()
+
+        mock_range.createSortDescriptor.return_value = []
+        res = manipulator.sort_range("A1:B10", sort_column=0, ascending=True, has_header=True)
+        assert "sorted" in res
+        mock_range.sort.assert_called_once()
+
+
+def test_quiet_probe_cleanup():
+    from plugin.calc.manipulator import _quiet_probe_cleanup
+
+    DisposedException = type("DisposedException", (Exception,), {})
+
+    def raise_disposed():
+        raise DisposedException("disposed")
+
+    with pytest.raises(DisposedException):
+        _quiet_probe_cleanup(raise_disposed, "test_disposed")
+
+    def raise_val_error():
+        raise ValueError("swallowed")
+
+    # Does not raise
+    _quiet_probe_cleanup(raise_val_error, "test_swallowed")

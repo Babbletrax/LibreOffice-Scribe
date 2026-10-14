@@ -353,6 +353,44 @@ def test_wrap_flatpak_forwards_env_and_cwd():
         _reset_cache()
 
 
+def test_wrap_flatpak_watch_bus():
+    cmd = ["/py", "a"]
+    _reset_cache()
+    try:
+        with patch("plugin.scripting.sandbox.os.path.exists", return_value=True):
+            with patch.dict("os.environ", {}, clear=True):
+                res_bus = wrap_command_for_sandbox(cmd, env={"A": "b"}, cwd="/work", watch_bus=True)
+                assert res_bus == [
+                    "flatpak-spawn",
+                    "--host",
+                    "--watch-bus",
+                    "--clear-env",
+                    "--directory=/work",
+                    "--env=A=b",
+                    "/py",
+                    "a",
+                ]
+                res_no_bus = wrap_command_for_sandbox(cmd, env={"A": "b"}, cwd="/work", watch_bus=False)
+                assert "--watch-bus" not in res_no_bus
+                assert res_no_bus == [
+                    "flatpak-spawn",
+                    "--host",
+                    "--clear-env",
+                    "--directory=/work",
+                    "--env=A=b",
+                    "/py",
+                    "a",
+                ]
+
+        with patch("plugin.scripting.sandbox.os.path.exists", return_value=False):
+            with patch.dict("os.environ", {}, clear=True):
+                _reset_cache()
+                res_outside = wrap_command_for_sandbox(cmd, env={"A": "b"}, cwd="/work", watch_bus=True)
+                assert res_outside == ["/py", "a"]
+    finally:
+        _reset_cache()
+
+
 def test_wrap_does_not_mutate_original():
     _reset_cache()
     try:

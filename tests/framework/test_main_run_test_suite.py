@@ -104,3 +104,35 @@ def test_run_test_suite_unavailable_does_not_print() -> None:
         main_mod._run_test_suite(MagicMock(), lambda _m: True, "writer.format_tests")
 
     assert printed == []
+
+
+def test_run_test_suite_logs_failure() -> None:
+    """When run_module_suite raises, _run_test_suite logs the failure and shows a dialog."""
+    import plugin.main as main_mod
+
+    fake_ctx = MagicMock()
+    with (
+        patch("plugin.main._tests_bundled", return_value=True),
+        patch("plugin.framework.uno_context.get_ctx", return_value=fake_ctx),
+        patch.object(main_mod, "get_active_document", return_value=None),
+        patch("plugin.chatbot.dialogs.msgbox") as mock_msgbox,
+        patch("plugin.testing_runner.run_module_suite", side_effect=RuntimeError("suite crash")),
+        patch.object(main_mod.log, "exception") as mock_log_exc,
+    ):
+        main_mod._run_test_suite(fake_ctx, lambda _m: True, "writer.format_tests")
+        mock_msgbox.assert_called_once()
+        assert any("_run_test_suite failed" in str(call) for call in mock_log_exc.call_args_list)
+
+
+def test_show_tests_unavailable_logs_dialog_failure() -> None:
+    """When msgbox raises in _show_tests_unavailable, error is logged and not propagated."""
+    import plugin.main as main_mod
+
+    fake_ctx = MagicMock()
+    with (
+        patch("plugin.chatbot.dialogs.msgbox", side_effect=RuntimeError("dialog boom")),
+        patch.object(main_mod.log, "exception") as mock_log_exc,
+    ):
+        main_mod._show_tests_unavailable(fake_ctx)
+        assert any("test unavailable dialog failed" in str(call) for call in mock_log_exc.call_args_list)
+

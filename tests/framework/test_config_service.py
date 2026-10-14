@@ -8,10 +8,13 @@ def config_dir(tmp_path):
     return tmp_path
 
 @pytest.fixture
-def config_svc(config_dir):
-    "ConfigService with a temp config path (bypasses UNO)."
+def config_svc(config_dir, monkeypatch):
+    "ConfigService using config_dir for config path."
+    from plugin.framework.config import _invalidate_config_cache
+
+    monkeypatch.setattr("plugin.framework.config._config_path", lambda: str(config_dir / "writeragent.json"))
+    _invalidate_config_cache()
     svc = ConfigService()
-    svc._config_path = str((config_dir / 'writeragent.json'))
     return svc
 
 @pytest.fixture
@@ -68,19 +71,23 @@ class TestSetGet():
         d = config_svc.get_dict()
         assert (d['mcp.mcp_port'] == 9000)
 
-    def test_set_corrupt_config_backups_and_writes(self, config_svc, config_dir, manifest):
+    def test_set_corrupt_config_does_not_overwrite(self, config_svc, config_dir, manifest):
         corrupt = '{ invalid json '
         config_path = config_dir / 'writeragent.json'
         backup_path = config_dir / 'writeragent.json.bak'
         config_path.write_text(corrupt, encoding='utf-8')
         config_svc.set_manifest(manifest)
-        config_svc.set('mcp.mcp_port', 9000)
+        from plugin.framework.errors import ConfigError
+
+        with pytest.raises(ConfigError) as err:
+            config_svc.set('mcp.mcp_port', 9000)
+        assert err.value.code == 'CONFIG_INVALID_FORMAT'
+        assert config_path.read_text(encoding='utf-8') == corrupt
         assert backup_path.read_text(encoding='utf-8') == corrupt
         from plugin.framework.config import parse_config_json_text
 
         data = parse_config_json_text(config_path.read_text(encoding='utf-8'))
-        assert data is not None
-        assert data['mcp.mcp_port'] == 9000
+        assert data is None
 
     def test_ai_stt_model_uses_audio_key(self, config_svc):
         from unittest.mock import patch
@@ -88,7 +95,6 @@ class TestSetGet():
         with (
             patch("plugin.framework.client.model_fetcher.get_stt_model", return_value="from-dual-read") as mock_get,
             patch("plugin.framework.config_service.set_config") as mock_set,
-            patch("plugin.framework.config_service.global_event_bus"),
         ):
             assert config_svc.get("ai.stt_model") == "from-dual-read"
             config_svc.set("ai.stt_model", "whisper-1")
@@ -200,26 +206,34 @@ class TestAccessControl():
 class TestEvents():
 
     def test_config_changed_event(self, config_svc, manifest):
+        from unittest.mock import patch
+        from plugin.framework.event_bus import global_event_bus
+
         config_svc.set_manifest(manifest)
         bus = EventBus()
         config_svc.set_events(bus)
         events = []
         bus.subscribe('config:changed', (lambda **kw: events.append(kw)))
-        config_svc.set('mcp.mcp_port', 9000)
-        assert (len(events) == 1)
-        assert (events[0]['key'] == 'mcp.mcp_port')
-        assert (events[0]['value'] == 9000)
-        assert (events[0]['old_value'] == 18765)
+        with patch.object(global_event_bus, "emit") as mock_emit:
+            config_svc.set('mcp.mcp_port', 9000)
+            assert mock_emit.call_count == 1
+            call_args = mock_emit.call_args
+            assert call_args[0][0] == 'config:changed'
+            assert call_args.kwargs['key'] == 'mcp.mcp_port'
+            assert call_args.kwargs['value'] == 9000
+            assert call_args.kwargs['old_value'] == 18765
+        assert events == []
 
     def test_no_event_when_value_unchanged(self, config_svc, manifest):
+        from unittest.mock import patch
+        from plugin.framework.event_bus import global_event_bus
+
         config_svc.set_manifest(manifest)
-        bus = EventBus()
-        config_svc.set_events(bus)
-        config_svc.set('mcp.mcp_port', 18765)
-        events = []
-        bus.subscribe('config:changed', (lambda **kw: events.append(kw)))
-        config_svc.set('mcp.mcp_port', 18765)
-        assert (events == [])
+        with patch.object(global_event_bus, "emit") as mock_emit:
+            config_svc.set('mcp.mcp_port', 18765)
+            mock_emit.assert_not_called()
+            config_svc.set('mcp.mcp_port', 18765)
+            mock_emit.assert_not_called()
 
 class TestModuleConfigProxy():
 
@@ -391,7 +405,6 @@ def test_initialize_applies_public_flags_without_set_manifest(config_svc, manife
 
 
 def test_get_empty_string_false_and_zero_are_real_values(config_svc, monkeypatch) -> None:
-    config_svc._config_path = None
     stored = {"note": "", "flag": False, "count": 0, "missing": None}
 
     monkeypatch.setattr("plugin.framework.config_service.get_config", lambda key: stored[key])
@@ -403,7 +416,7 @@ def test_get_empty_string_false_and_zero_are_real_values(config_svc, monkeypatch
 
 def test_set_does_not_emit_when_replace_fails(config_svc, manifest) -> None:
     from unittest.mock import patch
-
+    from plugin.framework.event_bus import global_event_bus
     from plugin.framework.errors import ConfigError
 
     config_svc.set_manifest(manifest)
@@ -412,10 +425,25 @@ def test_set_does_not_emit_when_replace_fails(config_svc, manifest) -> None:
     events = []
     bus.subscribe("config:changed", lambda **kw: events.append(kw))
     with patch("plugin.framework.config._write_config_file", side_effect=OSError("disk full")):
-        with pytest.raises(ConfigError) as err:
-            config_svc.set("mcp.mcp_port", 9000)
+        with patch.object(global_event_bus, "emit") as mock_emit:
+            with pytest.raises(ConfigError) as err:
+                config_svc.set("mcp.mcp_port", 9000)
+            mock_emit.assert_not_called()
     assert err.value.code == "CONFIG_SAVE_ERROR"
     assert events == []
+
+
+def test_ai_request_timeout_and_mcp_port_share_one_file(config_svc, config_dir, manifest) -> None:
+    from plugin.framework.config import parse_config_json_text
+
+    config_svc.set_manifest(manifest)
+    config_svc.set("mcp.mcp_port", 9000)
+    config_svc.set("ai.request_timeout", 45)
+    text = (config_dir / "writeragent.json").read_text(encoding="utf-8")
+    data = parse_config_json_text(text) or {}
+    assert data["mcp.mcp_port"] == 9000
+    assert data["request_timeout"] == 45
+    assert "ai.request_timeout" not in data
 
 
 def test_model_fetcher_is_not_a_top_level_import() -> None:

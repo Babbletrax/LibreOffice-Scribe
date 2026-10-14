@@ -161,6 +161,27 @@ class TestSendHandlerStateMachine:
         assert step.state.status == "stopped"
         assert len(step.effects) == 0
 
+    def test_stop_after_done_is_noop(self):
+        state = SendHandlerState(handler_type="web", status="done")
+        step = next_state(state, StopRequestedEvent())
+        assert step.state.status == "done"
+        assert step.state.last_error is None
+        assert step.effects == []
+
+    def test_stop_after_stopped_is_noop(self):
+        state = SendHandlerState(handler_type="web", status="stopped")
+        step = next_state(state, StopRequestedEvent())
+        assert step.state.status == "stopped"
+        assert step.state.last_error is None
+        assert step.effects == []
+
+    def test_error_after_done_is_noop(self):
+        state = SendHandlerState(handler_type="web", status="done")
+        step = next_state(state, ErrorEvent(error=Exception("late")))
+        assert step.state.status == "done"
+        assert step.state.last_error is None
+        assert step.effects == []
+
     def test_stream_done_unknown_handler_type_emits_ready(self):
         state = SendHandlerState(handler_type="other", status="running")
         step = next_state(state, StreamDoneEvent(response={}))

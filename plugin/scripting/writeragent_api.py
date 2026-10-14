@@ -2425,13 +2425,13 @@ class _WriterProxy:
         return _rpc_call("get_page_objects", page=page, locator=locator, paragraph=paragraph)
 
     def search_in_document(self, pattern: str, *, regex: bool | None = None, case_sensitive: bool | None = None, max_results: int | None = None, return_offsets: bool | None = None) -> dict[str, Any]:
-        """Search for text ANYWHERE in the document using LibreOffice native search — body paragraphs and headings, table cells, text boxes / frames, floating drawing shapes, page headers/footers, AND comments (annotations) are all covered. Each match reports WHERE it was found (location, e.g. "body", "table 'Table1' cell B2", "text box 'Frame1'", "shape 'Shape 1'", "header (page style 'Standard')", "comment by 'Ana'") plus the surrounding paragraph (or shape/comment text) for context. When pointing the user to a match, quote the first few words of its text and its location rather than any internal index. With regex=true, body/table/frame hits use LibreOffice/ICU regex; shape and comment sweeps use Python re (same INVALID_REGEX check). return_offsets is body-only literal search.
+        """Search for text ANYWHERE in the document using LibreOffice native search — body paragraphs and headings, table cells, text boxes / frames, floating drawing shapes, page headers/footers, AND comments (annotations) are all covered. Each match reports WHERE it was found (location, e.g. "body", "table 'Table1' cell B2", "text box 'Frame1'", "shape 'Shape 1'", "header (page style 'Standard')", "comment by 'Ana'") plus the surrounding paragraph (or shape/comment text) for context. When pointing the user to a match, quote the first few words of its text and its location rather than any internal index. With regex=true, body/table/frame hits use LibreOffice/ICU regex; shape and comment sweeps use Python re (same INVALID_REGEX check). return_offsets is body-only literal search. A zero-width match stops the text-model walk, sets truncated, and does not count the empty hit.
 
         Args:
             pattern (required): Search string or regex pattern.
             regex (optional): Use regular expression (default: false).
             case_sensitive (optional): Case-sensitive search (default: false).
-            max_results (optional): Maximum results to return (default: 20).
+            max_results (optional): Maximum results to return (default: 20). Must be a positive integer.
             return_offsets (optional): If true, returns {start, end, text} character offsets for body text only (no regex, no shapes/comments). Default: false.
         """
         return _rpc_call("search_in_document", pattern=pattern, regex=regex, case_sensitive=case_sensitive, max_results=max_results, return_offsets=return_offsets)

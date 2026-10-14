@@ -64,3 +64,31 @@ def test_calc_manage_tracked_changes_bulk_unsupported(ctx, doc):
     assert res.get("tracked_changes_bulk_unsupported") is True
     assert res.get("message") == "Accepting or rejecting all tracked changes is not supported on this document."
 
+
+@native_test
+@with_native_doc("calc")
+def test_calc_track_changes_show_returns_stub(ctx, doc):
+    from plugin.main import get_services
+    from plugin.writer.tracking import TrackChangesShow
+
+    tctx = TestingFactory.create_context(
+        doc=doc, ctx=ctx, env="native", doc_type="calc", services=get_services()
+    )
+    rec_before = doc.getPropertyValue("RecordChanges")
+    try:
+        rdt_before = doc.getPropertyValue("RedlineDisplayType")
+    except Exception:
+        rdt_before = None
+
+    res_true = TrackChangesShow().execute(tctx, show=True)
+    assert res_true.get("status") == "ok", res_true
+    assert res_true.get("calc_track_changes_show_unsupported") is True
+
+    res_false = TrackChangesShow().execute(tctx, show=False)
+    assert res_false.get("status") == "ok", res_false
+    assert res_false.get("calc_track_changes_show_unsupported") is True
+
+    assert doc.getPropertyValue("RecordChanges") == rec_before
+    if rdt_before is not None:
+        assert doc.getPropertyValue("RedlineDisplayType") == rdt_before
+

@@ -90,6 +90,9 @@ def _drive_direct_image_send(host, doc, execute_return):
             with patch("plugin.framework.async_stream.run_stream_drain_loop") as mock_run_stream:
 
                 def fake_drain_loop(q, toolkit, job_done, apply_chunk, on_stream_done, on_stopped, on_error, on_status_fn, stop_checker, **kwargs):
+                    # The stub must start the worker because, since #1446, spawn happens only from on_drain_started.
+                    if kwargs.get("on_drain_started"):
+                        kwargs["on_drain_started"]()
                     while not q.empty():
                         item = q.get()
                         k = item[0]

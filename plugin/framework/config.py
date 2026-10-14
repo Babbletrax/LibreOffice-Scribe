@@ -59,6 +59,12 @@ listeners still see the key that was set. A batch that changes one key
 emits that key. A batch that changes more than one emits ``key=""`` —
 the bulk save Settings OK listeners already treat as "every module".
 
+Dotted reads do not take an unrelated flat suffix (``get_stt_model`` still
+dual-reads legacy ``stt_model``). A failed load whose
+``(path, st_mtime_ns, st_size)`` is unchanged is not parsed or warned again,
+and ``{}`` is not cached. ``get_config`` before ``init_config`` returns
+schema defaults and logs one warning.
+
 Schema-backed coercion, option canonicalization, and min/max bounds live in
 ``config_schema.py``. Import those names from there. Dataclass
 ``min`` / ``max`` / ``min_exclusive`` are part of that schema: strict
@@ -141,6 +147,7 @@ AI_SIMPLE_FIELDS = {"endpoint", "text_model", "image_model", "stt_model", "tempe
 _DUAL_READ_DOTTED_KEYS_KEEP_FLAT = frozenset({"audio.stt_model"})
 
 _resolved_config_path = None
+_config_uninitialized_warned: bool = False
 # RLock: set_config holds this while loading; GET-path persist helpers take it
 # too. Same-thread get_config during a nested call must not deadlock.
 _config_write_lock = threading.RLock()
@@ -195,8 +202,9 @@ def init_config(ctx: Any | None = None) -> str:
 
 def reset_config_for_tests() -> None:
     """Clear cached config path and in-memory dict (pytest isolation)."""
-    global _resolved_config_path
+    global _resolved_config_path, _config_uninitialized_warned
     _resolved_config_path = None
+    _config_uninitialized_warned = False
     _invalidate_config_cache()
 
 
@@ -347,7 +355,15 @@ def _try_repair_config_dict(text: str) -> dict[str, Any] | None:
 
 def _write_config_file(config_file_path: str, data: dict[str, Any]) -> None:
     """Write config via temp file + ``os.replace`` so a crash cannot truncate the live file."""
-    body = json.dumps(data, indent=4)
+    # What was wrong: A set or other non-JSON value raised bare TypeError from
+    # apply, so callers catching ConfigError missed it.
+    # How it happened: json.dumps sat outside the OSError handler.
+    # Why this change fixes it: A value that cannot be written is a save failure,
+    # raising ConfigError with CONFIG_SAVE_ERROR, same code as a disk error.
+    try:
+        body = json.dumps(data, indent=4)
+    except (TypeError, ValueError) as e:
+        raise ConfigError(f"Config value is not JSON-serializable: {e}", "CONFIG_SAVE_ERROR") from e
     if not body.endswith("\n"):
         body += "\n"
     content = CONFIG_SCHEMA_COMMENT + body
@@ -372,6 +388,7 @@ def _invalidate_config_cache() -> None:
     _cache.mtime = 0
     _cache.mtime_last_checked = 0.0
     _cache.error_logged = None
+    _cache.unreadable = None
 
 
 def _load_config_dict(config_file_path: str, *, allow_repair: bool = False, persist_repair: bool = False, fail_on_unrepairable: bool = False) -> dict[str, Any]:
@@ -475,7 +492,15 @@ class ConfigCache:
     data: Dict[str, Any] | None = None
     mtime: float = 0
     mtime_last_checked: float = 0.0
-    error_logged: tuple[str, float, int] | tuple[str, None, None] | None = None
+    error_logged: tuple[str, int, int] | tuple[str, None, None] | None = None
+    # What was wrong: A cold failed load left data is None, so every get_config
+    # re-read, scanned .bak*, ran json_repair, and log.warning'd; only
+    # log.exception was tied to error_logged.
+    # How it happened: The 2-second fast path requires data is not None.
+    # Why this change fixes it: This id skips that work until st_mtime_ns or
+    # size changes, and data stays None so the session is not cached as an
+    # empty install.
+    unreadable: tuple[str, int, int] | None = None
 
 
 _cache = ConfigCache()
@@ -618,15 +643,18 @@ def get_config_dict() -> dict[str, Any]:
 
 
 def _raw_config_value_for_key(config_data: dict[str, Any], key: str) -> Any:
+    """Return stored file value or _MISSING_VALUE, using the same keys get_config reads before defaults."""
+    # What was wrong: update_config("notamodule.endpoint", fn) and old_value
+    # saw the unrelated flat endpoint; get_config("audio.stt_model") ignored
+    # legacy stt_model while _value_for_update returned it.
+    # How it happened: Any dotted key took config_data[suffix].
+    # Why this change fixes it: That read was not get_config, and it was wider
+    # than _alias_keys_for_write; legacy stt_model stays in get_stt_model only.
     if key in config_data:
         return config_data[key]
     for dotted in _config_schema._dotted_fallback_keys(key):
         if dotted in config_data:
             return config_data[dotted]
-    if "." in key:
-        field_name = key.split(".", 1)[1]
-        if field_name in config_data:
-            return config_data[field_name]
     return _config_schema._MISSING_VALUE
 
 
@@ -721,8 +749,8 @@ def _value_for_update(loaded: dict[str, Any], key: str) -> Any:
     """Current value passed to ``update(key, fn)``.
 
     Same answer ``get_config`` would give: the stored value, or the schema
-    default when the key is omitted. A copy, so ``fn`` cannot alias the
-    loaded dict.
+    default when the key is omitted; a dotted key does not read a flat suffix.
+    A copy, so ``fn`` cannot alias the loaded dict.
     """
     raw = _raw_config_value_for_key(loaded, key)
     if raw is _config_schema._MISSING_VALUE:
@@ -864,7 +892,6 @@ class ConfigStore:
         event_key: str | None = None,
         batch: bool = False,
         emit: bool = True,
-        fail_on_unrepairable: bool = True,
     ) -> bool:
         """Patch *updates* into *path*. Return True when the file changed.
 
@@ -875,7 +902,7 @@ class ConfigStore:
         pending: _PendingConfigEvent | None = None
         with _config_write_lock:
             if os.path.exists(path):
-                loaded = _load_config_dict(path, allow_repair=True, persist_repair=False, fail_on_unrepairable=fail_on_unrepairable)
+                loaded = _load_config_dict(path, allow_repair=True, persist_repair=False, fail_on_unrepairable=True)
             else:
                 loaded = {}
             # Shallow copy: staging pops and replaces keys. *loaded* stays
@@ -969,7 +996,7 @@ class ConfigStore:
             return loaded
         try:
             _write_config_file(path, repaired)
-        except OSError as write_err:
+        except (OSError, ConfigError) as write_err:
             log.warning("Failed to persist coerced config: %s", write_err)
             return loaded
         return repaired
@@ -1065,12 +1092,35 @@ def remove_config(key: str, *, event_key: str | None = None) -> None:
     _config_store.remove(config_file_path, key, event_key=event_key)
 
 
+def _config_stat_id(path: str) -> tuple[str, int, int] | None:
+    try:
+        st = os.stat(path)
+        return (path, st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+
+
+def _remember_config_read_failure(path: str, stat_id: tuple[str, int, int] | None) -> None:
+    if stat_id is not None:
+        _cache.unreadable = stat_id
+        log_id: tuple[str, int, int] | tuple[str, None, None] = stat_id
+    else:
+        log_id = (path, None, None)
+    if _cache.error_logged != log_id:
+        log.exception("Config error reading %s", path)
+        _cache.error_logged = log_id
+
+
 def _get_validated_config_dict() -> dict[str, Any]:
     """Return the full validated config as a dict, using an in-memory cache
     keyed off the file modification time."""
+    global _config_uninitialized_warned
     try:
         config_file_path = _config_path()
-    except ConfigError:
+    except ConfigError as exc:
+        if not _config_uninitialized_warned:
+            log.warning("Config read before init_config (%s); using defaults", exc)
+            _config_uninitialized_warned = True
         return {}
 
     if not config_file_path or not os.path.exists(config_file_path):
@@ -1090,12 +1140,16 @@ def _get_validated_config_dict() -> dict[str, Any]:
         current_time = time.time()
         if _cache.data is not None and (current_time - _cache.mtime_last_checked) < 2.0:
             return _cache.data
+        stat_id = _config_stat_id(config_file_path)
         try:
             current_mtime = os.path.getmtime(config_file_path)
         except OSError:
             current_mtime = 0
 
         _cache.mtime_last_checked = current_time
+
+        if stat_id is not None and stat_id == _cache.unreadable:
+            return _cache.data if isinstance(_cache.data, dict) else {}
 
         if _cache.data is not None and current_mtime == _cache.mtime and current_mtime != 0:
             return _cache.data
@@ -1142,8 +1196,10 @@ def _get_validated_config_dict() -> dict[str, Any]:
             _cache.data = out
             _cache.mtime = current_mtime
             _cache.error_logged = None
+            _cache.unreadable = None
             return out
-        except ConfigError:
+        except (ConfigError, OSError):
+            _remember_config_read_failure(config_file_path, stat_id)
             # What was wrong: Read errors on cold cache logged an exception on
             # every single read, and OSError discarded any good cached snapshot.
             # How it happened: _cache.data is None on a cold cache, bypassing the
@@ -1151,34 +1207,15 @@ def _get_validated_config_dict() -> dict[str, Any]:
             # Why this change fixes it: Failures are logged at most once per
             # (path, mtime, size) until changed or cleared, and OSError returns
             # the last good cached dict if present, matching ConfigError.
-            try:
-                err_id: tuple[str, float, int] | tuple[str, None, None] = (
-                    config_file_path,
-                    os.path.getmtime(config_file_path),
-                    os.path.getsize(config_file_path),
-                )
-            except OSError:
-                err_id = (config_file_path, None, None)
-            if _cache.error_logged != err_id:
-                log.exception("Config error reading %s", config_file_path)
-                _cache.error_logged = err_id
+            # What was wrong (unreadable pin): A cold failed load left data is None,
+            # so every get_config re-read, scanned .bak*, ran json_repair, and
+            # log.warning'd; only log.exception was tied to error_logged.
+            # How it happened: The 2-second fast path requires data is not None.
+            # Why this change fixes it: This id skips that work until st_mtime_ns or
+            # size changes, and data stays None so the session is not cached as an
+            # empty install.
             # Keep the last good snapshot. Caching {} made the session look
             # like a fresh install (empty API keys) until the file was fixed.
-            if isinstance(_cache.data, dict):
-                return _cache.data
-            return {}
-        except OSError:
-            try:
-                err_id = (
-                    config_file_path,
-                    os.path.getmtime(config_file_path),
-                    os.path.getsize(config_file_path),
-                )
-            except OSError:
-                err_id = (config_file_path, None, None)
-            if _cache.error_logged != err_id:
-                log.exception("Error reading %s", config_file_path)
-                _cache.error_logged = err_id
             if isinstance(_cache.data, dict):
                 return _cache.data
             return {}
