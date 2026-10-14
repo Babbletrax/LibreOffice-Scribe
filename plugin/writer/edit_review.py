@@ -825,7 +825,7 @@ def _try_enter_undo_context(doc: Any, title: str) -> Any | None:
 
 
 def close_surgical_context(undo_mgr: Any, session: EditReviewSession, changes_before: int,
-                           applied_ok: bool, undo_title: str) -> None:
+                           applied_ok: bool, undo_title: str) -> bool:
     """Close the surgical undo context -- pairing the earlier enterUndoContext exactly once -- and,
     on failure, roll the partial batch back."""
     left = False
@@ -836,7 +836,7 @@ def close_surgical_context(undo_mgr: Any, session: EditReviewSession, changes_be
         log.warning("edit_review: leaveUndoContext failed; the undo stack may be inconsistent", exc_info=True)
 
     if applied_ok:
-        return  # success: edits stand; a failed leave was already surfaced above
+        return True  # success: edits stand; a failed leave was already surfaced above
 
     undone = False
     if left:
@@ -857,9 +857,11 @@ def close_surgical_context(undo_mgr: Any, session: EditReviewSession, changes_be
             session.discard_changes_since(changes_before)
         except Exception:
             log.debug("edit_review: discarding partial surgical change records failed", exc_info=True)
+        return True
     else:
         log.warning("edit_review: surgical rollback could not undo a partial batch; keeping %d change "
                     "record(s) so the partial edit stays reviewable", kept)
+        return False
 
 
 def _apply_in_undo_context(doc: Any, session: EditReviewSession, run: Callable[[bool], Any]) -> None:
@@ -1021,6 +1023,7 @@ def record_preserve_replace(session: EditReviewSession, doc: Any, found: Any, ne
     for se in result.sub_edits:
         sub = _select(se)
         if sub is None or sub.getString() != se.old_text:
+            # split_change offsets are Python code points. goRight counts UNO characters (UTF-16 code units). A mismatch falls back to a whole-block replace. Do not convert the offsets.
             log.debug("edit_review: surgical pre-flight offset mismatch; falling back to whole-block")
             _whole()
             return

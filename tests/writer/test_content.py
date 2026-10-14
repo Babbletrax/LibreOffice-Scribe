@@ -625,3 +625,104 @@ def test_shape_edit_leave_undo_context_failure_logged():
     assert res["replaced_count"] == 1
     mock_log_exc.assert_called_once_with("apply_document_content: shape edit leaveUndoContext failed")
 
+
+def test_content_list_item_must_be_string():
+    from plugin.writer.content import ApplyDocumentContent
+
+    ctx = _edit_ctx()
+    with patch("plugin.writer.format.insert_content_at_position") as mock_insert:
+        res = ApplyDocumentContent().execute(ctx, content=[None], target="end")
+    assert res["status"] == "error"
+    assert "content list items must be strings." in res["message"]
+    mock_insert.assert_not_called()
+
+
+def test_content_none_rejected():
+    from plugin.writer.content import ApplyDocumentContent
+
+    ctx = _edit_ctx()
+    res = ApplyDocumentContent().execute(ctx, content=None, target="end")
+    assert res["status"] == "error"
+    assert "content must be a string or a list of strings." in res["message"]
+
+
+@pytest.mark.parametrize("target", ["end", "beginning", "selection"])
+@pytest.mark.parametrize("content", ["", "   ", "\n"])
+def test_empty_insert_at_end_beginning_selection(target, content):
+    from plugin.writer.content import ApplyDocumentContent
+
+    ctx = _edit_ctx()
+    with patch("plugin.writer.format.insert_content_at_position") as mock_insert:
+        res = ApplyDocumentContent().execute(ctx, content=content, target=target)
+    assert res["status"] == "error"
+    assert "content is empty; nothing was inserted." in res["message"]
+    mock_insert.assert_not_called()
+
+
+def test_empty_full_document_is_not_the_insert_error():
+    from plugin.writer.content import ApplyDocumentContent
+
+    ctx = _edit_ctx()
+    with patch("plugin.writer.format.replace_full_document") as mock_replace:
+        res = ApplyDocumentContent().execute(ctx, content="", target="full_document")
+    assert res["status"] == "ok"
+    assert "content is empty; nothing was inserted." not in (res.get("message") or "")
+    mock_replace.assert_called_once()
+
+
+def test_worker_cleanup_timeout_does_not_mask_the_edit():
+    from plugin.writer.content import ApplyDocumentContent
+
+    ctx = _edit_ctx()
+    fake_worker = MagicMock()
+    session_mock = MagicMock()
+
+    def fake_execute_edit(_ctx, session_sink=None, **kwargs):
+        if session_sink is not None:
+            session_sink.append(session_mock)
+        return {"status": "ok", "message": "Inserted content at end."}, None
+
+    call_count = [0]
+
+    def fake_execute_on_main(fn, *args, **kwargs):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return fn()
+        raise TimeoutError("cleanup timed out")
+
+    with patch("plugin.writer.content.threading.current_thread", return_value=fake_worker), \
+         patch("plugin.writer.content.get_agent_edit_review_mode", return_value="off"), \
+         patch.object(ApplyDocumentContent, "_execute_edit", side_effect=fake_execute_edit), \
+         patch("plugin.framework.queue_executor.execute_on_main_thread", side_effect=fake_execute_on_main):
+        res = ApplyDocumentContent().execute(ctx, content="test", target="end")
+
+    assert res["status"] == "ok"
+    assert res["message"].startswith("Inserted content at end.")
+
+
+def test_outline_undo_says_when_rollback_fails():
+    from plugin.writer.content import ApplyDocumentContent
+
+    doc = MagicMock()
+    doc.getUndoManager.return_value.isLocked.return_value = False
+    session = MagicMock()
+    session.changes = []
+
+    def failing_run():
+        raise RuntimeError("boom")
+
+    with patch("plugin.writer.content.close_surgical_context", return_value=False):
+        _, err = ApplyDocumentContent()._outline_undo(doc, session, failing_run)
+    assert err is not None
+    assert err["code"] == "HYPERLINK_UPDATE_FAILED"
+    assert "could not be rolled back" in err["message"]
+    assert "boom" in err["message"]
+
+    with patch("plugin.writer.content.close_surgical_context", return_value=True):
+        _, err2 = ApplyDocumentContent()._outline_undo(doc, session, failing_run)
+    assert err2 is not None
+    assert err2["code"] == "HYPERLINK_UPDATE_FAILED"
+    assert "was rolled back" in err2["message"]
+    assert "could not be rolled back" not in err2["message"]
+
+

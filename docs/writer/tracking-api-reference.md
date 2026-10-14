@@ -125,6 +125,8 @@ cursor.gotoRange(redline.getPropertyValue("RedlineEnd"), True)
 
 Note that `compareRegionStarts` throws `IllegalArgumentException` across `XText`s (a table cell, footnote, header, or frame). The tool skips those redlines during overlap checking. Same-text comparison errors still refuse.
 
+Before `select`, the tool saves `controller.getSelection()`. After the dispatch and the identity-key check, a `finally` restores that selection, including when the tool returns an error. If the saved selection is missing, nothing is restored. A failure to read it is logged at debug and a failure to restore it is logged with `log.exception`; neither changes the tool result. If `select` of the change itself throws, the previous selection is not restored.
+
 ### What the shipped tool returns
 
 `track_changes_list` reports, per change, the author and type plus the change **text** (for a deletion, the removed text via `RedlineText`) and its **location** (body, table cell, header/footer, and so on), along with the document's current review mode. That is enough for a model to decide what to accept or reject without a second lookup. After a single accept or reject the tool tells the caller to run `track_changes_list` again because indexes shift. `track_changes_show` takes the Writer `RedlineDisplayType` path only when the document has `getRedlines`. Calc gets the stub.

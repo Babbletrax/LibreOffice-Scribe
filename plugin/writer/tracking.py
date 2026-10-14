@@ -45,6 +45,7 @@ def _enum_has_more(enum: Any) -> bool:
     try:
         return enum.hasMoreElements() is True
     except Exception:
+        log.debug("redline enumeration hasMoreElements failed", exc_info=True)
         return False
 
 
@@ -278,11 +279,11 @@ class TrackChangesList(WriterAgentSpecialTracking, ToolCalcSpecialTracking):  # 
 
             return get_agent_edit_review_mode(uno_ctx)
         except Exception:
+            log.exception("track_changes_list: could not read agent review mode")
             return None
 
     def execute(self, ctx: ToolContext, **kwargs: Any) -> dict[str, Any]:
         doc = ctx.doc
-        recording: bool | None = False
         try:
             # What was wrong: failed RecordChanges read was reported as recording: False.
             # How it happened: recording initialized to False and exception swallowed with bare pass.
@@ -520,67 +521,83 @@ class ManageTrackedChanges(WriterAgentSpecialTracking, ToolCalcSpecialTracking):
                         end = end_val
                         cur.gotoRange(end, True)
                 except Exception:
-                    pass  # collapsed span (e.g. a deletion) — selecting the start point suffices
+                    # collapsed span (e.g. a deletion) — selecting the start point suffices
+                    log.debug("manage_tracked_changes: RedlineEnd unreadable; selecting the start point", exc_info=True)
 
                 refusal = _overlap_refusal(index, objs, start, end)
                 if refusal is not None:
                     return self._tool_error(refusal)
 
-                ctx.doc.getCurrentController().select(cur)
+                controller = ctx.doc.getCurrentController()
+                previous = None
+                try:
+                    previous = controller.getSelection()
+                except Exception:
+                    log.debug("manage_tracked_changes: could not read the view selection", exc_info=True)
+                    previous = None
+
+                controller.select(cur)
             except Exception as e:
                 return self._tool_error(f"Failed to select tracked change for processing: {e}")
 
-            cmd = ".uno:AcceptTrackedChange" if is_accept else ".uno:RejectTrackedChange"
-            _dispatch(ctx, cmd)
+            try:
+                cmd = ".uno:AcceptTrackedChange" if is_accept else ".uno:RejectTrackedChange"
+                _dispatch(ctx, cmd)
 
-            objs2, total2 = _enumerate_redlines(redlines)
-            if len(objs2) != total2:
-                undo_ok = _undo_resolve(ctx, "manage_tracked_changes: undo of a bad resolve failed")
-                msg = (
-                    "Couldn't re-read tracked changes after the resolve, so it was undone."
-                    if undo_ok
-                    else "Couldn't re-read tracked changes after the resolve. Undo failed; the document was still changed."
-                )
-                return self._tool_error(msg)
+                objs2, total2 = _enumerate_redlines(redlines)
+                if len(objs2) != total2:
+                    undo_ok = _undo_resolve(ctx, "manage_tracked_changes: undo of a bad resolve failed")
+                    msg = (
+                        "Couldn't re-read tracked changes after the resolve, so it was undone."
+                        if undo_ok
+                        else "Couldn't re-read tracked changes after the resolve. Undo failed; the document was still changed."
+                    )
+                    return self._tool_error(msg)
 
-            after_keys = _identity_keys(objs2)
-            if after_keys is None:
-                undo_ok = _undo_resolve(ctx, "manage_tracked_changes: undo of a bad resolve failed")
-                msg = (
-                    "Couldn't re-read tracked changes after the resolve, so it was undone."
-                    if undo_ok
-                    else "Couldn't re-read tracked changes after the resolve. Undo failed; the document was still changed."
-                )
-                return self._tool_error(msg)
+                after_keys = _identity_keys(objs2)
+                if after_keys is None:
+                    undo_ok = _undo_resolve(ctx, "manage_tracked_changes: undo of a bad resolve failed")
+                    msg = (
+                        "Couldn't re-read tracked changes after the resolve, so it was undone."
+                        if undo_ok
+                        else "Couldn't re-read tracked changes after the resolve. Undo failed; the document was still changed."
+                    )
+                    return self._tool_error(msg)
 
-            outcome = _resolve_outcome(index, before_keys, after_keys)
-            if outcome == "silent":
-                return self._tool_error("Failed to resolve tracked change: operation silently failed.")
+                outcome = _resolve_outcome(index, before_keys, after_keys)
+                if outcome == "silent":
+                    return self._tool_error("Failed to resolve tracked change: operation silently failed.")
 
-            if outcome == "agent":
-                undo_ok = _undo_resolve(ctx, "manage_tracked_changes: undo of a forbidden agent resolution failed")
-                msg = "Agent edit was resolved, which is forbidden."
-                if not undo_ok:
-                    msg += " Undo failed; the change is still resolved."
-                return self._tool_error(msg)
+                if outcome == "agent":
+                    undo_ok = _undo_resolve(ctx, "manage_tracked_changes: undo of a forbidden agent resolution failed")
+                    msg = "Agent edit was resolved, which is forbidden."
+                    if not undo_ok:
+                        msg += " Undo failed; the change is still resolved."
+                    return self._tool_error(msg)
 
-            if outcome == "wrong":
-                undo_ok = _undo_resolve(ctx, "manage_tracked_changes: undo of a bad resolve failed")
-                msg = (
-                    "Resolved a different tracked change than index %d. The resolve was undone." % index
-                    if undo_ok
-                    else "Resolved a different tracked change than index %d. Undo failed; the document was still changed." % index
-                )
-                return self._tool_error(msg)
+                if outcome == "wrong":
+                    undo_ok = _undo_resolve(ctx, "manage_tracked_changes: undo of a bad resolve failed")
+                    msg = (
+                        "Resolved a different tracked change than index %d. The resolve was undone." % index
+                        if undo_ok
+                        else "Resolved a different tracked change than index %d. Undo failed; the document was still changed." % index
+                    )
+                    return self._tool_error(msg)
 
-            action_str = "Accepted" if is_accept else "Rejected"
-            return {
-                "status": "ok",
-                "message": (
-                    "%s tracked change at index %d. Call track_changes_list again before another accept or reject; indexes shift after each resolve."
-                    % (action_str, index)
-                ),
-            }
+                action_str = "Accepted" if is_accept else "Rejected"
+                return {
+                    "status": "ok",
+                    "message": (
+                        "%s tracked change at index %d. Call track_changes_list again before another accept or reject; indexes shift after each resolve."
+                        % (action_str, index)
+                    ),
+                }
+            finally:
+                if previous is not None:
+                    try:
+                        controller.select(previous)
+                    except Exception:
+                        log.exception("manage_tracked_changes: could not restore the view selection")
 
         except Exception as e:
             return self._tool_error(f"Failed to process change {index}: {e}")

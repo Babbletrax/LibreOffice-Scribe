@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, call
 
 
 from plugin.calc.base import ToolCalcSpecialBase
@@ -393,7 +393,10 @@ def test_manage_tracked_changes_accept():
     assert res["status"] == "ok"
     assert "track_changes_list" in res["message"]
     assert "0" in res["message"]
-    ctx.doc.getCurrentController().select.assert_called_with(span_cursor)
+    assert ctx.doc.getCurrentController().select.call_args_list == [
+        call(span_cursor),
+        call(ctx.doc.getCurrentController().getSelection.return_value),
+    ]
     dispatcher.executeDispatch.assert_called_with(frame, ".uno:AcceptTrackedChange", "", 0, ())
 
 
@@ -417,7 +420,10 @@ def test_manage_tracked_changes_reject():
     assert res["status"] == "ok"
     assert "track_changes_list" in res["message"]
     assert "0" in res["message"]
-    ctx.doc.getCurrentController().select.assert_called_with(span_cursor)
+    assert ctx.doc.getCurrentController().select.call_args_list == [
+        call(span_cursor),
+        call(ctx.doc.getCurrentController().getSelection.return_value),
+    ]
     dispatcher.executeDispatch.assert_called_with(frame, ".uno:RejectTrackedChange", "", 0, ())
 
 
