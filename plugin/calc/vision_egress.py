@@ -12,7 +12,7 @@ from plugin.calc.address_utils import index_to_column
 from plugin.calc.bridge import CalcBridge
 from plugin.calc.manipulator import CellManipulator
 from plugin.calc.rich_html import insert_cell_html_rich
-from plugin.framework.errors import DocumentDisposedError, ToolExecutionError, is_disposed_exception
+from plugin.framework.errors import DocumentDisposedError, ToolExecutionError, is_real_disposal
 from plugin.framework.i18n import _
 from plugin.writer.images.image_tools import _get_selected_graphic_object
 
@@ -160,7 +160,10 @@ def calc_output_anchor_from_graphic(doc: Any, *, image_name: str | None = None) 
         if hasattr(obj, "getPropertyValue"):
             anchor = obj.getPropertyValue("Anchor")
     except Exception as exc:
-        if is_disposed_exception(exc):
+        # A bare RuntimeException used to be wrapped as DocumentDisposedError,
+        # and is_tool_document_disposed then reported a closed document without
+        # probing; is_real_disposal leaves that exception on the existing NO_OUTPUT_ANCHOR path.
+        if is_real_disposal(exc):
             raise DocumentDisposedError("Document disposed", object_type="calc") from exc
         anchor = None
 
@@ -172,7 +175,7 @@ def calc_output_anchor_from_graphic(doc: Any, *, image_name: str | None = None) 
         col = int(addr.Column)
         row = int(addr.Row)
     except Exception as exc:
-        if is_disposed_exception(exc):
+        if is_real_disposal(exc):
             raise DocumentDisposedError("Document disposed", object_type="calc") from exc
         raise ToolExecutionError(_("Anchor the image to a cell, select it, then Run again."), code="NO_OUTPUT_ANCHOR") from None
 

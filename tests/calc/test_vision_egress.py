@@ -96,3 +96,30 @@ def test_calc_anchor_ordinary_address_error_stays_no_output_anchor():
         with pytest.raises(ToolExecutionError) as exc:
             calc_output_anchor_from_graphic(MagicMock())
     assert exc.value.code == "NO_OUTPUT_ANCHOR"
+
+
+def test_calc_anchor_runtime_property_is_not_document_disposed():
+    class RuntimeException(Exception):
+        pass
+
+    shape = MagicMock()
+    shape.getPropertyValue.side_effect = RuntimeException("fail")
+    with patch("plugin.calc.vision_egress._get_selected_graphic_object", return_value=(shape, "calc")):
+        with pytest.raises(ToolExecutionError) as exc:
+            calc_output_anchor_from_graphic(MagicMock())
+    assert exc.value.code == "NO_OUTPUT_ANCHOR"
+
+
+def test_calc_anchor_runtime_cell_address_is_not_document_disposed():
+    class RuntimeException(Exception):
+        pass
+
+    shape = MagicMock()
+    anchor = MagicMock()
+    anchor.getCellAddress.side_effect = RuntimeException("fail")
+    shape.getPropertyValue.return_value = anchor
+    with patch("plugin.calc.vision_egress._get_selected_graphic_object", return_value=(shape, "calc")):
+        with pytest.raises(ToolExecutionError) as exc:
+            calc_output_anchor_from_graphic(MagicMock())
+    assert exc.value.code == "NO_OUTPUT_ANCHOR"
+

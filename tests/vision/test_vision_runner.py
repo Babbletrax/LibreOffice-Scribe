@@ -326,6 +326,20 @@ def test_resolve_locale_reraises_disposed_selection():
         _resolve_locale_language(MagicMock(), doc, None)
 
 
+def test_resolve_locale_runtime_exception_is_not_document_disposed():
+    class RuntimeException(Exception):
+        pass
+
+    doc = MagicMock()
+    selection = MagicMock()
+    selection.getCount.return_value = 0
+    selection.getPropertyValue.side_effect = RuntimeException("unexpected error")
+    doc.CurrentController.Selection = selection
+    with patch("plugin.framework.i18n.get_lo_locale", return_value="en_US"):
+        res = _resolve_locale_language(MagicMock(), doc, None)
+    assert res == "en"
+
+
 def test_run_trusted_vision_rejects_oversized_image_before_rpc():
     with patch("plugin.vision.vision_runner.VISION_IMAGE_MAX_BYTES", 4), patch(
         "plugin.vision.vision_runner.resolve_vision_image_bytes", return_value=b"12345"

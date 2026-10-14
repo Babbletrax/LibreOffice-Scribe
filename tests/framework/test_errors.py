@@ -820,3 +820,125 @@ def test_handle_errors_uses_class_code_and_reraises_writer_agent_exception():
         _fail_perm()
     assert exc_info2.value.code == "PERMISSION_DENIED"
 
+
+def test_reraise_if_disposed_leaves_runtime_exception():
+    from plugin.framework.errors import DocumentDisposedError, reraise_if_disposed
+
+    class RuntimeException(Exception):
+        pass
+
+    class DisposedException(Exception):
+        pass
+
+    # RuntimeException and ValueError do not raise
+    reraise_if_disposed(RuntimeException("something failed"), object_type="sheet")
+    reraise_if_disposed(ValueError("bad value"), object_type="sheet")
+
+    disp = DisposedException("dead")
+    with pytest.raises(DocumentDisposedError) as exc_info:
+        reraise_if_disposed(disp, object_type="sheet")
+    assert exc_info.value.object_type == "sheet"
+    assert exc_info.value.__cause__ is disp
+
+
+def test_format_error_message_urlerror_ssl_is_tls():
+    import ssl
+    import urllib.error
+    from plugin.framework.errors import format_error_message
+
+    cert_err = ssl.SSLCertVerificationError("self-signed certificate")
+    url_err = urllib.error.URLError(cert_err)
+    msg = format_error_message(url_err)
+    assert "TLS/SSL Error" in msg
+    assert "self-signed certificate" in msg
+    assert "Connection Error" not in msg
+
+    direct_ssl = ssl.SSLError("cert error")
+    msg_direct = format_error_message(direct_ssl)
+    assert "TLS/SSL Error" in msg_direct
+    assert "cert error" in msg_direct
+
+
+def test_format_error_message_uses_uno_message_attribute():
+    from plugin.framework.errors import format_error_message
+
+    class CustomUnoException(Exception):
+        def __init__(self, message: str):
+            super().__init__("")
+            self.Message = message
+
+        def __str__(self) -> str:
+            return ""
+
+    exc = CustomUnoException("sheet is protected")
+    msg = format_error_message(exc)
+    assert "sheet is protected" in msg
+
+
+def test_handle_errors_and_safe_call_use_uno_message():
+    from plugin.framework.errors import ToolExecutionError, UnoObjectError, handle_errors, safe_call
+
+    class CustomUnoException(Exception):
+        def __init__(self, message: str):
+            super().__init__("")
+            self.Message = message
+
+        def __str__(self) -> str:
+            return ""
+
+    class RuntimeException(Exception):
+        def __str__(self) -> str:
+            return ""
+
+    exc = CustomUnoException("sheet is protected")
+
+    @handle_errors("insert")
+    def _fail_insert():
+        raise exc
+
+    with pytest.raises(ToolExecutionError) as exc_info:
+        _fail_insert()
+    assert "sheet is protected" in str(exc_info.value)
+    assert exc_info.value.details["error"] == "sheet is protected"
+
+    def _raise_exc():
+        raise exc
+
+    with pytest.raises(UnoObjectError) as exc_info2:
+        safe_call(_raise_exc, "insert")
+    assert "sheet is protected" in str(exc_info2.value)
+
+    runtime_exc = RuntimeException()
+
+    @handle_errors("insert")
+    def _fail_runtime():
+        raise runtime_exc
+
+    with pytest.raises(ToolExecutionError):
+        _fail_runtime()
+
+    def _raise_runtime():
+        raise runtime_exc
+
+    with pytest.raises(UnoObjectError):
+        safe_call(_raise_runtime, "insert")
+
+
+def test_safe_uno_call_disposal_details_omit_arguments():
+    from plugin.framework.errors import DocumentDisposedError, safe_uno_call
+
+    class DisposedException(Exception):
+        pass
+
+    @safe_uno_call()
+    def probe_func(huge_text: str):
+        raise DisposedException("gone")
+
+    big_arg = "x" * 1000
+    with pytest.raises(DocumentDisposedError) as exc_info:
+        probe_func(big_arg)
+    assert exc_info.value.details is not None
+    assert "args" not in exc_info.value.details
+    assert "kwargs" not in exc_info.value.details
+    assert "gone" in exc_info.value.details["original_error"]
+
