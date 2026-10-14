@@ -313,17 +313,18 @@ def _run_cmd(
     """Run *cmd* and return when it exits or *timeout* elapses."""
     if stop_checker is not None and stop_checker():
         raise SttStopped()
+    scrubbed_env = scrub_subprocess_env(dict(os.environ))
     run_kwargs: dict[str, Any] = {
         "stdout": subprocess.PIPE,
         "stderr": subprocess.PIPE,
         "text": True,
         "stdin": subprocess.DEVNULL,
-        "env": scrub_subprocess_env(dict(os.environ)),
+        "env": scrubbed_env,
     }
     if sys.platform == "win32":
         run_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
     try:
-        proc = subprocess.Popen(wrap_command_for_sandbox(cmd), **run_kwargs)
+        proc = subprocess.Popen(wrap_command_for_sandbox(cmd, env=scrubbed_env), **run_kwargs)
     except OSError as exc:
         log.warning("STT command failed (%s): %s", cmd[0], exc)
         return None

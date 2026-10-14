@@ -487,13 +487,14 @@ def _run_json_probe(
 ) -> tuple[dict[str, Any], str | None]:
     """Run a one-shot ``python -c`` JSON probe outside the warm worker."""
     limit = max(1.0, timeout) if floor_timeout else timeout
+    scrubbed_env = scrub_subprocess_env(dict(os.environ))
     try:
         proc = subprocess.run(
-            wrap_command_for_sandbox([python_exe, "-c", script]),
+            wrap_command_for_sandbox([python_exe, "-c", script], env=scrubbed_env),
             capture_output=True,
             text=True,
             timeout=limit,
-            env=scrub_subprocess_env(dict(os.environ)),
+            env=scrubbed_env,
             **get_subprocess_creationflags(),
         )
     except subprocess.TimeoutExpired:

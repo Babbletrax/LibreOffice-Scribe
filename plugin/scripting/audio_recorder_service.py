@@ -88,8 +88,9 @@ def spawn_recording_process(exe: str, output_path: str, *, silence_config: Silen
     cmd = [exe, _AUDIO_RECORD_MAIN, "--output", output_path]
     if silence_config is not None:
         cmd.extend(_silence_cli_args(silence_config))
-    cmd = wrap_command_for_sandbox(cmd)
-    proc = subprocess.Popen(cmd, **_popen_kwargs())
+    popen_kw = _popen_kwargs()
+    cmd = wrap_command_for_sandbox(cmd, env=popen_kw["env"])
+    proc = subprocess.Popen(cmd, **popen_kw)
     drain = start_stderr_drain(proc.stderr, name=f"audio-rec-stderr-{proc.pid}")
     if drain is not None:
         _recording_stderr_drains[id(proc)] = drain

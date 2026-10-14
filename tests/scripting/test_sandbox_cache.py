@@ -121,3 +121,38 @@ def test_validate_sandbox_ast_writeragent_star_does_not_allow_secrets() -> None:
     ) is None
     assert validate_sandbox_ast(ast.parse("import duckdb"), allowed) is None
     assert validate_sandbox_ast(ast.parse("import duckdb.functional"), allowed) is None
+
+
+def test_recursion_error_is_parse_error() -> None:
+    imports = list(BASE_BUILTIN_MODULES)
+    with patch("ast.parse", side_effect=RecursionError("too deep")) as mock_parse:
+        e1 = get_hot_entry("1+1", imports)
+        assert e1.module is None
+        assert e1.error is not None
+        assert "deeply nested" in e1.error
+
+        e2 = get_hot_entry("1+1", imports)
+        assert mock_parse.call_count == 1
+        assert e2.error == e1.error
+
+
+def test_long_source_is_not_cached() -> None:
+    imports = list(BASE_BUILTIN_MODULES)
+    code = "result = 1\n" + " " * 70000
+    with patch("ast.parse", wraps=ast.parse) as mock_parse:
+        e1 = get_hot_entry(code, imports)
+        assert e1.error is None
+        key = hot_cache._cache_key(code, imports)
+        assert key not in hot_cache._cache
+
+        e2 = get_hot_entry(code, imports)
+        assert mock_parse.call_count == 2
+        assert e2.error is None
+
+
+def test_match_forbidden_when_present() -> None:
+    from plugin.scripting.sandbox_cache import _FORBIDDEN_NODE_TYPES, HotEntry
+
+    if hasattr(ast, "Match"):
+        assert ast.Match in _FORBIDDEN_NODE_TYPES
+    assert getattr(HotEntry, "__dataclass_params__").slots is False
