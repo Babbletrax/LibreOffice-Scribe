@@ -719,6 +719,28 @@ def test_resolve_context_window_openrouter_nitro_uses_cached_base():
         _clear_v1_context_cache_keys("58922")
 
 
+def test_resolve_context_window_uses_client_api_key():
+    from unittest.mock import patch
+
+    from plugin.framework.client import model_fetcher as mf
+
+    endpoint_pasted = "http://chat.openwebui.example/api"
+    endpoint_stripped = "http://chat.openwebui.example"
+    payload = {"data": [{"id": "m-owu", "context_length": 8192}]}
+    try:
+        with patch("plugin.framework.client.requests.sync_request", return_value=payload):
+            mf.fetch_available_models(endpoint_pasted, api_key_override="sk-owu")
+        client = DummyClient(
+            provider="custom",
+            endpoint=endpoint_stripped,
+            model="m-owu",
+        )
+        client.config["api_key"] = "sk-owu"
+        assert C.resolve_context_window(client) == 8192
+    finally:
+        _clear_v1_context_cache_keys("openwebui.example")
+
+
 def test_ollama_ignores_v1_context_cache(monkeypatch):
     from unittest.mock import patch
 

@@ -59,9 +59,9 @@ class ProviderConfig:
     id: str
     name: str
     # Header style controls how the API key is attached:
-    # - "bearer"   -> Authorization: Bearer <key>
-    # - "x-api-key" -> x-api-key: <key>
-    # - "none"     -> no auth header (for fully anonymous/local endpoints)
+    # - "bearer"   -> Authorization: Bearer <key> (key required)
+    # - "x-api-key" -> x-api-key: <key> (key required)
+    # - "none"     -> key not required; empty key sends no auth header; a non-empty key still becomes Authorization: Bearer in build_auth_headers (Ollama, LM Studio, and any other style that did not set Authorization or x-api-key)
     header_style: str = "bearer"
     # Optional static headers that should always be sent for this provider.
     # Host matching lives in provider_detection. This table is auth behavior only.

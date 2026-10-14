@@ -14,7 +14,11 @@ serialize identical fetches. Iteration over shared caches snapshots the
 dict first (e.g. ``list(...)``); a single-key write still needs no lock.
 When a UNO ``ctx`` is passed, the cache key includes a hash of the API
 key so two keys on the same host do not share a list and a dump of the
-dict does not contain the key.
+dict does not contain the key. OpenWebUI catalog GETs use the same
+hostname-or-checkbox rule as ``get_api_config`` (``/api/models``, and a pasted
+``/api`` is stripped once on the HTTP base). The hash is still the saved key for
+the URL normalized **without** that strip, unless the caller passed
+``api_key_override``.
 
 Settings treats a successful OpenRouter or Together catalog as once per
 process. ``settings_catalog_is_warm`` is that check. **Test Connection**
@@ -163,8 +167,6 @@ def _stated_input_modalities(row: dict[str, Any]) -> list[Any] | None:
     chosen = top if top is not None else nested
     if isinstance(chosen, list):
         return chosen
-    if isinstance(top, list):
-        return top
     return None
 
 
@@ -251,38 +253,58 @@ def _store_model_fetch_caches(cache_key: str, models: list[str] | None, image_mo
     _model_context_cache[cache_key] = dict(context_tokens) if context_tokens else {}
 
 
-def _model_fetch_cache_key(url: str, base: str, api_key_override: str | None = None) -> str:
-    if api_key_override is not None:
-        key = str(api_key_override).strip()
-    else:
-        key = str(get_api_key_for_endpoint(base) or "")
-    # Hash, not the raw key: these dicts live for the process and get logged
-    # in diagnostics. Two keys on one URL must still miss each other.
-    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
-    return f"{url}\x1f{digest}"
+def _resolved_openwebui(endpoint: str) -> bool:
+    # What was wrong: Catalog suffix followed only the checkbox, while chat's
+    # get_api_config also treats an openwebui / open-webui host as Open WebUI,
+    # and a stored .../api path plus the checkbox produced /api/api/...
+    # How it happened: Fetchers called normalize_endpoint_url with the flag false,
+    # then _api_suffix read get_config_bool_safe only.
+    # Why this change: This boolean is the one LlmClient._api_path already uses, via is_openwebui_endpoint.
+    return is_openwebui_endpoint(endpoint, explicit_is_openwebui=get_config_bool_safe("is_openwebui"))
 
 
-def _api_suffix(base: str) -> str:
-    return get_api_version_suffix(base, is_openwebui=get_config_bool_safe("is_openwebui"))
+def _catalog_http_base(endpoint: str) -> str:
+    if not endpoint or not isinstance(endpoint, str):
+        return ""
+    return normalize_endpoint_url(endpoint, is_openwebui=_resolved_openwebui(endpoint))
 
 
-def _models_list_url(base: str) -> str:
+def _key_slot_base(endpoint: str) -> str:
+    if not endpoint or not isinstance(endpoint, str):
+        return ""
+    return normalize_endpoint_url(endpoint, is_openwebui=False)
+
+
+def _models_list_url(endpoint: str) -> str:
     """Same URL ``fetch_available_models`` caches under."""
-    return f"{base}{_api_suffix(base)}/models"
+    http_base = _catalog_http_base(endpoint)
+    if not http_base or not endpoint_url_suitable_for_v1_models_fetch(http_base):
+        return ""
+    return f"{http_base}{get_api_version_suffix(http_base, is_openwebui=_resolved_openwebui(http_base))}/models"
 
 
-def _openrouter_image_models_url(base: str) -> str:
+def _openrouter_image_models_url(endpoint: str) -> str:
     """OpenRouter image catalog. Not the architecture slice of ``/v1/models``."""
-    return f"{base}{_api_suffix(base)}/images/models"
+    http_base = _catalog_http_base(endpoint)
+    if not http_base or not endpoint_url_suitable_for_v1_models_fetch(http_base):
+        return ""
+    return f"{http_base}{get_api_version_suffix(http_base, is_openwebui=_resolved_openwebui(http_base))}/images/models"
 
 
-def _openrouter_modality_models_url(base: str, modality: str) -> str:
+def _openrouter_modality_models_url(endpoint: str, modality: str) -> str:
+    http_base = _catalog_http_base(endpoint)
+    if not http_base or not endpoint_url_suitable_for_v1_models_fetch(http_base):
+        return ""
+    prefix = f"{http_base}{get_api_version_suffix(http_base, is_openwebui=_resolved_openwebui(http_base))}/models"
     query = urllib.parse.urlencode({"output_modalities": modality})
-    return f"{_models_list_url(base)}?{query}"
+    return f"{prefix}?{query}"
 
 
-def _together_voices_url(base: str, model_id: str = "") -> str:
-    root = f"{base}{_api_suffix(base)}/voices"
+def _together_voices_url(endpoint: str, model_id: str = "") -> str:
+    http_base = _catalog_http_base(endpoint)
+    if not http_base or not endpoint_url_suitable_for_v1_models_fetch(http_base):
+        return ""
+    root = f"{http_base}{get_api_version_suffix(http_base, is_openwebui=_resolved_openwebui(http_base))}/voices"
     requested = str(model_id or "").strip()
     if not requested:
         return root
@@ -290,12 +312,33 @@ def _together_voices_url(base: str, model_id: str = "") -> str:
 
 
 def _catalog_base(endpoint: str) -> str:
-    if not endpoint:
+    if not _models_list_url(endpoint):
         return ""
-    base = normalize_endpoint_url(endpoint)
-    if not base or not endpoint_url_suitable_for_v1_models_fetch(base):
-        return ""
-    return base
+    return _key_slot_base(endpoint)
+
+
+def _model_fetch_cache_key(url: str, base: str, api_key_override: str | None = None) -> str:
+    """Cache key for endpoint model list memoization.
+
+    Both the override and the saved key are stripped so they match the key
+    ``build_auth_headers`` sends.
+    """
+    if api_key_override is not None:
+        key = str(api_key_override).strip()
+    else:
+        key = str(get_api_key_for_endpoint(base) or "").strip()
+    # Hash, not the raw key: these dicts live for the process and get logged
+    # in diagnostics. Two keys on one URL must still miss each other.
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    return f"{url}\x1f{digest}"
+
+
+def _v1_models_request(endpoint: str, api_key_override: str | None = None) -> tuple[str, str, str] | None:
+    url = _models_list_url(endpoint)
+    if not url:
+        return None
+    key_slot = _key_slot_base(endpoint)
+    return key_slot, url, _model_fetch_cache_key(url, key_slot, api_key_override)
 
 
 def _cached_id_list(cache: dict[str, list[str] | None], key: str) -> list[str] | None:
@@ -374,24 +417,19 @@ def fetch_available_models(endpoint: str, api_key_override: str | None = None) -
     lifetime. Failed lookups are not cached, so the next Settings open retries.
     Settings skips the request when ``settings_catalog_is_warm`` is already true.
     """
-    if not endpoint:
+    built = _v1_models_request(endpoint, api_key_override)
+    if built is None:
         return None
-    base = normalize_endpoint_url(endpoint)
-    if not base:
-        return None
-    if not endpoint_url_suitable_for_v1_models_fetch(base):
-        return None
-    url = _models_list_url(base)
-    cache_key = _model_fetch_cache_key(url, base, api_key_override)
+    key_slot, url, cache_key = built
     if cache_key in _model_fetch_cache:
         found = _model_fetch_cache[cache_key]
         return list(found) if isinstance(found, list) else None
 
-    is_openwebui = is_openwebui_endpoint(base, explicit_is_openwebui=as_bool(get_config("is_openwebui")))
+    is_openwebui = _resolved_openwebui(endpoint)
     # Hostname equality, same rule as get_provider_from_endpoint. A path that
     # merely contains "openrouter.ai" is not this provider.
-    is_openrouter = is_openrouter_endpoint(base, explicit_is_openrouter=as_bool(get_config("is_openrouter")))
-    req_headers = _model_fetch_auth_headers(base, api_key_override, url, is_openwebui=is_openwebui, is_openrouter=is_openrouter, log_label="fetch_available_models")
+    is_openrouter = is_openrouter_endpoint(key_slot, explicit_is_openrouter=as_bool(get_config("is_openrouter")))
+    req_headers = _model_fetch_auth_headers(key_slot, api_key_override, url, is_openwebui=is_openwebui, is_openrouter=is_openrouter, log_label="fetch_available_models")
     if req_headers is None:
         return None
 
@@ -403,7 +441,7 @@ def fetch_available_models(endpoint: str, api_key_override: str | None = None) -
         if parsed is not None:
             models, image_models, vision_declared = parsed
             entries = _v1_models_entries_from_body(data) or []
-            provider = get_provider_from_endpoint(base)
+            provider = get_provider_from_endpoint(key_slot)
             # Ollama, LM Studio, and other non-Together hosts usually omit
             # architecture/type image ids, so a memo of only those ids is []
             # while keyword matching finds flux/sdxl/…. Settings reads the
@@ -414,9 +452,6 @@ def fetch_available_models(endpoint: str, api_key_override: str | None = None) -
             if provider not in ("together", "openrouter"):
                 image_models = _filter_fetched_models(models, "image")
             _store_model_fetch_caches(cache_key, models, image_models, vision_declared, _context_tokens_from_v1_entries(entries))
-            if provider == "zai":
-                preview = models[:5] if models else []
-                log.debug("fetch_available_models z.ai ok url=%s count=%s preview=%r", url, len(models), preview)
             return list(models)
         log.warning("fetch_available_models unexpected body structure for %s: %s", url, type(data).__name__)
     except NetworkError as e:
@@ -425,8 +460,6 @@ def fetch_available_models(endpoint: str, api_key_override: str | None = None) -
         log.warning("fetch_available_models network/parse error for %s: %s", url, e)
     except Exception:
         log.exception("fetch_available_models unexpected error for %s", url)
-    if get_provider_from_endpoint(base) == "zai":
-        log.debug("fetch_available_models z.ai failed url=%s", url)
     return None
 
 
@@ -439,25 +472,20 @@ def fetch_available_image_models(endpoint: str, api_key_override: str | None = N
     - ollama / lm studio / custom: keyword filter (flux, sdxl, …) stored with
       that same /v1/models memo. The catalog is not fetched again here.
     """
-    if not endpoint:
+    built = _v1_models_request(endpoint, api_key_override)
+    if built is None:
         return None
-    base = normalize_endpoint_url(endpoint)
-    if not base:
-        return None
-    if not endpoint_url_suitable_for_v1_models_fetch(base):
-        return None
-
-    provider = get_provider_from_endpoint(base)
-    is_owu = get_config_bool_safe("is_openwebui")
+    key_slot, _url, cache_key = built
+    provider = get_provider_from_endpoint(key_slot)
 
     if provider == "openrouter":
-        url = _openrouter_image_models_url(base)
-        cache_key = _model_fetch_cache_key(url, base, api_key_override)
-        if cache_key in _model_fetch_image_cache:
-            found = _model_fetch_image_cache[cache_key]
+        url = _openrouter_image_models_url(endpoint)
+        or_cache_key = _model_fetch_cache_key(url, key_slot, api_key_override)
+        if or_cache_key in _model_fetch_image_cache:
+            found = _model_fetch_image_cache[or_cache_key]
             return list(found) if isinstance(found, list) else None
 
-        req_headers = _model_fetch_auth_headers(base, api_key_override, url, is_openwebui=is_owu, is_openrouter=True, log_label="fetch_available_image_models openrouter")
+        req_headers = _model_fetch_auth_headers(key_slot, api_key_override, url, is_openwebui=_resolved_openwebui(endpoint), is_openrouter=True, log_label="fetch_available_image_models openrouter")
         if req_headers is None:
             return None
 
@@ -471,7 +499,7 @@ def fetch_available_image_models(endpoint: str, api_key_override: str | None = N
                 for m in entries:
                     if isinstance(m, dict) and m.get("id"):
                         image_models.append(str(m["id"]))
-                _model_fetch_image_cache[cache_key] = image_models
+                _model_fetch_image_cache[or_cache_key] = image_models
                 return list(image_models)
         except Exception as e:
             log.warning("fetch_available_image_models openrouter failed for %s: %s", url, e)
@@ -480,8 +508,6 @@ def fetch_available_image_models(endpoint: str, api_key_override: str | None = N
     all_models = fetch_available_models(endpoint, api_key_override=api_key_override)
     if all_models is None:
         return None
-    url = _models_list_url(base)
-    cache_key = _model_fetch_cache_key(url, base, api_key_override)
     stored = _model_fetch_image_cache.get(cache_key)
     # Together declares image models with type=image. A slug heuristic would
     # mis-classify (google/flash-image-2.5 has no "flux"; a chat FLUX row is not
@@ -552,19 +578,21 @@ def _fetch_openrouter_modality_models(endpoint: str, modality: str, cache: dict[
         return None
     if not endpoint:
         return None
-    base = normalize_endpoint_url(endpoint)
-    if not base or not endpoint_url_suitable_for_v1_models_fetch(base):
+    key_slot = _key_slot_base(endpoint)
+    if not key_slot or not endpoint_url_suitable_for_v1_models_fetch(key_slot):
         return None
-    if get_provider_from_endpoint(base) != "openrouter":
+    if get_provider_from_endpoint(key_slot) != "openrouter":
         return None
 
-    is_owu = get_config_bool_safe("is_openwebui")
-    url = _openrouter_modality_models_url(base, modality)
-    cache_key = _model_fetch_cache_key(url, base, api_key_override)
+    url = _openrouter_modality_models_url(endpoint, modality)
+    if not url:
+        return None
+    cache_key = _model_fetch_cache_key(url, key_slot, api_key_override)
     if cache_key in cache:
-        return cache[cache_key]
+        found = cache[cache_key]
+        return list(found) if isinstance(found, list) else found
 
-    req_headers = _model_fetch_auth_headers(base, api_key_override, url, is_openwebui=is_owu, is_openrouter=True, log_label=f"fetch openrouter {modality} models")
+    req_headers = _model_fetch_auth_headers(key_slot, api_key_override, url, is_openwebui=_resolved_openwebui(endpoint), is_openrouter=True, log_label=f"fetch openrouter {modality} models")
     if req_headers is None:
         return None
 
@@ -579,7 +607,7 @@ def _fetch_openrouter_modality_models(endpoint: str, modality: str, cache: dict[
                 for speech_id, speech_voices in voices.items():
                     remember_tts_supported_voices(speech_id, speech_voices)
             cache[cache_key] = model_ids
-            return model_ids
+            return list(model_ids)
     except Exception as e:
         log.warning("fetch openrouter %s models failed for %s: %s", modality, url, e)
     return None
@@ -600,11 +628,10 @@ def fetch_available_stt_models(endpoint: str, api_key_override: str | None = Non
 
 def cached_text_models(endpoint: str, api_key_override: str | None = None) -> list[str] | None:
     """Memoized ``/v1/models`` ids, or None. Does not HTTP."""
-    base = _catalog_base(endpoint)
-    if not base:
+    built = _v1_models_request(endpoint, api_key_override)
+    if built is None:
         return None
-    key = _model_fetch_cache_key(_models_list_url(base), base, api_key_override)
-    return _cached_id_list(_model_fetch_cache, key)
+    return _cached_id_list(_model_fetch_cache, built[2])
 
 
 def cached_image_models(endpoint: str, api_key_override: str | None = None) -> list[str] | None:
@@ -615,14 +642,16 @@ def cached_image_models(endpoint: str, api_key_override: str | None = None) -> l
     stored with that same response — the list ``fetch_available_image_models``
     returns. Settings reads this. It does not fetch the catalog again.
     """
-    base = _catalog_base(endpoint)
-    if not base:
+    built = _v1_models_request(endpoint, api_key_override)
+    if built is None:
         return None
-    if get_provider_from_endpoint(base) == "openrouter":
-        url = _openrouter_image_models_url(base)
-    else:
-        url = _models_list_url(base)
-    return _cached_id_list(_model_fetch_image_cache, _model_fetch_cache_key(url, base, api_key_override))
+    key_slot, _url, cache_key = built
+    if get_provider_from_endpoint(key_slot) == "openrouter":
+        url = _openrouter_image_models_url(endpoint)
+        if not url:
+            return None
+        return _cached_id_list(_model_fetch_image_cache, _model_fetch_cache_key(url, key_slot, api_key_override))
+    return _cached_id_list(_model_fetch_image_cache, cache_key)
 
 
 def cached_tts_models(endpoint: str, api_key_override: str | None = None) -> list[str] | None:
@@ -630,7 +659,10 @@ def cached_tts_models(endpoint: str, api_key_override: str | None = None) -> lis
     base = _catalog_base(endpoint)
     if not base or get_provider_from_endpoint(base) != "openrouter":
         return None
-    key = _model_fetch_cache_key(_openrouter_modality_models_url(base, "speech"), base, api_key_override)
+    url = _openrouter_modality_models_url(endpoint, "speech")
+    if not url:
+        return None
+    key = _model_fetch_cache_key(url, base, api_key_override)
     return _cached_id_list(_model_fetch_tts_cache, key)
 
 
@@ -639,7 +671,10 @@ def cached_stt_models(endpoint: str, api_key_override: str | None = None) -> lis
     base = _catalog_base(endpoint)
     if not base or get_provider_from_endpoint(base) != "openrouter":
         return None
-    key = _model_fetch_cache_key(_openrouter_modality_models_url(base, "transcription"), base, api_key_override)
+    url = _openrouter_modality_models_url(endpoint, "transcription")
+    if not url:
+        return None
+    key = _model_fetch_cache_key(url, base, api_key_override)
     return _cached_id_list(_model_fetch_stt_cache, key)
 
 
@@ -708,10 +743,10 @@ def clear_settings_catalog_cache(endpoint: str, api_key_override: str | None = N
 
     Test Connection uses this. Other endpoints and keys stay cached.
     """
-    base = _catalog_base(endpoint)
-    if not base:
+    built = _v1_models_request(endpoint, api_key_override)
+    if built is None:
         return
-    text_key = _model_fetch_cache_key(_models_list_url(base), base, api_key_override)
+    key_slot, _url, text_key = built
     for cache in (
         _model_fetch_cache,
         _model_fetch_image_cache,
@@ -719,15 +754,18 @@ def clear_settings_catalog_cache(endpoint: str, api_key_override: str | None = N
         _model_context_cache,
     ):
         cache.pop(text_key, None)
-    image_key = _model_fetch_cache_key(_openrouter_image_models_url(base), base, api_key_override)
+    image_url = _openrouter_image_models_url(endpoint)
+    image_key = _model_fetch_cache_key(image_url, key_slot, api_key_override)
     _model_fetch_image_cache.pop(image_key, None)
-    tts_key = _model_fetch_cache_key(_openrouter_modality_models_url(base, "speech"), base, api_key_override)
-    stt_key = _model_fetch_cache_key(_openrouter_modality_models_url(base, "transcription"), base, api_key_override)
+    tts_url = _openrouter_modality_models_url(endpoint, "speech")
+    tts_key = _model_fetch_cache_key(tts_url, key_slot, api_key_override)
+    stt_url = _openrouter_modality_models_url(endpoint, "transcription")
+    stt_key = _model_fetch_cache_key(stt_url, key_slot, api_key_override)
     _model_fetch_tts_cache.pop(tts_key, None)
     _model_fetch_stt_cache.pop(stt_key, None)
     # ?model= is a different memo from list-all. Test Connection must drop both
     # or the next Speech fetch returns the stale scoped body without HTTP.
-    for voices_key in _together_voices_cache_keys(base, api_key_override):
+    for voices_key in _together_voices_cache_keys(key_slot, api_key_override):
         _together_voices_fetch_cache.pop(voices_key, None)
 
 
@@ -895,20 +933,24 @@ def fetch_together_tts_voices(endpoint: str, model_id: str | None = None, api_ke
     """
     if not endpoint:
         return None
-    base = normalize_endpoint_url(endpoint)
-    if not base or not endpoint_url_suitable_for_v1_models_fetch(base):
+    key_slot = _key_slot_base(endpoint)
+    if not key_slot or not endpoint_url_suitable_for_v1_models_fetch(key_slot):
         return None
-    if get_provider_from_endpoint(base) != "together":
+    if get_provider_from_endpoint(key_slot) != "together":
         return None
 
     requested = str(model_id or "").strip()
-    is_owu = get_config_bool_safe("is_openwebui")
-    url = _together_voices_url(base, requested)
-    cache_key = _model_fetch_cache_key(url, base, api_key_override)
+    url = _together_voices_url(endpoint, requested)
+    if not url:
+        return None
+    cache_key = _model_fetch_cache_key(url, key_slot, api_key_override)
     if cache_key in _together_voices_fetch_cache:
-        return _together_voices_fetch_cache[cache_key]
+        stored = _together_voices_fetch_cache[cache_key]
+        if isinstance(stored, dict):
+            return {k: list(v) for k, v in stored.items()}
+        return stored
 
-    req_headers = _model_fetch_auth_headers(base, api_key_override, url, is_openwebui=is_owu, is_openrouter=False, log_label="fetch together voices")
+    req_headers = _model_fetch_auth_headers(key_slot, api_key_override, url, is_openwebui=_resolved_openwebui(endpoint), is_openrouter=False, log_label="fetch together voices")
     if req_headers is None:
         return None
 
@@ -919,8 +961,9 @@ def fetch_together_tts_voices(endpoint: str, model_id: str | None = None, api_ke
         found = _voices_from_together_body(data, requested or None)
         for speech_id, speech_voices in found.items():
             remember_tts_supported_voices(speech_id, speech_voices)
-        _together_voices_fetch_cache[cache_key] = found
-        return found
+        stored_copy = {k: list(v) for k, v in found.items()}
+        _together_voices_fetch_cache[cache_key] = stored_copy
+        return {k: list(v) for k, v in stored_copy.items()}
     except Exception as e:
         log.warning("fetch together voices failed for %s: %s", url, e)
     return None
@@ -1205,7 +1248,7 @@ def _remember_vision_support(model_id: str, endpoint: str, supported: bool) -> N
         log.debug("has_native_vision persist failed: %s", e)
 
 
-def has_native_vision(model_id: Any, endpoint: Any, *, allow_fetch: bool = True, unknown_is_vision: bool = False) -> bool:
+def has_native_vision(model_id: Any, endpoint: Any, *, allow_fetch: bool = True, unknown_is_vision: bool = False, api_key_override: str | None = None) -> bool:
     """Check if the model supports native multimodal vision input.
 
     Priority order:
@@ -1255,23 +1298,32 @@ def has_native_vision(model_id: Any, endpoint: Any, *, allow_fetch: bool = True,
     # lookup is not stored, so the next send retries. Do not cache None: a
     # transient miss would hide vision until LibreOffice restarts.
     if provider in ("openrouter", "together"):
-        url = _models_list_url(endpoint_str)
-        cache_key = _model_fetch_cache_key(url, endpoint_str)
-        vision_memo = _model_fetch_vision_cache.get(cache_key)
-        if vision_memo is None and allow_fetch:
-            fetch_available_models(endpoint_str)
-            vision_memo = _model_fetch_vision_cache.get(cache_key)
-        # Persist vision only when the row listed input_modalities. A
-        # successful catalog that omitted the field is not a "no": the config
-        # map is checked first, so storing False would skip later lookups for
-        # the rest of the process and the next one. An explicit list without
-        # image is still a no. A missing field falls through and is not written.
-        if vision_memo is not None:
-            supported = _vision_memo_answer(provider, vision_memo, model_id_str)
-            if supported is not None:
-                _remember_vision_support(model_id_str, endpoint_str, supported)
-                log.debug("has_native_vision: modalities model=%r vision=%s", model_id_str, supported)
-                return supported
+        # What was wrong: The memo lookup hashed the saved key and called
+        # fetch_available_models on an already-normalized URL with no override,
+        # so a Settings fetch stored under api_key_override was invisible,
+        # and a second normalize could miss a doubled suffix.
+        # How it happened: _model_fetch_cache_key defaulted to get_api_key_for_endpoint
+        # and only stripped the override.
+        # Why this change: The same _v1_models_request triple the fetcher writes,
+        # plus the override chat already has.
+        raw = endpoint if isinstance(endpoint, str) else ""
+        built = _v1_models_request(raw, api_key_override)
+        if built is not None:
+            vision_memo = _model_fetch_vision_cache.get(built[2])
+            if vision_memo is None and allow_fetch:
+                fetch_available_models(raw, api_key_override=api_key_override)
+                vision_memo = _model_fetch_vision_cache.get(built[2])
+            # Persist vision only when the row listed input_modalities. A
+            # successful catalog that omitted the field is not a "no": the config
+            # map is checked first, so storing False would skip later lookups for
+            # the rest of the process and the next one. An explicit list without
+            # image is still a no. A missing field falls through and is not written.
+            if vision_memo is not None:
+                supported = _vision_memo_answer(provider, vision_memo, model_id_str)
+                if supported is not None:
+                    _remember_vision_support(model_id_str, endpoint_str, supported)
+                    log.debug("has_native_vision: modalities model=%r vision=%s", model_id_str, supported)
+                    return supported
 
     # 3b. Ollama (query POST /api/show). None means the probe did not answer.
     # allow_fetch=False still honors a process cache hit from an earlier probe.
@@ -1423,7 +1475,7 @@ def query_ollama_runtime_num_ctx(endpoint: str, model_id: str) -> int | None:
     return None
 
 
-def cached_v1_context_tokens(endpoint: str, model_id: str, provider: str | None = None) -> int | None:
+def cached_v1_context_tokens(endpoint: str, model_id: str, provider: str | None = None, *, api_key_override: str | None = None) -> int | None:
     """Already-memoized /v1/models window for ``model_id``, or None. Does not HTTP.
 
     Compact must not fetch: OpenRouter/Together lists are huge and the sidebar
@@ -1431,12 +1483,17 @@ def cached_v1_context_tokens(endpoint: str, model_id: str, provider: str | None 
     """
     if not endpoint or not model_id:
         return None
-    base = normalize_endpoint_url(endpoint)
-    if not base or not endpoint_url_suitable_for_v1_models_fetch(base):
+    # What was wrong: Compact was hashing a key re-derived from client._endpoint(),
+    # which for Open WebUI is the stripped host, while Settings hashed the dialog key
+    # and the unstripped slot.
+    # How it happened: The memo lookup re-normalized the endpoint and hashed the saved
+    # key without the override that Settings had used.
+    # Why this change: Use the same _v1_models_request triple the catalog fetch stored,
+    # including api_key_override.
+    built = _v1_models_request(endpoint, api_key_override)
+    if built is None:
         return None
-    url = _models_list_url(base)
-    cache_key = _model_fetch_cache_key(url, base, None)
-    lengths = _model_context_cache.get(cache_key)
+    lengths = _model_context_cache.get(built[2])
     if not isinstance(lengths, dict) or not lengths:
         return None
     mid = str(model_id).strip()

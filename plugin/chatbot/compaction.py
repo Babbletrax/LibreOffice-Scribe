@@ -357,7 +357,8 @@ def resolve_context_window(client: Any, model_id: str | None = None) -> int | No
         endpoint = None
     if endpoint:
         # Harvest-only: Settings/sidebar already fetched. Do not GET /v1/models here.
-        live = cached_v1_context_tokens(endpoint, model_id, provider)
+        typed_key = str((client.config or {}).get("api_key") or "").strip()
+        live = cached_v1_context_tokens(endpoint, model_id, provider, api_key_override=typed_key if typed_key else None)
         if isinstance(live, int) and live > 0:
             return live
     for row in DEFAULT_MODELS:
