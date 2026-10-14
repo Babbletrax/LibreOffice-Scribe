@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, Callable
 
 from plugin.calc.navigation import navigate_to_cell
 from plugin.calc.python.cell_discovery import PythonCellInfo, list_python_cells_in_doc
@@ -24,8 +24,18 @@ from plugin.scripting.session_manager import calc_workbook_base_session_id, pyth
 
 log = logging.getLogger(__name__)
 
-_FILTER_LABELS: tuple[tuple[str, DiagnosticFilter], ...] = ((_("All"), "all"), (_("Errors"), "errors"), (_("Output"), "output"))
+# What was wrong: _FILTER_LABELS called _() at module import time before locale was initialized.
+# How it happened: module-level tuple evaluation called gettext at import.
+# Why this change: translate lazily via _filter_choices() and match translation, English msgid, then substring.
+_FILTER_MSGIDS: tuple[tuple[str, DiagnosticFilter], ...] = (("All", "all"), ("Errors", "errors"), ("Output", "output"))
 
+
+def _filter_choices() -> tuple[tuple[str, DiagnosticFilter], ...]:
+    return tuple((_(msgid), filt) for msgid, filt in _FILTER_MSGIDS)
+
+
+_LEFT_MARGIN = 4
+_CONTROL_GAP = 4
 # PythonSidebarDialog.xdl: window 376, last button bottom 354.
 _BOTTOM_MARGIN = 20
 _RIGHT_MARGIN = 12
@@ -67,10 +77,10 @@ def compute_python_sidebar_layout(width: int, height: int, snapshot: dict[str, t
                 remaining -= new_h
             new_heights[name] = max(min_flex_height, new_h)
 
-    left_margin = 4
+    left_margin = _LEFT_MARGIN
     content_right = max(20, width - right_margin)
     content_width = max(20, content_right - left_margin)
-    gap = 4
+    gap = _CONTROL_GAP
 
     # 3-button row width
     bw3 = max(10, (content_width - 2 * gap) // 3)
@@ -80,7 +90,7 @@ def compute_python_sidebar_layout(width: int, height: int, snapshot: dict[str, t
     filter_label_w = min(40, max(10, content_width // 4))
 
     layouts: dict[str, tuple[int, int, int, int]] = {}
-    for name, (_ox, oy, _ow, oh) in snapshot.items():
+    for name, (origin_x, oy, origin_w, oh) in snapshot.items():
         shift = 0
         for fname in flex_names:
             if snapshot[fname][1] < oy:
@@ -112,8 +122,8 @@ def compute_python_sidebar_layout(width: int, height: int, snapshot: dict[str, t
             nx = left_margin + filter_label_w + gap
             nw = max(10, content_right - nx)
         elif name in HEADER_BUTTON_IDS:
-            nx = _ox
-            nw = _ow
+            nx = origin_x
+            nw = origin_w
         elif name in ("status_label", "status", "cells_label", "cells_list", "diag_label", "diag_list", "diag_detail", "btn_settings"):
             nx = left_margin
             nw = content_width
@@ -146,7 +156,7 @@ class _PanelResizeListener(BaseWindowListener):
         self._in_relayout = False
         self._root_window = None
 
-    def disposing(self, Source: Any) -> None:  # noqa: N803 -- UNO signature
+    def on_disposing(self, Source: Any) -> None:  # noqa: N803 -- UNO signature
         # LibreOffice queries XComponent for dispose. This element is
         # XUIElement only, so PythonPanelElement.disposing never runs and
         # deck close would leak the controller's listeners. VCL does call
@@ -235,10 +245,11 @@ def workbook_key_for_doc(doc: Any) -> str:
     try:
         return calc_workbook_base_session_id(doc)
     except Exception:
+        log.debug("workbook key lookup failed", exc_info=True)
         return "unknown"
 
 
-def format_runtime_status(ctx: Any, doc: Any | None) -> str:
+def format_runtime_status(ctx: Any) -> str:
     """Compact status text: session mode + venv path resolution (no package probe)."""
     mode = python_session_mode(ctx)
     mode_label = _("Shared kernel") if mode == "shared" else _("Isolated")
@@ -292,8 +303,11 @@ def _filter_from_combo(control: Any) -> DiagnosticFilter:
         text = str(control.getText() or "").strip()
     except Exception:
         text = ""
-    for label, filt in _FILTER_LABELS:
+    for label, filt in _filter_choices():
         if text == label:
+            return filt
+    for msgid, filt in _FILTER_MSGIDS:
+        if text == msgid:
             return filt
     lower = text.lower()
     if "error" in lower:
@@ -301,6 +315,15 @@ def _filter_from_combo(control: Any) -> DiagnosticFilter:
     if "output" in lower:
         return "output"
     return "all"
+
+
+def _select_diag_row(control: Any, index: int) -> None:
+    if control is None or not hasattr(control, "selectItemPos"):
+        return
+    try:
+        control.selectItemPos(index, True)
+    except Exception:
+        log.debug("selectItemPos failed", exc_info=True)
 
 
 class PythonSidebarController:
@@ -313,6 +336,9 @@ class PythonSidebarController:
     _store: Any
     _on_diag: Any
     _activation_listener: Any
+    _disposed: bool
+    _refresh_pending: bool
+    _suppress_diag_nav: bool
 
     def __init__(self, ctx: Any, root_window: Any, frame: Any = None) -> None:
         self.ctx = ctx
@@ -323,6 +349,9 @@ class PythonSidebarController:
         self._diags: list[DiagnosticEntry] = []
         self._store = get_diagnostics_store()
         self._on_diag = self._schedule_refresh
+        self._disposed = False
+        self._refresh_pending = False
+        self._suppress_diag_nav = False
         try:
             translate_dialog(root_window)
         except Exception:
@@ -349,6 +378,7 @@ class PythonSidebarController:
                 log.debug("sidebar diagnostics listener add failed", exc_info=True)
 
     def disposing(self) -> None:
+        self._disposed = True
         # Deck close never calls PythonPanelElement.disposing: the element is
         # XUIElement, not XComponent, so the sidebar dispose query fails.
         # The root window listener's on_dispose calls this method (an explicit
@@ -408,8 +438,9 @@ class PythonSidebarController:
         if filter_combo is not None:
             try:
                 model = filter_combo.getModel()
-                model.StringItemList = tuple(label for label, _filt in _FILTER_LABELS)
-                filter_combo.setText(_FILTER_LABELS[0][0])
+                choices = _filter_choices()
+                model.StringItemList = tuple(label for label, _filt in choices)
+                filter_combo.setText(choices[0][0])
             except Exception:
                 log.debug("filter combo init failed", exc_info=True)
 
@@ -453,13 +484,21 @@ class PythonSidebarController:
             log.debug("wire header toolbar failed", exc_info=True)
 
     def _schedule_refresh(self, _entry: DiagnosticEntry | None = None) -> None:
-        from plugin.framework.queue_executor import post_to_main_thread
-        from plugin.framework.thread_guard import on_main_thread
-
-        if on_main_thread():
-            self.refresh()
+        # What was wrong: inline refresh during diagnostic events scanned the sheet on every =PY() recalc.
+        # How it happened: record() invokes listeners synchronously, triggering full sheet cell scans inline.
+        # Why this change: coalesce refreshes and post to main thread, skipping if already disposed or pending.
+        if self._disposed or self._refresh_pending:
             return
-        post_to_main_thread(self.refresh)
+        self._refresh_pending = True
+        from plugin.framework.queue_executor import post_to_main_thread
+
+        post_to_main_thread(self._run_scheduled_refresh)
+
+    def _run_scheduled_refresh(self) -> None:
+        self._refresh_pending = False
+        if self._disposed:
+            return
+        self.refresh()
 
     def _frame_is_calc(self) -> bool:
         frame = self.frame
@@ -482,12 +521,11 @@ class PythonSidebarController:
 
         Writer panels must not fall back to some other open Calc document.
         """
-        # Refresh _calc_panel from _frame_is_calc() on each lookup, and
-        # return None when this frame is not Calc. A value captured at
-        # construction stays Calc after a switch to Writer, and
-        # get_calc_document_from_ctx then returns some other open Calc document.
-        self._calc_panel = self._frame_is_calc()
-        if not self._calc_panel:
+        # Return None when this frame is not Calc. If the frame is not Calc,
+        # do not fall through to get_calc_document_from_ctx, which would return
+        # some other open Calc document.
+        frame_is_calc = self._frame_is_calc()
+        if not frame_is_calc:
             return None
         frame = self.frame
         if frame is not None:
@@ -503,18 +541,25 @@ class PythonSidebarController:
         return get_calc_document_from_ctx(self.ctx)
 
     def refresh(self) -> None:
-        self._calc_panel = self._frame_is_calc()
-        if not self._calc_panel:
-            set_control_text(self._ctrl("status"), format_runtime_status(self.ctx, None))
+        if self._disposed:
+            return
+        if not self._frame_is_calc():
+            set_control_text(self._ctrl("status"), format_runtime_status(self.ctx))
             return
         doc = self._calc_document()
-        set_control_text(self._ctrl("status"), format_runtime_status(self.ctx, doc))
+        set_control_text(self._ctrl("status"), format_runtime_status(self.ctx))
 
         self._cells = list_python_cells_in_doc(doc, active_sheet_only=True) if doc else []
         cell_lines = [c.address for c in self._cells]
         if not cell_lines:
             cell_lines = [_("(no =PY() cells on active sheet)")]
         _populate_listbox(self._ctrl("cells_list"), cell_lines)
+
+        diag_ctrl = self._ctrl("diag_list")
+        prev_idx = _selected_index(diag_ctrl)
+        prev_entry: DiagnosticEntry | None = None
+        if 0 <= prev_idx < len(self._diags):
+            prev_entry = self._diags[prev_idx]
 
         key = workbook_key_for_doc(doc)
         filt = _filter_from_combo(self._ctrl("filter_combo"))
@@ -532,11 +577,24 @@ class PythonSidebarController:
         diag_lines = [e.summary_line() for e in self._diags]
         if not diag_lines:
             diag_lines = [_("(no diagnostics yet)")]
-        _populate_listbox(self._ctrl("diag_list"), diag_lines)
+        _populate_listbox(diag_ctrl, diag_lines)
 
         detail = self._ctrl("diag_detail")
         if self._diags:
-            set_control_text(detail, diagnostics_detail_text(self._diags[0]))
+            target_idx = 0
+            if prev_entry is not None:
+                prev_key = (prev_entry.timestamp, prev_entry.code, prev_entry.address, prev_entry.status, prev_entry.message)
+                for idx, entry in enumerate(self._diags):
+                    if (entry.timestamp, entry.code, entry.address, entry.status, entry.message) == prev_key:
+                        target_idx = idx
+                        break
+            selected_entry = self._diags[target_idx]
+            set_control_text(detail, diagnostics_detail_text(selected_entry))
+            self._suppress_diag_nav = True
+            try:
+                _select_diag_row(diag_ctrl, target_idx)
+            finally:
+                self._suppress_diag_nav = False
         else:
             set_control_text(detail, "")
 
@@ -554,6 +612,8 @@ class PythonSidebarController:
             set_control_text(self._ctrl("diag_detail"), diagnostics_detail_text(latest))
 
     def _on_diag_selected(self, _event: Any = None) -> None:
+        if self._suppress_diag_nav:
+            return
         idx = _selected_index(self._ctrl("diag_list"))
         if idx < 0 or idx >= len(self._diags):
             return
@@ -565,33 +625,35 @@ class PythonSidebarController:
         if doc is not None:
             navigate_to_cell(doc, self.ctx, entry.address)
 
-    def _on_edit_cell(self) -> None:
+    def _run_action(self, command: str, fallback: Callable[[], None]) -> None:
         from plugin.framework.main_shared import get_action_handler
 
+        handler = get_action_handler(command)
+        if handler:
+            from plugin.librepy.sidebar_menus import invoke_action_handler
+
+            invoke_action_handler(handler, command=command)
+            return
+        fallback()
+
+    def _on_edit_cell(self) -> None:
         # Prefer selecting the highlighted cell first.
         self._on_cell_selected()
-        handler = get_action_handler("scripting.edit_python_cell")
-        if handler:
-            from plugin.librepy.sidebar_menus import invoke_action_handler
 
-            invoke_action_handler(handler, command="scripting.edit_python_cell")
-            return
-        from plugin.calc.python.editor import open_python_cell_editor
+        def _fallback() -> None:
+            from plugin.calc.python.editor import open_python_cell_editor
 
-        open_python_cell_editor(self.ctx)
+            open_python_cell_editor(self.ctx)
+
+        self._run_action("scripting.edit_python_cell", _fallback)
 
     def _on_run_script(self) -> None:
-        from plugin.framework.main_shared import get_action_handler
+        def _fallback() -> None:
+            from plugin.scripting.python_runner import run_python_dialog
 
-        handler = get_action_handler("scripting.run_python_dialog")
-        if handler:
-            from plugin.librepy.sidebar_menus import invoke_action_handler
+            run_python_dialog(self.ctx)
 
-            invoke_action_handler(handler, command="scripting.run_python_dialog")
-            return
-        from plugin.scripting.python_runner import run_python_dialog
-
-        run_python_dialog(self.ctx)
+        self._run_action("scripting.run_python_dialog", _fallback)
 
     def _on_edit_init(self) -> None:
         from plugin.calc.python.init_script_editor import open_init_script_editor
@@ -599,34 +661,25 @@ class PythonSidebarController:
         open_init_script_editor(self.ctx)
 
     def _on_reset(self) -> None:
-        from plugin.framework.main_shared import get_action_handler
-
-        handler = get_action_handler("scripting.reset_python_session")
-        if handler:
-            from plugin.librepy.sidebar_menus import invoke_action_handler
-
-            invoke_action_handler(handler, command="scripting.reset_python_session")
-        else:
+        def _fallback() -> None:
             from plugin.scripting.session_manager import reset_workbook_python_session
 
             reset_workbook_python_session(self.ctx)
+
+        self._run_action("scripting.reset_python_session", _fallback)
         self.refresh()
 
     def _on_settings(self) -> None:
-        from plugin.framework.main_shared import get_action_handler, open_dialog_safely
+        def _fallback() -> None:
+            try:
+                from plugin.framework.main_shared import open_dialog_safely
+                from plugin.librepy.settings import open_librepy_settings
 
-        handler = get_action_handler("main.settings")
-        if handler:
-            from plugin.librepy.sidebar_menus import invoke_action_handler
+                open_dialog_safely(open_librepy_settings, "Failed to open settings")
+            except Exception:
+                log.debug("open settings failed", exc_info=True)
 
-            invoke_action_handler(handler, command="main.settings")
-            return
-        try:
-            from plugin.librepy.settings import open_librepy_settings
-
-            open_dialog_safely(open_librepy_settings, "Failed to open settings")
-        except Exception:
-            log.debug("open settings failed", exc_info=True)
+        self._run_action("main.settings", _fallback)
 
 
 class _Action(BaseActionListener):

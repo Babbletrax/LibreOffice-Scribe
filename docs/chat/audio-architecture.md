@@ -67,7 +67,7 @@ Recording can end automatically after the user stops talking, without waiting fo
 | **3000** (default) | Auto-stop and send after 3s of silence following speech |
 | **0** | Wait until you click **Stop Rec** (auto-stop off) |
 
-Algorithm constants (`MIN_SPEECH_MS` = 500, noise-floor EMA, peak thresholds) live in [`audio_silence_detector.py`](../../plugin/scripting/audio_silence_detector.py) — not user config. Auto-stop requires ≥500 ms of classified speech before silence can trigger send. No upfront calibration window (users often speak immediately after **Record**); a running noise-floor EMA applies only during pre-speech silence.
+Algorithm constants live in [`audio_silence_detector.py`](../../plugin/scripting/audio_silence_detector.py), not in user config. Auto-stop still needs at least `MIN_SPEECH_MS` (500) of committed speech before silence can send. There is no startup delay: a chunk at or above `LOUD_ONSET_RMS` (0.03) is speech immediately, so talking right after Record still arms auto-stop. Energy below that level updates the noise-floor EMA (time constant `NOISE_EMA_TAU_SEC` seconds, and a quieter chunk snaps the floor down) and counts as silence when it does not clear the adapted speech threshold. A steady room louder than the old 0.0054 default therefore does not freeze the thresholds. Steady energy below 0.03 with no louder speech never arms auto-stop, and steady energy at or above 0.03 never looks like silence; Stop Rec still sends either take. A run joins the 500 ms total only after `SPEECH_ONSET_MS` (200) of speech-classified audio, so a click does not add time or clear the silence timer. Peak alone is not speech. Chunk time is `len(pcm) // 2` samples, accumulated, then converted to milliseconds once.
 
 Implementation:
 

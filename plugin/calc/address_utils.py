@@ -117,6 +117,11 @@ def split_sheet_prefix(ref: str) -> tuple[str | None, str]:
         name = quoted.replace("''", "'")
     else:
         name = match.group("bare") or ""
+        # Bugfix: absolute sheet references like $Sheet1.$A$1 failed parsing.
+        # Calc writes an absolute sheet as $Sheet1.$A$1; the $ is a marker,
+        # not part of the name. A quoted name that really starts with $ is left alone.
+        if name.startswith("$"):
+            name = name[1:]
     return name.strip(), match.group("rest").strip()
 
 
@@ -143,6 +148,9 @@ def parse_address(address: str) -> tuple[int, int]:
     sheet, address = split_sheet_prefix(address)
     if sheet is not None:
         raise ValueError(f"Cell address '{sheet}.{address}' names a sheet, but this operation resolves the sheet separately. Pass the sheet via sheet_name, or drop the prefix.")
+    # Bugfix: absolute references like $A$1 or A$1 failed regex matching.
+    # Calc writes $ locks which are not part of the alphanumeric address; strip them.
+    address = address.replace("$", "")
     address = address.strip().upper()
     match = re.match(r"^([A-Z]+)([0-9]+)$", address)
     if not match:
@@ -182,6 +190,9 @@ def parse_range_string(range_str: str) -> tuple[tuple[int, int], tuple[int, int]
     sheet, range_str = split_sheet_prefix(range_str)
     if sheet is not None:
         raise ValueError(f"Range '{sheet}.{range_str}' names a sheet, but this operation resolves the sheet separately. Pass the sheet via sheet_name, or drop the prefix.")
+    # Bugfix: absolute range references like $A$1:$B$2 failed regex matching.
+    # Strip $ characters from the address portion so the range regex matches cleanly.
+    range_str = range_str.replace("$", "")
     range_str = range_str.strip().upper()
 
     pattern = r"^([A-Z]+)([0-9]+)(?::([A-Z]+)([0-9]+))?$"

@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Search descriptor helpers. No LibreOffice."""
 from unittest.mock import MagicMock
+import pytest
 
 # ---- D6: regex / case in the edit path --------------------------------------
 
@@ -128,3 +129,292 @@ def test_tracked_deletion_scan_skips_an_unreadable_redline():
     enum.hasMoreElements.side_effect = [True, True, False]
     enum.nextElement.side_effect = [bad, good]
     assert document_has_tracked_deletions(doc) is True
+
+
+def test_search_in_document_zero_width_sets_truncated():
+    from plugin.writer.search import SearchInDocument
+
+    doc = MagicMock()
+    found = MagicMock()
+    found.getString.return_value = ""
+    doc.findFirst.return_value = found
+    del doc.getDrawPage
+    doc.getTextFields.return_value.createEnumeration.return_value.hasMoreElements.return_value = False
+    ctx = MagicMock(doc=doc)
+
+    res = SearchInDocument().execute(ctx, pattern="^", regex=True)
+    doc.findNext.assert_not_called()
+    assert res["status"] == "ok"
+    assert res["count"] == 0
+    assert res["matches"] == []
+    assert res["truncated"] is True
+    assert res["warning"] == "Search stopped on a zero-width match; count may be incomplete."
+
+
+def test_search_in_document_getstring_failure_is_truncated(caplog):
+    import logging
+    from plugin.writer.search import SearchInDocument
+
+    doc = MagicMock()
+    found = MagicMock()
+    found.getString.side_effect = RuntimeError("read error")
+    doc.findFirst.return_value = found
+    del doc.getDrawPage
+    doc.getTextFields.return_value.createEnumeration.return_value.hasMoreElements.return_value = False
+    ctx = MagicMock(doc=doc)
+
+    with caplog.at_level(logging.ERROR, logger="writeragent.writer"):
+        res = SearchInDocument().execute(ctx, pattern="hello")
+
+    assert res["status"] == "ok"
+    assert res["count"] == 0
+    assert res["truncated"] is True
+    assert res["warning"] == "Text-model search ended early after a getString failure; count may be incomplete."
+    assert "search_in_document: getString failed" in caplog.text
+
+
+@pytest.mark.parametrize("bad_val", [0, -1, True, False, None, "20", 1.5])
+def test_search_in_document_max_results_rejects_non_positive(bad_val):
+    from plugin.writer.search import SearchInDocument
+
+    doc = MagicMock()
+    ctx = MagicMock(doc=doc)
+    res = SearchInDocument().execute(ctx, pattern="test", max_results=bad_val)
+    assert res["status"] == "error"
+    assert res["code"] == "INVALID_PARAM"
+    doc.createSearchDescriptor.assert_not_called()
+
+
+def test_search_in_document_default_max_results_is_20():
+    from plugin.writer.search import SearchInDocument
+
+    doc = MagicMock()
+    hits = [MagicMock(**{"getString.return_value": f"hit_{i}"}) for i in range(25)]
+    doc.findFirst.return_value = hits[0]
+    doc.findNext.side_effect = hits[1:] + [None]
+    del doc.getDrawPage
+    doc.getTextFields.return_value.createEnumeration.return_value.hasMoreElements.return_value = False
+    ctx = MagicMock(doc=doc)
+
+    res = SearchInDocument().execute(ctx, pattern="hit")
+    assert res["status"] == "ok"
+    assert res["returned"] == 20
+    assert res["count"] == 25
+    assert "truncated" not in res
+
+
+def test_find_next_after_match_stops_on_empty_string():
+    from plugin.writer.search import find_next_after_match
+
+    doc = MagicMock()
+    found = MagicMock()
+    found.getString.return_value = ""
+    sd = MagicMock()
+    res = find_next_after_match(doc, found, sd)
+    assert res is None
+    doc.findNext.assert_not_called()
+
+    # Second case: getString raises, findNext is still called
+    doc.reset_mock()
+    found = MagicMock()
+    found.getString.side_effect = RuntimeError("fail")
+    res = find_next_after_match(doc, found, sd)
+    assert res == doc.findNext.return_value
+    doc.findNext.assert_called_once_with(found.getEnd.return_value, sd)
+
+
+def test_find_ranges_regex_case_stops_after_one_empty_match():
+    from plugin.writer.search import find_ranges_regex_case
+
+    doc = MagicMock()
+    found = MagicMock()
+    found.getString.return_value = ""
+    doc.findFirst.return_value = found
+    out = find_ranges_regex_case(doc, "^", True, False, all_matches=True)
+    assert out == [found]
+    doc.findNext.assert_not_called()
+
+
+def test_shape_text_hits_case_insensitive_after_dotted_capital_i():
+    from plugin.writer.search import shape_text_hits
+
+    assert shape_text_hits("İa", "a", False, False) == ["a"]
+    assert shape_text_hits("İ", "i", False, False) == ["İ"]
+    assert shape_text_hits("İstanbul", "stan", False, False) == ["stan"]
+    assert shape_text_hits("İa", "a", False, True) == ["a"]
+
+
+def test_shape_text_hits_regex_drops_empty_groups_only():
+    from plugin.writer.search import shape_text_hits
+
+    assert shape_text_hits("ab", r"a*", True, True) == ["a"]
+
+
+def test_find_text_ranges_limit_zero_and_bad_types_return_empty():
+    from plugin.writer.search import find_text_ranges
+
+    for bad_limit in (0, -3, "1", True):
+        model = MagicMock()
+        res = find_text_ranges(model, MagicMock(), "foo", limit=bad_limit)
+        assert res == []
+        model.createSearchDescriptor.assert_not_called()
+
+    model = MagicMock()
+    model.findNext.return_value = None
+    res = find_text_ranges(model, MagicMock(), "foo", limit=None)
+    model.createSearchDescriptor.assert_called_once()
+
+
+def test_find_text_ranges_body_only_skips_other_xtext():
+    from plugin.writer.search import find_text_ranges
+
+    class BodyTextObj:
+        def createTextCursor(self):
+            c = MagicMock()
+            c.getString.return_value = "pre"
+            return c
+
+    class OtherTextObj:
+        def createTextCursor(self):
+            c = MagicMock()
+            c.getString.return_value = "nested_pre"
+            return c
+
+    b_obj = BodyTextObj()
+    o_obj = OtherTextObj()
+
+    model = MagicMock()
+    model.getText.return_value = b_obj
+
+    hit_body = MagicMock()
+    hit_body.getText.return_value = b_obj
+    hit_body.getString.return_value = "hit1"
+
+    hit_nested = MagicMock()
+    hit_nested.getText.return_value = o_obj
+    hit_nested.getString.return_value = "hit2"
+
+    # body_only=True -> only body hit
+    model.findNext.side_effect = [hit_body, hit_nested, None]
+    res_body_only = find_text_ranges(model, MagicMock(), "hit", body_only=True)
+    assert len(res_body_only) == 1
+    assert res_body_only[0]["text"] == "hit1"
+
+    # body_only=False -> both
+    model.findNext.side_effect = [hit_body, hit_nested, None]
+    res_all = find_text_ranges(model, MagicMock(), "hit", body_only=False)
+    assert len(res_all) == 2
+    assert res_all[0]["text"] == "hit1"
+    assert res_all[1]["text"] == "hit2"
+    assert res_all[1]["start"] == len("nested_pre")
+
+
+def test_find_text_ranges_start_stops_when_go_right_is_false():
+    from plugin.writer.search import find_text_ranges
+
+    model = MagicMock()
+    cursor = model.getText.return_value.createTextCursor.return_value
+    cursor.goRight.return_value = False
+    model.findNext.return_value = None
+
+    find_text_ranges(model, MagicMock(), "foo", start=100000)
+    cursor.goRight.assert_called_once_with(8192, False)
+    model.findNext.assert_called_once()
+
+
+def test_build_page_map_rebuilds_and_unlocks(caplog):
+    import logging
+    from plugin.writer.search import _build_page_map
+
+    doc = MagicMock()
+    controller = MagicMock()
+    vc = MagicMock()
+    doc.getCurrentController.return_value = controller
+    controller.getViewCursor.return_value = vc
+
+    para = MagicMock()
+    enum = MagicMock()
+    enum.hasMoreElements.side_effect = [True, False, True, False]
+    enum.nextElement.return_value = para
+    doc.getText.return_value.createEnumeration.return_value = enum
+    vc.getPage.return_value = 3
+
+    # Call twice -> rebuilt twice, no cache
+    pm1 = _build_page_map(doc)
+    pm2 = _build_page_map(doc)
+    assert pm1 == {0: 3}
+    assert pm2 == {0: 3}
+    assert doc.getText.return_value.createEnumeration.call_count == 2
+    assert doc.lockControllers.call_count == 2
+    assert doc.unlockControllers.call_count == 2
+
+    # gotoRange raises on restore
+    doc.reset_mock()
+    enum = MagicMock()
+    enum.hasMoreElements.side_effect = [True, False]
+    enum.nextElement.return_value = para
+    doc.getText.return_value.createEnumeration.return_value = enum
+    vc.gotoRange.side_effect = [None, None, RuntimeError("restore failed")]
+    vc.getPage.return_value = 5
+
+    pm3 = _build_page_map(doc)
+    assert pm3 == {0: 5}
+    doc.unlockControllers.assert_called_once()
+
+    # Controller failure returns {} and does not lock, logs exception
+    doc.reset_mock()
+    doc.getCurrentController.side_effect = RuntimeError("no controller")
+    with caplog.at_level(logging.ERROR, logger="writeragent.writer"):
+        pm_err = _build_page_map(doc)
+    assert pm_err == {}
+    doc.lockControllers.assert_not_called()
+    assert "advanced_search: could not read the view cursor" in caplog.text
+
+
+def test_advanced_search_missing_query():
+    from plugin.writer.search import AdvancedSearch
+
+    idx_svc = MagicMock()
+    ctx = MagicMock()
+    ctx.services.writer_index = idx_svc
+
+    tool = AdvancedSearch()
+    for bad_q in ({}, {"query": None}, {"query": "  "}, {"query": 1}):
+        res = tool.execute(ctx, **bad_q)
+        assert res["status"] == "error"
+        assert "query is required" in res["message"]
+        idx_svc.search_boolean.assert_not_called()
+
+    idx_svc.search_boolean.return_value = {"matches": []}
+    res_ok = tool.execute(ctx, query="climate")
+    assert res_ok["status"] == "ok"
+    idx_svc.search_boolean.assert_called_once()
+
+
+def test_search_hit_cap_includes_shapes():
+    from unittest.mock import patch
+    from plugin.writer.search import SearchInDocument
+
+    doc = MagicMock()
+    body_hit = MagicMock(**{"getString.return_value": "hit_body"})
+    doc.findFirst.return_value = body_hit
+    doc.findNext.return_value = None
+
+    # Floating shape
+    shape = MagicMock()
+    shape.getString.return_value = "hit_s1 hit_s2 hit_s3"
+    shape.getPropertyValue.return_value = 0  # AnchorType not as-char, TextBox false
+    shape.supportsService.return_value = False
+    doc.getDrawPage.return_value.getCount.return_value = 1
+    doc.getDrawPage.return_value.getByIndex.return_value = shape
+
+    del doc.getTextFields
+
+    ctx = MagicMock(doc=doc)
+    with patch("plugin.writer.search.MAX_SEARCH_HITS", 2):
+        res = SearchInDocument().execute(ctx, pattern="hit", max_results=10)
+
+    assert res["status"] == "ok"
+    assert res["count"] == 2
+    assert res["truncated"] is True
+    assert res["warning"] == "Search stopped after 2 matches; count may be incomplete."

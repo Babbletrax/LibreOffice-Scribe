@@ -509,3 +509,22 @@ def test_mouse_listener_unannotated_override_returns_none() -> None:
     listener = UnannotatedMouse()
     assert listener.mousePressed(MagicMock()) is None
 
+
+def test_new_wrapped_callback_is_applied_to_overrides():
+    """Subclass overriding a custom @_catch_and_log method is dynamically wrapped."""
+    class BaseExtra(BaseListener):
+        @_catch_and_log
+        def extraPing(self, ev):
+            self.on_extra_ping(ev)
+
+        def on_extra_ping(self, ev):
+            pass
+
+    class Child(BaseExtra):
+        def extraPing(self, ev):
+            raise RuntimeError("extra ping failed")
+
+    # Child().extraPing(None) must not raise because __init_subclass__ wrapped extraPing dynamically from MRO
+    Child().extraPing(None)
+
+

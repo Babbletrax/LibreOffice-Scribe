@@ -95,11 +95,13 @@ def scan_redlines(doc: Any, on_item: Callable[[Any], bool]) -> tuple[bool, int, 
     return reliable, seen, total
 
 
-def _redline_key(rl: Any) -> tuple[Any, ...]:
+def redline_identity_key(rl: Any) -> tuple[Any, ...]:
     """``(RedlineIdentifier, type, author, date, comment)`` of one redline.
 
     Only the identifier must be readable (a failure raises, so the caller marks the scan
     unreliable); the other fields read as None when they fail.
+    manage_tracked_changes uses this whole key, not ``RedlineIdentifier`` alone, because a
+    stacked Delete reuses the identifier.
     """
     rid = rl.getPropertyValue("RedlineIdentifier")
 
@@ -143,7 +145,7 @@ def snapshot_redline_ids(doc: Any) -> tuple[set[Any], bool]:
 
     def on_item(rl: Any) -> bool:
         try:
-            keys.add(_redline_key(rl))
+            keys.add(redline_identity_key(rl))
         except Exception:
             return False
         return True
@@ -176,7 +178,7 @@ def new_redlines_since(doc: Any, before: set[Any]) -> tuple[list[Any], bool]:
 
     def on_item(rl: Any) -> bool:
         try:
-            key = _redline_key(rl)
+            key = redline_identity_key(rl)
         except Exception:
             return False
         # Without a date the split-piece test cannot tell a piece from a new redline.

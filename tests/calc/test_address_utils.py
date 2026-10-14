@@ -101,3 +101,15 @@ def test_address_utils():
         assert False, "Expected ValueError for sheet-qualified range"
     except ValueError as e:
         assert "Sheet One" in str(e)
+
+    # Absolute cell and range references with $
+    assert parse_address("$C$3") == (2, 2)
+    assert parse_address("A$1") == (0, 0)
+    assert parse_range_string("$A$1:$B$2") == ((0, 0), (1, 1))
+    assert parse_range_string("A$1:B$2") == ((0, 0), (1, 1))
+    assert split_sheet_prefix("$Sheet1.$A$1:$B$2") == ("Sheet1", "$A$1:$B$2")
+    assert split_sheet_prefix("'$Prices'.$A$1") == ("$Prices", "$A$1")
+    for whole_col in ("A:A", "1:1"):
+        with pytest.raises(ValueError):
+            parse_range_string(whole_col)
+    assert parse_range_string(split_sheet_prefix("Sheet1.$A$1:$B$2")[1]) == ((0, 0), (1, 1))

@@ -4,8 +4,8 @@ import pytest
 import time
 import subprocess
 import sys
-
 import threading
+from typing import Any
 
 from plugin.framework.thread_guard import get_background_task_name
 from plugin.framework.worker_pool import (
@@ -223,7 +223,7 @@ def test_wait_for_exit_delivers_callback_when_reader_never_ends():
 
     def run() -> None:
         try:
-            ap._wait_for_exit(proc, reader, None)
+            ap._wait_for_exit(proc, reader, None, ap._child_generation)
         finally:
             done.set()
 
@@ -377,16 +377,51 @@ def test_join_does_not_reraise_worker_exception():
     assert not handle.is_alive()
 
 
+def test_join_propagates_keyboard_interrupt_on_the_joiner():
+    from concurrent.futures import Future
+
+    class InterruptedFuture(Future):  # type: ignore[type-arg]
+        def result(self, timeout: float | None = None) -> Any:
+            raise KeyboardInterrupt()
+
+    fut = InterruptedFuture()
+    assert not fut.done()
+    with pytest.raises(KeyboardInterrupt):
+        BackgroundHandle(future=fut).join()
+
+
+def test_future_stored_exception_identity():
+    from concurrent.futures import Future, CancelledError
+    from plugin.framework.worker_pool import _future_stored_this_exception
+
+    fut: Future[Any] = Future()
+    exc = SystemExit(42)
+    assert _future_stored_this_exception(fut, exc) is False
+
+    fut.set_exception(exc)
+    assert _future_stored_this_exception(fut, exc) is True
+    assert _future_stored_this_exception(fut, SystemExit(1)) is False
+
+    cancelled_fut: Future[Any] = Future()
+    cancelled_fut.cancel()
+    assert _future_stored_this_exception(cancelled_fut, CancelledError()) is True
+    assert _future_stored_this_exception(cancelled_fut, RuntimeError()) is False
+
+
 def test_pooled_worker_tags_then_clears_task_name():
     seen = []
+    thread_names = []
 
     def task():
         seen.append(get_background_task_name())
+        thread_names.append(threading.current_thread().name)
 
     handle = run_in_background(task, name="tagged-job")
     handle.join(timeout=2)
     assert seen == ["tagged-job"]
     assert get_background_task_name() is None
+    assert thread_names[0].startswith("wa-bg-")
+    assert thread_names[0] != "tagged-job"
 
 
 def test_timeout_join_dedicated_still_alive():
@@ -613,6 +648,46 @@ class TestReadStreamStripsNewlines:
         ap._read_stream(_Parts(), received.append)
         assert received == ["hel", "lo"]
 
+    def test_feed_line_buffer_holds_crlf_and_does_not_join_until_a_line(self):
+        from plugin.framework.worker_pool import _feed_line_buffer
+
+        lines, parts, length = _feed_line_buffer([], 0, "hi\r")
+        assert lines == []
+        assert length == 3
+        assert len(parts) >= 1
+        assert parts[-1].endswith("\r")
+
+        lines, parts, length = _feed_line_buffer(parts, length, "\nrest\n")
+        assert lines == ["hi\r\n", "rest\n"]
+        assert parts == []
+        assert length == 0
+
+    def test_feed_line_buffer_held_cr_then_non_lf(self):
+        from plugin.framework.worker_pool import _feed_line_buffer
+
+        lines, parts, length = _feed_line_buffer(["\r"], 1, "Z")
+        assert lines == ["\r"]
+        assert parts == ["Z"]
+        assert length == 1
+
+    def test_read_stream_flushes_partial_line_at_cap(self, caplog):
+        from plugin.framework.worker_pool import _MAX_STREAM_LINE_CHARS
+
+        ap = AsyncProcess(["dummy"])
+        stream = _ChunkStream([b"y" * (_MAX_STREAM_LINE_CHARS + 10)])
+        received: list[str] = []
+
+        with caplog.at_level("WARNING"):
+            ap._read_stream(stream, received.append)
+
+        assert len(received) == 2
+        assert len(received[0]) == _MAX_STREAM_LINE_CHARS
+        assert received[0] == "y" * _MAX_STREAM_LINE_CHARS
+        assert len(received[1]) == 10
+        assert received[1] == "y" * 10
+        warning_records = [r for r in caplog.records if "delivering a partial line" in r.message]
+        assert len(warning_records) == 1
+
 
 def test_stderr_drain_short_read_before_eof():
     """A buffered pipe must surface a short burst while the child is still alive.
@@ -812,13 +887,32 @@ def test_second_start_wait_does_not_report_new_child(monkeypatch: pytest.MonkeyP
         assert not blocked, "first wait thread blocked on the replacement child"
         assert errors == []
         assert second.poll() is None
-        assert exits == [first.returncode]
+        assert exits == []
     finally:
         for proc in (first, second, ap.process):
             if proc is None or proc.poll() is not None:
                 continue
             proc.kill()
             proc.wait(timeout=5)
+
+
+def test_superseded_child_does_not_notify_and_latest_does() -> None:
+    exits: list[int] = []
+    ap = AsyncProcess(["dummy"], on_exit_cb=exits.append)
+    ap._child_generation = 1
+    proc = MagicMock()
+    proc.wait.return_value = 3
+    ap._wait_for_exit(proc, None, None, 0)
+    assert exits == []
+
+    proc.wait.return_value = 5
+    ap._wait_for_exit(proc, None, None, 1)
+    assert exits == [5]
+
+
+def test_async_process_keeps_caller_creationflags() -> None:
+    ap = AsyncProcess(["dummy"], creationflags=0)
+    assert ap._popen_kwargs["creationflags"] == 0
 
 
 def test_is_current_thread_is_false_for_pooled_handle() -> None:
@@ -1049,8 +1143,7 @@ def test_daemon_work_pool_logs_base_exception_and_keeps_worker_alive(caplog):
             release_thread = threading.Timer(0.05, release.set)
             release_thread.start()
             try:
-                with pytest.raises(SystemExit):
-                    handle.join()
+                handle.join()
             finally:
                 release.set()
                 release_thread.join()

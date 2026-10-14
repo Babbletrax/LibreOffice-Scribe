@@ -394,6 +394,55 @@ def test_venv_record_to_wav_writes_file(tmp_path):
         assert wf.getframerate() == var.SAMPLE_RATE
 
 
+def test_venv_record_write_error_stops_instead_of_waiting(tmp_path):
+    import plugin.scripting.venv.audio_recorder as var
+
+    stop_event = threading.Event()
+    output_path = str(tmp_path / "out.wav")
+
+    mock_sd = MagicMock()
+    mock_stream = MagicMock()
+
+    def fake_raw_input_stream(*args, **kwargs):
+        callback = kwargs.get("callback")
+
+        def start():
+            if callback is not None:
+                callback(b"\x00\x01", 1, None, None)
+
+        mock_stream.start.side_effect = start
+        return mock_stream
+
+    mock_sd.RawInputStream.side_effect = fake_raw_input_stream
+
+    mock_wave_file = MagicMock()
+    mock_wave_file.writeframes.side_effect = OSError("disk full")
+
+    def fake_wave_open(*args, **kwargs):
+        del args, kwargs
+        return mock_wave_file
+
+    wait_called = False
+
+    def fake_wait(timeout=None):
+        del timeout
+        nonlocal wait_called
+        wait_called = True
+        if not stop_event.is_set():
+            raise AssertionError("stop_event was not set before wait completed")
+
+    with (
+        patch.object(var, "_import_sounddevice", return_value=mock_sd),
+        patch("wave.open", side_effect=fake_wave_open),
+        patch.object(stop_event, "wait", side_effect=fake_wait),
+    ):
+        with pytest.raises(RuntimeError, match=r"Failed to write audio WAV file.*disk full"):
+            var.record_to_wav(output_path, stop_event)
+
+    assert wait_called is True
+    mock_wave_file.close.assert_called_once()
+
+
 def test_audio_record_main_protocol(tmp_path, monkeypatch):
     from plugin.scripting.venv import audio_record_main as main_mod
 

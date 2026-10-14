@@ -55,6 +55,7 @@ from plugin.framework.errors import WorkerPoolError
 log = logging.getLogger("writeragent.framework.worker_pool")
 
 _DEFAULT_STDERR_TAIL_CHARS = 8192
+_MAX_STREAM_LINE_CHARS = 1024 * 1024
 
 # Thread-safety guard (Layer A): tag threads born here so assert_main_thread
 # can name the offending background task in diagnostics.
@@ -83,11 +84,22 @@ def background_pool_max_workers() -> int:
     return BACKGROUND_POOL_MAX_WORKERS
 
 
+def _future_stored_this_exception(fut: Future[Any], exc: BaseException) -> bool:
+    if not fut.done():
+        return False
+    if fut.cancelled():
+        return type(exc).__name__ == "CancelledError"
+    return fut.exception() is exc
+
+
 class BackgroundHandle:
     """Joinable handle for pooled or dedicated ``run_in_background`` work.
 
     Matches the ``Thread.join`` / ``Thread.is_alive`` surface callers already use.
-    ``join`` never re-raises worker exceptions (those are logged / ``error_callback``).
+    ``join`` does not re-raise exceptions raised by the worker, including
+    ``SystemExit`` and ``KeyboardInterrupt`` stored on the pooled future (the
+    pool already logged those). ``KeyboardInterrupt`` raised on the joining
+    thread while ``join`` is blocked still propagates.
     """
 
     __slots__: ClassVar[tuple[str, ...]] = ("_future", "_thread")
@@ -119,12 +131,17 @@ class BackgroundHandle:
             fut.result(timeout=timeout)
         except FuturesTimeoutError:
             return
-        except Exception:
-            # concurrent.futures.CancelledError subclasses Exception (via Error),
-            # including on Python 3.13. A cancelled future is swallowed here.
-            # Do not catch BaseException: KeyboardInterrupt/SystemExit from
-            # fut.set_exception must still escape join().
-            return
+        except BaseException as exc:
+            # Bugfix: result() re-raised the worker's SystemExit onto the
+            # joiner while the already-done path returned quietly. Happened
+            # because _run sets BaseException on the future via set_exception(exc)
+            # while join previously caught only Exception. Swallowing the worker's
+            # stored exception returns when the raised object is the one stored on
+            # the future, and re-raises when it is not (e.g. KeyboardInterrupt
+            # raised on the joining thread).
+            if _future_stored_this_exception(fut, exc):
+                return
+            raise
 
     def is_alive(self) -> bool:
         thread = self._thread
@@ -283,7 +300,13 @@ def run_in_background(func: Callable[..., Any], *args: Any, name: str | None = N
     ``join()`` — those must not occupy a pool slot.
 
     Without *error_callback*, failures are logged only; ``BackgroundHandle.join()``
-    does not re-raise the worker exception.
+    does not re-raise exceptions raised by the worker, including ``SystemExit``
+    and ``KeyboardInterrupt`` stored on the pooled future (the pool already logged
+    those). ``KeyboardInterrupt`` raised on the joining thread while ``join`` is
+    blocked still propagates.
+
+    *name* is the Layer A task tag for every job; a dedicated thread also uses
+    it as ``threading.Thread.name``, while a pooled job keeps ``wa-bg-N``.
 
     :return: A :class:`BackgroundHandle` with ``join`` / ``is_alive``.
     """
@@ -309,7 +332,7 @@ def run_in_background(func: Callable[..., Any], *args: Any, name: str | None = N
             # Not BaseException: SystemExit/KeyboardInterrupt must still unwind on
             # dedicated threads. Pool _run catches BaseException to finish the Future.
             error_id = str(uuid.uuid4())
-            log.exception(f"Task {task_id} failed", extra={"task_id": task_id, "task_name": task_name, "error_id": error_id, "error_type": type(e).__name__})
+            log.exception("Task %s failed", task_id, extra={"task_id": task_id, "task_name": task_name, "error_id": error_id, "error_type": type(e).__name__})
 
             wrapped_error = WorkerPoolError(f"Task '{task_name}' failed", code="WORKER_TASK_FAILED", details={"task_id": task_id, "task_name": task_name, "error_id": error_id, "original_error": str(e), "error_type": type(e).__name__})
 
@@ -498,6 +521,51 @@ def _split_on_newlines(pending: str) -> tuple[list[str], str]:
     return lines, pending[start:]
 
 
+def _feed_line_buffer(parts: list[str], length: int, chunk: str) -> tuple[list[str], list[str], int]:
+    """Feed one new chunk into line-buffered pieces without rescanning the remainder.
+
+    Bugfix: The remainder has already been scanned and has no complete line,
+    so scanning it again on every 4 KB read was O(n²), and a newline-free child
+    kept every byte. Pieces stay unjoined until a line is emitted or the cap is hit.
+    """
+    if not chunk:
+        return [], parts, length
+
+    if parts and parts[-1].endswith("\r"):
+        last = parts[-1]
+        if last == "\r":
+            parts.pop()
+        else:
+            parts[-1] = last[:-1]
+        length -= 1
+        chunk = "\r" + chunk
+
+    lines, rest = _split_on_newlines(chunk)
+    if lines:
+        lines[0] = "".join(parts) + lines[0]
+        if rest:
+            return lines, [rest], len(rest)
+        return lines, [], 0
+
+    if rest:
+        parts.append(rest)
+        length += len(rest)
+    return [], parts, length
+
+
+def _split_overflow(parts: list[str], length: int, limit: int) -> tuple[list[str], list[str], int]:
+    """Split unjoined pieces exceeding *limit* characters into partial line slices."""
+    if length <= limit:
+        return [], parts, length
+    text = "".join(parts)
+    slices: list[str] = []
+    while len(text) > limit:
+        slices.append(text[:limit])
+        text = text[limit:]
+    new_parts = [text] if text else []
+    return slices, new_parts, len(text)
+
+
 def start_stderr_drain(stream: IO[Any] | None, *, max_tail_chars: int = _DEFAULT_STDERR_TAIL_CHARS, name: str = "stderr-drain") -> StderrTail | None:
     """Continuously drain a child stderr pipe into a bounded :class:`StderrTail`.
 
@@ -541,13 +609,14 @@ class AsyncProcess:
         self.stdout_cb = stdout_cb
         self.stderr_cb = stderr_cb
         self.on_exit_cb = on_exit_cb
+        self._child_generation: int = 0
         # Pipes stay binary. text=True is ignored; see the popen kwargs below.
         self.process: Optional[subprocess.Popen[Any]] = None
 
         # Copy: setdefault must not mutate the caller's dict.
         self._popen_kwargs: dict[str, Any] = dict(popen_kwargs)
-        if sys.platform == "win32":
-            self._popen_kwargs.setdefault("creationflags", subprocess.CREATE_NO_WINDOW)
+        for key, value in get_subprocess_creationflags().items():
+            self._popen_kwargs.setdefault(key, value)
         self._popen_kwargs.setdefault("stdout", subprocess.PIPE)
         self._popen_kwargs.setdefault("stderr", subprocess.PIPE)
         # Force binary pipes. text=True was documented as keeping the
@@ -574,6 +643,12 @@ class AsyncProcess:
 
     def start(self) -> None:
         """Starts the process and its monitoring threads."""
+        # Bugfix: The wait thread for the previous child used to call the same
+        # on_exit_cb(rc) as the new child, and a handler that treats any exit as
+        # "the process died" could tear the replacement down. The generation is
+        # the child's identity; only the latest one notifies.
+        self._child_generation += 1
+        generation = self._child_generation
         if self.process is not None and self.process.poll() is None:
             # A second start() used to leak the previous Popen. terminate()
             # returns before the child is dead so it cannot join callback
@@ -610,30 +685,45 @@ class AsyncProcess:
         self._stderr_thread = stderr_thread
         # Pass this child and these readers. _wait_for_exit must not read
         # self.process later: a second start() replaces them.
-        self._wait_thread = run_in_background(self._wait_for_exit, proc, stdout_thread, stderr_thread, name=f"asyncproc-wait-{proc.pid}", dedicated=True)
+        self._wait_thread = run_in_background(self._wait_for_exit, proc, stdout_thread, stderr_thread, generation, name=f"asyncproc-wait-{proc.pid}", dedicated=True)
 
     def _read_stream(self, stream: Any, callback: Any) -> None:
-        # ``for line in stream`` blocks in readline. A child that writes a long
-        # burst with no newline fills the OS pipe and deadlocks. A callback
-        # exception used to leave that loop and close the pipe while the child
-        # was still writing. Short reads go through ``_iter_decoded_chunks`` so
-        # a UTF-8 code point split across reads is not replaced twice. The
-        # callback try/except stays inside the loop: a bad callback must not
-        # close the pipe early.
-        pending = ""
+        # Bugfix: The old pending += chunk buffer had no cap and rescanned the
+        # full accumulated text on every chunk. Feed only new text, hold pieces
+        # in a list until a newline is found, and cap the unjoined buffer at
+        # _MAX_STREAM_LINE_CHARS to deliver partial lines instead of leaking memory.
+        # Short reads go through ``_iter_decoded_chunks`` so a UTF-8 code point
+        # split across reads is not replaced twice. The callback try/except stays
+        # inside the loop: a bad callback must not close the pipe early.
+        parts: list[str] = []
+        length = 0
+        warned = False
         try:
             for chunk in _iter_decoded_chunks(stream):
-                pending += chunk
-                lines, pending = _split_on_newlines(pending)
+                lines, parts, length = _feed_line_buffer(parts, length, chunk)
                 for line in lines:
                     try:
                         callback(line.rstrip("\n\r"))
                     except Exception:
                         log.exception("AsyncProcess stream callback failed")
+                while length > _MAX_STREAM_LINE_CHARS:
+                    if not warned:
+                        log.warning(
+                            "AsyncProcess line exceeded %d characters without a newline; delivering a partial line",
+                            _MAX_STREAM_LINE_CHARS,
+                        )
+                        warned = True
+                    overflow_lines, parts, length = _split_overflow(parts, length, _MAX_STREAM_LINE_CHARS)
+                    for slice_line in overflow_lines:
+                        try:
+                            callback(slice_line.rstrip("\n\r"))
+                        except Exception:
+                            log.exception("AsyncProcess stream callback failed")
         finally:
-            if pending:
+            if parts:
+                tail = "".join(parts)
                 try:
-                    callback(pending.rstrip("\n\r"))
+                    callback(tail.rstrip("\n\r"))
                 except Exception:
                     log.exception("AsyncProcess stream callback failed")
             try:
@@ -688,7 +778,7 @@ class AsyncProcess:
             except OSError:
                 pass
 
-    def _wait_for_exit(self, proc: subprocess.Popen[Any], stdout_thread: BackgroundHandle | None, stderr_thread: BackgroundHandle | None) -> None:
+    def _wait_for_exit(self, proc: subprocess.Popen[Any], stdout_thread: BackgroundHandle | None, stderr_thread: BackgroundHandle | None, generation: int) -> None:
         # Wait and join only this call's child. Reading self.process and
         # the reader handles at wait time follows start() if it runs again
         # and points those at a new child, so the first wait thread blocks
@@ -710,6 +800,9 @@ class AsyncProcess:
         else:
             preview = ""
         log.debug("Process %s exited with rc=%s", preview, rc)
+        if generation != self._child_generation:
+            log.debug("Suppressing on_exit_cb for superseded child rc=%s", rc)
+            return
         if self.on_exit_cb:
             try:
                 self.on_exit_cb(rc)
