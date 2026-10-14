@@ -69,13 +69,22 @@ def release_drain_owner() -> None:
     the name when the first drain finishes would let a different owner (MCP)
     start under the drain that is still pumping. Acquire refuses a different
     name while one is set, so every holder at depth > 0 already has that name.
+    An underflow logs a warning and does not run idle callbacks.
     """
+    # Bugfix: An extra release used to decrement through zero, clamp, and
+    # still run idle callbacks, so a mismatched release looked like a real
+    # transition to idle and hid the missing acquire. Underflow now logs
+    # and returns without running idle callbacks.
     global _active_owner_name, _drain_depth
     became_idle = False
     with _drain_lock:
-        _drain_depth -= 1
         if _drain_depth <= 0:
+            log.warning("release_drain_owner underflow (owner=%r depth=%s)", _active_owner_name, _drain_depth)
             _drain_depth = 0
+            _active_owner_name = None
+            return
+        _drain_depth -= 1
+        if _drain_depth == 0:
             _active_owner_name = None
             became_idle = True
     if became_idle:

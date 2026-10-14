@@ -399,12 +399,15 @@ def test_replace_thread_guard_implementation(tmp_path: Path) -> None:
     assert "raise RuntimeError" not in stubbed
 
     # Verify stub executes cleanly and provides functional sync_host_dispatch
+    import plugin.framework.thread_guard as tg
+
     ns: dict = {}
     exec(stubbed, ns)
     assert ns["in_sync_host_dispatch"]() is False
     with ns["sync_host_dispatch"]():
         assert ns["in_sync_host_dispatch"]() is True
     assert ns["in_sync_host_dispatch"]() is False
+    assert ns["__all__"] == tg.__all__
 
 
 def test_omit_sidebar_test_hooks_deletes_file(tmp_path: Path) -> None:
