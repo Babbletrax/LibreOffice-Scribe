@@ -1045,3 +1045,378 @@ def test_sort_range_description_teaches_reorder_key_and_direction():
     assert "Banana" not in desc
     assert "Product" not in desc
     assert "Revenue" not in desc
+
+
+def test_preview_if_large_escapes_doubled_apostrophes():
+    from plugin.calc.cells import _preview_if_large
+
+    bridge = MagicMock()
+    bridge.resolve_range_or_address.return_value = _range_addr(
+        start_col=0, end_col=7, start_row=0, end_row=499
+    )
+    preview = _preview_if_large(bridge, "'O''Brien'!A1:H500")
+    assert preview is not None
+    assert preview["preview_range"] == "'O''Brien'!A1:H10"
+    assert preview["sheet_prefix"] == "'O''Brien'!"
+
+
+def test_read_cell_range_oversized_unqualified_named_range_clips_on_resolved_sheet():
+    from plugin.calc.cells import ReadCellRange
+
+    ctx = SimpleNamespace(doc=MagicMock())
+    cell_range = _range_addr(start_col=0, end_col=1, start_row=0, end_row=99)
+    sheet_mock = MagicMock()
+    sheet_mock.getName.return_value = "O'Brien"
+    cell_range.getSpreadsheet = MagicMock(return_value=sheet_mock)
+    cell_range.getDataArray.return_value = (("Col1", "Col2"), (1, 2))
+
+    with (
+        patch("plugin.calc.cells.CalcBridge") as bridge_cls,
+        patch("plugin.calc.cells.CellInspector") as inspector_cls,
+    ):
+        bridge = bridge_cls.return_value
+        bridge.resolve_range_or_address.return_value = cell_range
+        inspector_cls.return_value.read_range.return_value = [[{"value": 1}]]
+
+        ReadCellRange().execute(ctx, range=["Sales"])
+
+        calls = bridge.resolve_range_or_address.call_args_list
+        assert len(calls) == 2
+        assert calls[0].args[0] == "Sales"
+        assert calls[1].args[0] == "'O''Brien'.A1:B100"
+
+
+def test_read_cell_range_oversized_unqualified_named_range_clips_on_identifier_sheet():
+    from plugin.calc.cells import ReadCellRange
+
+    ctx = SimpleNamespace(doc=MagicMock())
+    cell_range = _range_addr(start_col=0, end_col=1, start_row=0, end_row=99)
+    sheet_mock = MagicMock()
+    sheet_mock.getName.return_value = "Other"
+    cell_range.getSpreadsheet = MagicMock(return_value=sheet_mock)
+    cell_range.getDataArray.return_value = (("Col1", "Col2"), (1, 2))
+
+    with (
+        patch("plugin.calc.cells.CalcBridge") as bridge_cls,
+        patch("plugin.calc.cells.CellInspector") as inspector_cls,
+    ):
+        bridge = bridge_cls.return_value
+        bridge.resolve_range_or_address.return_value = cell_range
+        inspector_cls.return_value.read_range.return_value = [[{"value": 1}]]
+
+        ReadCellRange().execute(ctx, range=["Sales"])
+
+        calls = bridge.resolve_range_or_address.call_args_list
+        assert len(calls) == 2
+        assert calls[0].args[0] == "Sales"
+        assert calls[1].args[0] == "Other.A1:B100"
+
+
+def test_column_distinct_peek_counts_numeric_first_row_as_data():
+    from plugin.calc.cells import _column_distinct_peek
+
+    peek = _column_distinct_peek(((1, 2), (1, 3)), start_column=0)
+    assert len(peek) == 2
+    assert peek[0]["column"] == "A"
+    assert peek[0]["unique_count"] == 1
+    assert peek[0]["values"] == ["1"]
+    assert peek[1]["column"] == "B"
+    assert peek[1]["unique_count"] == 2
+    assert peek[1]["values"] == ["2", "3"]
+
+
+def test_try_column_distinct_peek_sets_scanned_rows_over_cap():
+    from plugin.calc.cells import _try_column_distinct_peek
+
+    bridge = MagicMock()
+    mock_range = MagicMock()
+    mock_range.getDataArray.return_value = (("A",), ("B",))
+    bridge.resolve_range_or_address.return_value = mock_range
+
+    preview_large = {
+        "start_column": 0,
+        "start_row": 0,
+        "columns": 1,
+        "rows": 2001,
+        "sheet_prefix": "",
+    }
+    peek_large = _try_column_distinct_peek(bridge, "A1:A2001", preview_large)
+    assert peek_large is not None
+    assert peek_large[0]["scanned_rows"] == 2000
+
+    preview_small = {
+        "start_column": 0,
+        "start_row": 0,
+        "columns": 1,
+        "rows": 10,
+        "sheet_prefix": "",
+    }
+    peek_small = _try_column_distinct_peek(bridge, "A1:A10", preview_small)
+    assert peek_small is not None
+    assert "scanned_rows" not in peek_small[0]
+
+
+def test_read_cell_range_partial_failure():
+    from plugin.calc.cells import ReadCellRange
+
+    ctx = SimpleNamespace(doc=MagicMock())
+    with (
+        patch("plugin.calc.cells.CalcBridge") as bridge_cls,
+        patch("plugin.calc.cells.CellInspector") as inspector_cls,
+    ):
+        bridge = bridge_cls.return_value
+        bridge.resolve_range_or_address.return_value = _range_addr(start_col=0, end_col=0, start_row=0, end_row=0)
+        grid1 = [[{"value": "ok"}]]
+        inspector = inspector_cls.return_value
+        inspector.read_range.side_effect = [grid1, RuntimeError("bad range")]
+
+        res = ReadCellRange().execute(ctx, range=["A1", "B2"])
+        assert res["status"] == "error"
+        assert "Failed to read 1 of 2 ranges" in res["message"]
+        assert "B2" in res["message"]
+        assert len(res["result"]) == 2
+        assert res["result"][0]["status"] == "ok"
+        assert res["result"][0]["result"] == [grid1]
+        assert res["result"][1]["status"] == "error"
+        assert res["result"][1]["range"] == "B2"
+        assert "bad range" in res["result"][1]["message"]
+
+        inspector.read_range.side_effect = RuntimeError("single fail")
+        res_single = ReadCellRange().execute(ctx, range=["C3"])
+        assert res_single["status"] == "error"
+        assert res_single["range"] == "C3"
+        assert "single fail" in res_single["message"]
+
+
+def test_write_cell_range_rejects_top_level_bool():
+    from plugin.calc.cells import WriteCellRange
+
+    ctx = SimpleNamespace(doc=MagicMock())
+    with patch("plugin.calc.cells.CellManipulator") as manipulator_cls:
+        res = WriteCellRange().execute(ctx, range=["A1"], values=True)
+        assert res["status"] == "error"
+        assert "boolean" in res["message"]
+        manipulator_cls.return_value.write_formula_range.assert_not_called()
+
+
+def test_write_cell_range_multi_range_preserves_array_payload():
+    from plugin.calc.cells import WriteCellRange
+
+    ctx = SimpleNamespace(doc=MagicMock())
+    dict_res = {
+        "message": "Array formula entered on A1:A2 (2 x 1).",
+        "array_range": "A1:A2",
+        "rows": 2,
+        "cols": 1,
+        "preview": [[1], [2]],
+        "warning": "cut",
+    }
+    with patch("plugin.calc.cells.CellManipulator") as manipulator_cls:
+        manipulator = manipulator_cls.return_value
+        manipulator.prepare_array_formula_if_needed.return_value = None
+        manipulator.write_formula_range.side_effect = [dict_res, "wrote"]
+
+        res = WriteCellRange().execute(ctx, range=["A1:A2", "B1:B2"], values="=SEQUENCE(2)")
+        assert res["status"] == "ok"
+        assert res["message"] == "Wrote to 2 ranges"
+        assert len(res["ranges"]) == 2
+        assert res["ranges"][0]["warning"] == "cut"
+        assert res["ranges"][0]["array_range"] == "A1:A2"
+        assert res["ranges"][0]["range"] == "A1:A2"
+        assert res["ranges"][1] == {"range": "B1:B2", "message": "wrote"}
+
+
+def test_write_cell_range_multi_range_rolls_back_on_error():
+    from plugin.calc import CalcError
+    from plugin.calc.cells import WriteCellRange
+
+    titles_stack = []
+    undo_mgr = MagicMock()
+    undo_mgr.getAllUndoActionTitles.side_effect = lambda: list(titles_stack)
+
+    def fake_undo():
+        if titles_stack:
+            titles_stack.pop(0)
+
+    undo_mgr.undo.side_effect = fake_undo
+    doc = MagicMock()
+    doc.getUndoManager.return_value = undo_mgr
+    ctx = SimpleNamespace(doc=doc)
+
+    class FakeCompoundUndo:
+        def __init__(self, doc, title):
+            self.title = title
+            self.entered = True
+
+        def __enter__(self):
+            titles_stack.insert(0, self.title)
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    with (
+        patch("plugin.writer.edit_review.WriterCompoundUndo", FakeCompoundUndo),
+        patch("plugin.calc.cells.CellManipulator") as manipulator_cls,
+    ):
+        manipulator = manipulator_cls.return_value
+        manipulator.prepare_array_formula_if_needed.return_value = None
+        manipulator.write_formula_range.side_effect = ["wrote", CalcError("occupied")]
+
+        res = WriteCellRange().execute(ctx, range=["A1", "B1"], values="1")
+        assert res["status"] == "error"
+        assert "Nothing was kept." in res["message"]
+        assert "B1" in res["message"]
+        undo_mgr.undo.assert_called_once()
+
+
+def test_set_cell_style_multi_range_rolls_back_on_error():
+    from plugin.calc import CalcError
+    from plugin.calc.cells import SetCellStyle
+
+    titles_stack = []
+    undo_mgr = MagicMock()
+    undo_mgr.getAllUndoActionTitles.side_effect = lambda: list(titles_stack)
+
+    def fake_undo():
+        if titles_stack:
+            titles_stack.pop(0)
+
+    undo_mgr.undo.side_effect = fake_undo
+    doc = MagicMock()
+    doc.getUndoManager.return_value = undo_mgr
+    ctx = SimpleNamespace(doc=doc)
+
+    class FakeCompoundUndo:
+        def __init__(self, doc, title):
+            self.title = title
+            self.entered = True
+
+        def __enter__(self):
+            titles_stack.insert(0, self.title)
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+    with (
+        patch("plugin.writer.edit_review.WriterCompoundUndo", FakeCompoundUndo),
+        patch("plugin.calc.cells.CellManipulator") as manipulator_cls,
+    ):
+        manipulator = manipulator_cls.return_value
+        manipulator.set_cell_style.side_effect = [None, CalcError("style failed")]
+
+        res = SetCellStyle().execute(ctx, range=["A1", "B1"], bold=True)
+        assert res["status"] == "error"
+        assert "Nothing was kept." in res["message"]
+        assert "B1" in res["message"]
+        undo_mgr.undo.assert_called_once()
+
+
+def test_set_cell_style_validation():
+    from plugin.calc.cells import SetCellStyle
+
+    ctx = SimpleNamespace(doc=MagicMock())
+    with patch("plugin.calc.cells.CellManipulator") as manipulator_cls:
+        manipulator = manipulator_cls.return_value
+
+        res = SetCellStyle().execute(ctx, range=["A1"])
+        assert res["status"] == "error"
+        assert "No style properties" in res["message"]
+        manipulator.set_cell_style.assert_not_called()
+
+        res_color = SetCellStyle().execute(ctx, range=["A1"], bg_color=255)
+        assert res_color["status"] == "error"
+        assert "bg_color" in res_color["message"]
+        assert "int" in res_color["message"]
+        manipulator.set_cell_style.assert_not_called()
+
+        res_empty = SetCellStyle().execute(ctx, range=["A1"], bg_color="", bold=True)
+        assert res_empty["status"] == "ok"
+        manipulator.set_cell_style.assert_called_once()
+        assert manipulator.set_cell_style.call_args.kwargs["bg_color"] is None
+        assert manipulator.set_cell_style.call_args.kwargs["bold"] is True
+
+
+def test_merge_cells_validation():
+    from plugin.calc.cells import MergeCells
+
+    ctx = SimpleNamespace(doc=MagicMock())
+    with patch("plugin.calc.cells.CellManipulator") as manipulator_cls:
+        manipulator = manipulator_cls.return_value
+
+        res = MergeCells().execute(ctx, range=["A1:B1"], center="false")
+        assert res["status"] == "error"
+        assert "center" in res["message"]
+        manipulator.merge_cells.assert_not_called()
+
+        res_ok = MergeCells().execute(ctx, range=["A1:B1"])
+        assert res_ok["status"] == "ok"
+        manipulator.merge_cells.assert_called_once_with("A1:B1", center=True)
+
+
+def test_sort_range_validation():
+    from plugin.calc.cells import SortRange
+
+    ctx = SimpleNamespace(doc=MagicMock())
+    with patch("plugin.calc.cells.CellManipulator") as manipulator_cls:
+        manipulator = manipulator_cls.return_value
+
+        res_asc = SortRange().execute(ctx, range=["A1:B2"], has_header=True, ascending="false")
+        assert res_asc["status"] == "error"
+        assert "ascending" in res_asc["message"]
+        manipulator.sort_range.assert_not_called()
+
+        res_sc_bool = SortRange().execute(ctx, range=["A1:B2"], has_header=True, sort_column=True)
+        assert res_sc_bool["status"] == "error"
+        assert "sort_column" in res_sc_bool["message"]
+        manipulator.sort_range.assert_not_called()
+
+        res_sc_neg = SortRange().execute(ctx, range=["A1:B2"], has_header=True, sort_column=-1)
+        assert res_sc_neg["status"] == "error"
+        assert "sort_column" in res_sc_neg["message"]
+        manipulator.sort_range.assert_not_called()
+
+        manipulator.sort_range.return_value = "Sorted"
+        res_ok = SortRange().execute(ctx, range=["A1:B2"], has_header=True)
+        assert res_ok["status"] == "ok"
+        manipulator.sort_range.assert_called_once_with("A1:B2", sort_column=0, ascending=True, has_header=True)
+
+
+def test_delete_structure_validation():
+    from plugin.calc.cells import DeleteStructure
+
+    ctx = SimpleNamespace(doc=MagicMock())
+    with patch("plugin.calc.cells.CellManipulator") as manipulator_cls:
+        manipulator = manipulator_cls.return_value
+        manipulator.delete_structure.return_value = "Deleted"
+
+        for bad_row in ("²", "5x", 0, -1):
+            res = DeleteStructure().execute(ctx, structure_type="rows", start=bad_row)
+            assert res["status"] == "error", f"Expected error for rows start={bad_row!r}"
+            assert "start for rows" in res["message"]
+            manipulator.delete_structure.assert_not_called()
+
+        for good_row in ("5", 5):
+            res = DeleteStructure().execute(ctx, structure_type="rows", start=good_row)
+            assert res["status"] == "ok"
+            manipulator.delete_structure.assert_called_with("rows", 5, count=1)
+        manipulator.delete_structure.reset_mock()
+
+        for bad_col in ("3", 3):
+            res = DeleteStructure().execute(ctx, structure_type="columns", start=bad_col)
+            assert res["status"] == "error", f"Expected error for columns start={bad_col!r}"
+            assert "start for columns" in res["message"]
+            manipulator.delete_structure.assert_not_called()
+
+        res_c = DeleteStructure().execute(ctx, structure_type="columns", start="c")
+        assert res_c["status"] == "ok"
+        manipulator.delete_structure.assert_called_with("columns", "C", count=1)
+        manipulator.delete_structure.reset_mock()
+
+        for bad_count in (0, -1, True, "2"):
+            res = DeleteStructure().execute(ctx, structure_type="rows", start=5, count=bad_count)
+            assert res["status"] == "error", f"Expected error for count={bad_count!r}"
+            assert "count" in res["message"]
+            manipulator.delete_structure.assert_not_called()
+

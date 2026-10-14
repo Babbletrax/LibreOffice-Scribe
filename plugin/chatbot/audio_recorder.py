@@ -405,7 +405,7 @@ class AudioRecorder:
                         detector = self._silence_detector
                         if detector is None or not silence_config.enabled:
                             return
-                        result = detector.process_chunk(pcm, frame_count=frames)
+                        result = detector.process_chunk(pcm)
                         if detector.should_emit_silence_progress(result):
                             self._notify_silence_progress(result.silence_ms)
                         if result.should_stop:

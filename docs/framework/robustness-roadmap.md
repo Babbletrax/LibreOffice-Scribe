@@ -478,7 +478,7 @@ Smells worth remembering, with **designs we are not doing**. Smaller follow-ups 
 
 | Smell | Do not do | Smaller if ever |
 |---|---|---|
-| `ConfigService._config_path` ifs in get/set/remove | `ConfigBackingStore` interface | tiny file-read/write helpers |
+| `ConfigService._config_path` ifs in get/set/remove | `ConfigBackingStore` interface | **done:** the ifs are gone; `get` / `set` / `remove` / `get_dict` call the config module; tests patch `_config_path`; do not add `ConfigBackingStore` |
 | `MODULES is _DEFAULT_MODULES` dual dotted-key paths | delete the loop path without a dedicated test pass | rebuild dicts only in `set_manifest_modules` later |
 | `ToolBaseDummy` copies `get_collection` / `get_item` | mixin / second ABC | **done:** Dummy no longer copies those helpers (`_tool_error` stays) |
 | `SafeLogger` vs `safe_log_exception` vs `log_exception` | merge into one wrapper | leave; fallbacks differ |

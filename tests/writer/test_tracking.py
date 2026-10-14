@@ -145,7 +145,8 @@ def test_track_changes_list():
     enum_mock.nextElement.return_value = redline_mock
     
     ctx.doc.getRedlines.return_value.createEnumeration.return_value = enum_mock
-    
+    ctx.doc.getRedlines.return_value.getCount.return_value = 1
+
     with patch("plugin.writer.tracking.describe_match_location", return_value="body"):
         res = tool.execute(ctx)
     assert res["status"] == "ok"
@@ -210,7 +211,7 @@ def test_track_changes_show_readback_mismatch():
 def test_track_changes_show_calc_like_controller_returns_stub():
     """Spreadsheet controllers have no getViewSettings; Calc path is a no-op stub for now."""
     ctx = MagicMock()
-    doc = MagicMock()
+    doc = MagicMock(spec=["getCurrentController", "setPropertyValue"])
 
     class CalcLikeController:
         pass
@@ -222,6 +223,21 @@ def test_track_changes_show_calc_like_controller_returns_stub():
     assert res["status"] == "ok"
     assert res.get("calc_track_changes_show_unsupported") is True
     assert "not supported" in res["message"].lower()
+    doc.setPropertyValue.assert_not_called()
+
+
+def test_track_changes_show_ignores_view_settings_without_redlines():
+    ctx = MagicMock()
+    doc = MagicMock(spec=["getCurrentController", "setPropertyValue"])
+    controller = MagicMock()
+    controller.getViewSettings.return_value = MagicMock()
+    doc.getCurrentController.return_value = controller
+    ctx.doc = doc
+
+    res = TrackChangesShow().execute(ctx, show=True)
+    assert res["status"] == "ok"
+    assert res.get("calc_track_changes_show_unsupported") is True
+    doc.setPropertyValue.assert_not_called()
 
 @pytest.mark.parametrize(
     "action, value",
@@ -361,44 +377,46 @@ def test_manage_tracked_changes_accept():
     ctx, dispatcher, frame, _ = _create_mock_ctx()
     tool = ManageTrackedChanges()
 
-    redline_mock, span_cursor = _redline_property_set()
+    r = _fake_redline("user edit")
+    start = r.getPropertyValue("RedlineStart")
+    span_cursor = MagicMock()
+    start.getText.return_value.createTextCursorByRange.return_value = span_cursor
+    items = [r]
+    _install_redlines(ctx, items)
 
-    # We need to mock createEnumeration to return a new enum each time.
-    def _create_enum():
-        enum = MagicMock()
-        enum.hasMoreElements.side_effect = [True, False]
-        enum.nextElement.return_value = redline_mock
-        return enum
-
-    ctx.doc.getRedlines.return_value.createEnumeration.side_effect = _create_enum
-
-    # Mock redlines.getCount() before and after
-    ctx.doc.getRedlines.return_value.getCount.side_effect = [1, 0]
+    def do_dispatch(*args):
+        items.clear()
+        return MagicMock()
+    dispatcher.executeDispatch.side_effect = do_dispatch
 
     res = tool.execute(ctx, action="accept", index=0)
     assert res["status"] == "ok"
+    assert "track_changes_list" in res["message"]
+    assert "0" in res["message"]
     ctx.doc.getCurrentController().select.assert_called_with(span_cursor)
     dispatcher.executeDispatch.assert_called_with(frame, ".uno:AcceptTrackedChange", "", 0, ())
+
 
 def test_manage_tracked_changes_reject():
     ctx, dispatcher, frame, _ = _create_mock_ctx()
     tool = ManageTrackedChanges()
 
-    redline_mock, span_cursor = _redline_property_set()
+    r = _fake_redline("user edit")
+    start = r.getPropertyValue("RedlineStart")
+    span_cursor = MagicMock()
+    start.getText.return_value.createTextCursorByRange.return_value = span_cursor
+    items = [r]
+    _install_redlines(ctx, items)
 
-    def _create_enum():
-        enum = MagicMock()
-        enum.hasMoreElements.side_effect = [True, False]
-        enum.nextElement.return_value = redline_mock
-        return enum
-
-    ctx.doc.getRedlines.return_value.createEnumeration.side_effect = _create_enum
-
-    # Mock redlines.getCount() before and after
-    ctx.doc.getRedlines.return_value.getCount.side_effect = [1, 0]
+    def do_dispatch(*args):
+        items.clear()
+        return MagicMock()
+    dispatcher.executeDispatch.side_effect = do_dispatch
 
     res = tool.execute(ctx, action="reject", index=0)
     assert res["status"] == "ok"
+    assert "track_changes_list" in res["message"]
+    assert "0" in res["message"]
     ctx.doc.getCurrentController().select.assert_called_with(span_cursor)
     dispatcher.executeDispatch.assert_called_with(frame, ".uno:RejectTrackedChange", "", 0, ())
 
@@ -424,16 +442,28 @@ from plugin.writer.review_scan import TOKEN_PREFIX
 _AGENT_COMMENT = TOKEN_PREFIX + "sess123:0"
 
 
-def _fake_redline(comment, raise_comment=False):
+def _fake_redline(comment, raise_comment=False, text_mock=None):
     rl = MagicMock()
-    props = {"RedlineComment": comment, "RedlineIdentifier": f"id:{comment}",
-             # Real redlines expose these (and no getAnchor); the accept/reject selection uses them.
-             "RedlineStart": MagicMock(), "RedlineEnd": MagicMock()}
+    start = MagicMock()
+    if text_mock is not None:
+        start.getText.return_value = text_mock
+    end = MagicMock()
+    if text_mock is not None:
+        end.getText.return_value = text_mock
+    props = {
+        "RedlineComment": comment,
+        "RedlineIdentifier": f"id:{comment}",
+        "RedlineType": "Insert",
+        "RedlineAuthor": "Author",
+        "RedlineDateTime": None,
+        "RedlineStart": start,
+        "RedlineEnd": end,
+    }
 
     def _get(name):
         if raise_comment and name == "RedlineComment":
             raise RuntimeError("comment read boom")
-        return props[name]
+        return props.get(name, "")
 
     rl.getPropertyValue.side_effect = _get
     return rl
@@ -442,7 +472,11 @@ def _fake_redline(comment, raise_comment=False):
 def _install_redlines(ctx, items, count=None):
     """Wire ctx.doc.getRedlines() to enumerate *items* (count override simulates a truncated scan)."""
     rls = ctx.doc.getRedlines.return_value
-    rls.getCount.return_value = len(items) if count is None else count
+    if count is not None:
+        rls.getCount.side_effect = None
+        rls.getCount.return_value = count
+    else:
+        rls.getCount.side_effect = lambda: len(items)
 
     def _mk_enum(*_a, **_k):
         seq = list(items)
@@ -475,7 +509,9 @@ def test_reject_all_blocked_when_agent_change_pending():
 def test_accept_all_allowed_with_only_user_redlines():
     # The user's OWN tracked changes (no wa-review token) may be bulk-resolved on request.
     ctx, dispatcher, frame, _ = _create_mock_ctx()
-    _install_redlines(ctx, [_fake_redline("")])
+    items = [_fake_redline("user edit")]
+    _install_redlines(ctx, items)
+    dispatcher.executeDispatch.side_effect = lambda *_: items.clear()
     res = ManageTrackedChanges().execute(ctx, action="accept_all")
     assert res["status"] == "ok"
     dispatcher.executeDispatch.assert_called_with(frame, ".uno:AcceptAllTrackedChanges", "", 0, ())
@@ -510,41 +546,37 @@ def test_single_reject_blocked_on_agent_redline():
 
 def test_single_accept_allowed_on_user_redline():
     ctx, dispatcher, frame, _ = _create_mock_ctx()
-    redline = _fake_redline("")
-    # Provide dummy values to pass the overlap check logic
     text_mock = MagicMock()
     text_mock.compareRegionStarts.return_value = 1
-    redline.getPropertyValue.return_value.getText.return_value = text_mock
-    _install_redlines(ctx, [redline])
-    ctx.doc.getRedlines.return_value.getCount.side_effect = [1, 0]
+    redline = _fake_redline("user edit", text_mock=text_mock)
+    items = [redline]
+    _install_redlines(ctx, items)
+    dispatcher.executeDispatch.side_effect = lambda *_: items.clear()
     res = ManageTrackedChanges().execute(ctx, action="accept", index=0)
     assert res["status"] == "ok"
+    assert "track_changes_list" in res["message"]
+    assert "0" in res["message"]
     dispatcher.executeDispatch.assert_called_with(frame, ".uno:AcceptTrackedChange", "", 0, ())
 
 
 def test_single_accept_allowed_on_touching_ranges():
     ctx, dispatcher, frame, _ = _create_mock_ctx()
-    r1 = _fake_redline("")
-    r2 = _fake_redline("")
-
     text_mock = MagicMock()
     # 0 means they are strictly adjacent (touching)
     text_mock.compareRegionStarts.return_value = 0
     text_mock.compareRegionEnds.return_value = 0
 
-    start_mock1 = MagicMock()
-    start_mock1.getText.return_value = text_mock
-    r1.getPropertyValue.side_effect = lambda prop: start_mock1 if prop == "RedlineStart" else start_mock1
+    r1 = _fake_redline("user1", text_mock=text_mock)
+    r2 = _fake_redline("user2", text_mock=text_mock)
 
-    start_mock2 = MagicMock()
-    start_mock2.getText.return_value = text_mock
-    r2.getPropertyValue.side_effect = lambda prop: start_mock2 if prop == "RedlineStart" else start_mock2
-
-    _install_redlines(ctx, [r1, r2])
-    ctx.doc.getRedlines.return_value.getCount.side_effect = [2, 1]
+    items = [r1, r2]
+    _install_redlines(ctx, items)
+    dispatcher.executeDispatch.side_effect = lambda *_: items.remove(r1)
 
     res = ManageTrackedChanges().execute(ctx, action="accept", index=0)
     assert res["status"] == "ok"
+    assert "track_changes_list" in res["message"]
+    assert "0" in res["message"]
     dispatcher.executeDispatch.assert_called_with(frame, ".uno:AcceptTrackedChange", "", 0, ())
 
 def test_single_accept_blocked_on_overlap():
@@ -647,11 +679,202 @@ def test_track_changes_list_record_changes_read_fails():
 
 @pytest.mark.parametrize("action", ["accept_all", "reject_all"])
 def test_manage_tracked_changes_bulk_unsupported_when_dispatch_returns_none(action):
-    ctx, dispatcher, _, _ = _create_mock_ctx()
+    ctx = MagicMock()
+    doc = MagicMock(spec=["getCurrentController"])
+    dispatcher = MagicMock()
     dispatcher.executeDispatch.return_value = None
+    smgr = MagicMock()
+    smgr.createInstanceWithContext.return_value = dispatcher
+    ctx.ctx.ServiceManager = smgr
+    controller = MagicMock()
+    frame = MagicMock()
+    controller.getFrame.return_value = frame
+    doc.getCurrentController.return_value = controller
+    ctx.doc = doc
+
     res = ManageTrackedChanges().execute(ctx, action=action)
     assert res["status"] == "error"
     assert res["code"] == "UNSUPPORTED"
     assert res["tracked_changes_bulk_unsupported"] is True
     assert res["message"] == "Accepting or rejecting all tracked changes is not supported on this document."
+
+
+def test_single_accept_wrong_redline_is_undone():
+    ctx, dispatcher, frame, _ = _create_mock_ctx()
+    text_mock = MagicMock()
+    text_mock.compareRegionStarts.return_value = 1
+    r0 = _fake_redline("user 0", text_mock=text_mock)
+    r1 = _fake_redline("user 1", text_mock=text_mock)
+
+    items = [r0, r1]
+    _install_redlines(ctx, items)
+    dispatcher.executeDispatch.side_effect = lambda *_: items.remove(r1)
+
+    res = ManageTrackedChanges().execute(ctx, action="accept", index=0)
+    assert res["status"] == "error"
+    assert "different tracked change" in res["message"]
+    dispatcher.executeDispatch.assert_called_once()
+    ctx.doc.getUndoManager().undo.assert_called_once()
+
+
+def test_single_accept_silent_when_nothing_changes():
+    ctx, dispatcher, frame, _ = _create_mock_ctx()
+    text_mock = MagicMock()
+    text_mock.compareRegionStarts.return_value = 1
+    r0 = _fake_redline("user 0", text_mock=text_mock)
+
+    items = [r0]
+    _install_redlines(ctx, items)
+
+    res = ManageTrackedChanges().execute(ctx, action="accept", index=0)
+    assert res["status"] == "error"
+    assert res["message"] == "Failed to resolve tracked change: operation silently failed."
+    ctx.doc.getUndoManager().undo.assert_not_called()
+
+
+def test_single_accept_skips_redline_in_another_text():
+    ctx, dispatcher, frame, _ = _create_mock_ctx()
+
+    class PlainTextTarget:
+        def createTextCursorByRange(self, rng):
+            return MagicMock()
+
+        def compareRegionStarts(self, *args):
+            return 1
+
+    class PlainTextOther:
+        def compareRegionStarts(self, *args):
+            raise AssertionError("other_text.compareRegionStarts should not be called")
+
+    target_text = PlainTextTarget()
+    other_text = PlainTextOther()
+
+    target_start = MagicMock()
+    target_start.getText.return_value = target_text
+    r0 = _fake_redline("user 0")
+    r0.getPropertyValue.side_effect = lambda prop: target_start if prop in ("RedlineStart", "RedlineEnd") else {
+        "RedlineComment": "user 0",
+        "RedlineIdentifier": "id:user 0",
+        "RedlineType": "Insert",
+        "RedlineAuthor": "Author",
+        "RedlineDateTime": None,
+    }.get(prop, "")
+
+    other_start = MagicMock()
+    other_start.getText.return_value = other_text
+    r1 = _fake_redline("user 1")
+    r1.getPropertyValue.side_effect = lambda prop: other_start if prop in ("RedlineStart", "RedlineEnd") else {
+        "RedlineComment": "user 1",
+        "RedlineIdentifier": "id:user 1",
+        "RedlineType": "Insert",
+        "RedlineAuthor": "Author",
+        "RedlineDateTime": None,
+    }.get(prop, "")
+
+    items = [r0, r1]
+    _install_redlines(ctx, items)
+    dispatcher.executeDispatch.side_effect = lambda *_: items.remove(r0)
+
+    res = ManageTrackedChanges().execute(ctx, action="accept", index=0)
+    assert res["status"] == "ok"
+    assert "track_changes_list" in res["message"]
+    assert "0" in res["message"]
+    dispatcher.executeDispatch.assert_called_with(frame, ".uno:AcceptTrackedChange", "", 0, ())
+    assert items == [r1]
+
+
+def test_single_accept_same_text_compare_error_still_refuses():
+    ctx, dispatcher, frame, _ = _create_mock_ctx()
+
+    class PlainText:
+        def createTextCursorByRange(self, rng):
+            return MagicMock()
+
+        def compareRegionStarts(self, *args):
+            raise RuntimeError("cross")
+
+    same_text = PlainText()
+    start_mock = MagicMock()
+    start_mock.getText.return_value = same_text
+
+    r0 = _fake_redline("user 0")
+    r0.getPropertyValue.side_effect = lambda prop: start_mock if prop in ("RedlineStart", "RedlineEnd") else {
+        "RedlineComment": "user 0",
+        "RedlineIdentifier": "id:user 0",
+        "RedlineType": "Insert",
+        "RedlineAuthor": "Author",
+        "RedlineDateTime": None,
+    }.get(prop, "")
+
+    r1 = _fake_redline("user 1")
+    r1.getPropertyValue.side_effect = lambda prop: start_mock if prop in ("RedlineStart", "RedlineEnd") else {
+        "RedlineComment": "user 1",
+        "RedlineIdentifier": "id:user 1",
+        "RedlineType": "Insert",
+        "RedlineAuthor": "Author",
+        "RedlineDateTime": None,
+    }.get(prop, "")
+
+    items = [r0, r1]
+    _install_redlines(ctx, items)
+
+    res = ManageTrackedChanges().execute(ctx, action="accept", index=0)
+    assert res["status"] == "error"
+    assert "Failed to read bounds" in res["message"]
+    dispatcher.executeDispatch.assert_not_called()
+
+
+def test_track_changes_list_truncated_enumeration_is_an_error():
+    ctx, _, _, _ = _create_mock_ctx()
+    tool = TrackChangesList()
+
+    r0 = _fake_redline("user 0")
+    _install_redlines(ctx, [r0], count=2)
+
+    res = tool.execute(ctx)
+    assert res["status"] == "error"
+    assert "saw 1 of 2" in res["message"]
+    assert "changes" not in res
+    assert "count" not in res
+
+
+def test_single_accept_truncated_enumeration_does_not_dispatch():
+    ctx, dispatcher, frame, _ = _create_mock_ctx()
+    r0 = _fake_redline("user 0")
+    _install_redlines(ctx, [r0], count=2)
+
+    res = ManageTrackedChanges().execute(ctx, action="accept", index=0)
+    assert res["status"] == "error"
+    assert "saw 1 of 2" in res["message"]
+    dispatcher.executeDispatch.assert_not_called()
+
+
+def test_accept_all_writer_ignores_none_dispatch_when_count_clears():
+    ctx, dispatcher, frame, _ = _create_mock_ctx()
+    redline = _fake_redline("user edit")
+    items = [redline]
+    _install_redlines(ctx, items)
+
+    def do_dispatch(*args):
+        items.clear()
+        return None
+
+    dispatcher.executeDispatch.side_effect = do_dispatch
+
+    res = ManageTrackedChanges().execute(ctx, action="accept_all")
+    assert res["status"] == "ok"
+    assert res["message"] == "All tracked changes accepted."
+
+
+def test_accept_all_writer_errors_when_count_unchanged():
+    ctx, dispatcher, frame, _ = _create_mock_ctx()
+    redline = _fake_redline("user edit")
+    items = [redline]
+    _install_redlines(ctx, items)
+    dispatcher.executeDispatch.return_value = MagicMock()
+
+    res = ManageTrackedChanges().execute(ctx, action="accept_all")
+    assert res["status"] == "error"
+    assert res["message"] == "Failed to resolve all tracked changes."
+    ctx.doc.getUndoManager().undo.assert_not_called()
 

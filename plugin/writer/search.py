@@ -22,7 +22,7 @@ import logging
 import re as re_mod
 from typing import TYPE_CHECKING, Any, Iterator, Literal, overload
 
-from plugin.doc.text_helpers import clone_text_range, get_string_without_tracked_deletions, normalize_linebreaks
+from plugin.doc.text_helpers import get_string_without_tracked_deletions, normalize_linebreaks, with_view_cursor_left_body_locked
 from plugin.framework.tool import ToolBase, ToolBaseDummy
 from plugin.framework.uno_context import uno_same
 
@@ -33,6 +33,8 @@ if TYPE_CHECKING:
 log = logging.getLogger("writeragent.writer")
 
 MAX_SEARCH_REPLACEMENTS = 200
+DEFAULT_SEARCH_RESULTS = 20
+MAX_SEARCH_HITS = 10000
 
 # Non-breaking / exotic spaces -> ASCII space. Length-preserving (each maps to a
 # single BMP char) so character offsets into the document text stay valid. NBSP
@@ -61,7 +63,16 @@ _HORIZONTAL_SPACE_RE = HORIZONTAL_SPACE_CLASS + "+"
 
 
 def find_next_after_match(doc: Any, found: Any, sd: Any) -> Any:
-    """Resume LO search after *found* — use getEnd() so the next hit starts after the match."""
+    """Resume LO search after *found* — use getEnd() so the next hit starts after the match.
+
+    A zero-length hit does not advance getEnd(), so returning None is what stops
+    the edit-path loops at one empty range.
+    """
+    try:
+        if found.getString() == "":
+            return None
+    except Exception:
+        pass
     return doc.findNext(found.getEnd(), sd)
 
 
@@ -175,14 +186,28 @@ def build_search_not_found_response(
     }
 
 
-def find_text_ranges(model: Any, ctx: Any, search: str, start: int = 0, limit: int | None = None, case_sensitive: bool = True) -> list[dict[str, Any]]:
+def find_text_ranges(
+    model: Any,
+    ctx: Any,
+    search: str,
+    start: int = 0,
+    limit: int | None = None,
+    case_sensitive: bool = True,
+    *,
+    body_only: bool = False,
+) -> list[dict[str, Any]]:
     """Find occurrences of *search*, returning a list of
     ``{"start": int, "end": int, "text": str}`` dicts.
 
     FOLLOW-UP: seeds ``findNext`` from body text but measures each hit with
     ``found.getText()``; ``start``/``end`` are offsets within that nested text
     object, not guaranteed global document indices (tables, frames, etc.).
+    ``body_only=True`` drops other ``XText`` objects. ``limit is None`` means
+    no cap while ``limit <= 0`` returns no rows.
     """
+    if limit is not None:
+        if type(limit) is not int or limit <= 0:
+            return []
     try:
         sd = model.createSearchDescriptor()
         sd.SearchString = search
@@ -197,12 +222,22 @@ def find_text_ranges(model: Any, ctx: Any, search: str, start: int = 0, limit: i
             remaining = start
             while remaining > 0:
                 n = min(remaining, _GO_RIGHT_CHUNK)
-                cursor.goRight(n, False)
+                if cursor.goRight(n, False) is False:
+                    break
                 remaining -= n
 
         matches = []
         found = model.findNext(cursor, sd)
         while found:
+            if body_only:
+                try:
+                    if not uno_same(found.getText(), model.getText()):
+                        found = model.findNext(found.getEnd(), sd)
+                        continue
+                except Exception:
+                    found = model.findNext(found.getEnd(), sd)
+                    continue
+
             measure = found.getText().createTextCursor()
             measure.gotoStart(False)
             measure.gotoRange(found.getStart(), True)
@@ -210,7 +245,7 @@ def find_text_ranges(model: Any, ctx: Any, search: str, start: int = 0, limit: i
             matched_text = found.getString()
             m_end = m_start + len(matched_text)
             matches.append({"start": m_start, "end": m_end, "text": matched_text})
-            if limit and len(matches) >= limit:
+            if limit is not None and len(matches) >= limit:
                 break
             found = model.findNext(found.getEnd(), sd)
         return matches
@@ -474,16 +509,19 @@ def _prop(obj: Any, name: str) -> Any:
 
 
 def _cell_name(cur: Any, text: Any) -> str:
-    # CellName should be a str in real UNO; if tests/mocks return non-str truthy values,
-    # consider guarding with isinstance(v, str) and v.
+    # A non-string CellName must not become location text.
     for obj in (text, cur, _prop(cur, "Cell")):
         v = _prop(obj, "CellName")
-        if v:
+        if isinstance(v, str) and v:
             return v
     return _safe_name(_prop(cur, "Cell"))
 
 
 def _header_footer_label(text_obj: Any, doc: Any = None, label_cache: dict[int, str] | None = None) -> str | None:
+    """ImplementationName == "SwXHeadFootText" is the discriminator because header/footer text
+    is its own XText and there is no header/footer service to query. Body, cells, and frames use
+    other implementation names.
+    """
     try:
         if getattr(text_obj, "ImplementationName", "") != "SwXHeadFootText":
             return None
@@ -606,6 +644,16 @@ def shape_is_text_box(shape: Any) -> bool:
         return False
 
 
+def _lower_with_origins(text: str) -> tuple[str, list[int]]:
+    lowered_chars: list[str] = []
+    origins: list[int] = []
+    for orig_idx, ch in enumerate(text):
+        lowered = ch.lower()
+        lowered_chars.append(lowered)
+        origins.extend([orig_idx] * len(lowered))
+    return "".join(lowered_chars), origins
+
+
 def shape_text_hits(shape_text: str, pattern: str, use_regex: bool, case_sensitive: bool) -> list[str]:
     if not shape_text or not pattern:
         return []
@@ -614,16 +662,45 @@ def shape_text_hits(shape_text: str, pattern: str, use_regex: bool, case_sensiti
         try:
             return [m.group(0) for m in re_mod.finditer(pattern, shape_text, flags) if m.group(0)]
         except Exception:
+            log.debug("shape_text_hits: regex match failed", exc_info=True)
             return []
-    hay = shape_text if case_sensitive else shape_text.lower()
-    needle = pattern if case_sensitive else pattern.lower()
+    if case_sensitive:
+        hay = shape_text
+        needle = pattern
+        hits = []
+        step = len(needle) or 1
+        idx = hay.find(needle)
+        while idx != -1:
+            hits.append(shape_text[idx:idx + len(pattern)])
+            idx = hay.find(needle, idx + step)
+        return hits
+    hay, origins = _lower_with_origins(shape_text)
+    needle = pattern.lower()
     hits = []
     step = len(needle) or 1
     idx = hay.find(needle)
     while idx != -1:
-        hits.append(shape_text[idx:idx + len(pattern)])
+        hits.append(shape_text[origins[idx]:origins[idx + len(needle) - 1] + 1])
         idx = hay.find(needle, idx + step)
     return hits
+
+
+def iter_floating_shape_texts(doc: Any) -> Iterator[tuple[Any, str]]:
+    if not hasattr(doc, "getDrawPage"):
+        return
+    try:
+        draw_page = doc.getDrawPage()
+    except Exception:
+        log.debug("search_in_document: draw-page sweep failed", exc_info=True)
+        return
+    for shape in iter_draw_shapes(draw_page):
+        try:
+            if shape_is_as_character(shape) or shape_is_text_box(shape):
+                continue
+            text = shape.getString() if hasattr(shape, "getString") else ""
+        except Exception:
+            continue
+        yield shape, text
 
 
 def comment_matches(doc: Any, pattern: str, use_regex: bool, case_sensitive: bool) -> Iterator[tuple[Any, str, str]]:
@@ -680,19 +757,7 @@ def drawing_shape_object_containing(doc: Any, search_string: str, *, use_regex: 
     pattern = (search_string or "").strip()
     if not pattern:
         return None
-    try:
-        if not hasattr(doc, "getDrawPage"):
-            return None
-        draw_page = doc.getDrawPage()
-    except Exception:
-        return None
-    for shape in iter_draw_shapes(draw_page):
-        try:
-            if shape_is_as_character(shape) or shape_is_text_box(shape):
-                continue
-            text = shape.getString() if hasattr(shape, "getString") else ""
-        except Exception:
-            continue
+    for shape, text in iter_floating_shape_texts(doc):
         if shape_text_hits(text, pattern, use_regex, case_sensitive):
             return shape
     return None
@@ -721,23 +786,14 @@ def all_start_indices(haystack: str, needle: str) -> list[int]:
 def sweep_draw_shape_preview_matches(doc: Any, pattern: str, use_regex: bool, case_sensitive: bool, limit: int = 20) -> list[dict[str, Any]]:
     """Edit-reachable draw-layer hits for dry_run (same skip rules as search sweep)."""
     matches: list[dict[str, str]] = []
-    if not hasattr(doc, "getDrawPage"):
-        return matches
-    try:
-        draw_page = doc.getDrawPage()
-    except Exception:
-        return matches
-    for shape in iter_draw_shapes(draw_page):
-        try:
-            if shape_is_as_character(shape) or shape_is_text_box(shape):
-                continue
-            shape_text = shape.getString() if hasattr(shape, "getString") else ""
-        except Exception:
-            continue
+    for shape, shape_text in iter_floating_shape_texts(doc):
         hits = shape_text_hits(shape_text, pattern, use_regex, case_sensitive)
         if not hits:
             continue
-        sname = (getattr(shape, "Name", "") or "").strip() or "(unnamed shape)"
+        try:
+            sname = (getattr(shape, "Name", "") or "").strip() or "(unnamed shape)"
+        except Exception:
+            sname = "(unnamed shape)"
         for hit in hits:
             matches.append({
                 "text": hit,
@@ -762,10 +818,6 @@ def sweep_comment_preview_matches(doc: Any, pattern: str, use_regex: bool, case_
     return matches
 
 
-# Underscore alias used by comments.py.
-_enclosing_paragraph_text = enclosing_paragraph_text
-
-
 class SearchInDocument(ToolBase):
     """Search for text anywhere in a document (body, tables, text boxes) and report where."""
 
@@ -779,7 +831,8 @@ class SearchInDocument(ToolBase):
         "shape/comment text) for context. When pointing the user to a match, quote the first few words "
         "of its text and its location rather than any internal index. "
         "With regex=true, body/table/frame hits use LibreOffice/ICU regex; shape and comment sweeps "
-        "use Python re (same INVALID_REGEX check). return_offsets is body-only literal search."
+        "use Python re (same INVALID_REGEX check). return_offsets is body-only literal search. "
+        "A zero-width match stops the text-model walk, sets truncated, and does not count the empty hit."
     )
     parameters: dict[str, Any] | None = {
         "type": "object",
@@ -787,7 +840,10 @@ class SearchInDocument(ToolBase):
             "pattern": {"type": "string", "description": "Search string or regex pattern."},
             "regex": {"type": "boolean", "description": "Use regular expression (default: false)."},
             "case_sensitive": {"type": "boolean", "description": "Case-sensitive search (default: false)."},
-            "max_results": {"type": "integer", "description": "Maximum results to return (default: 20)."},
+            "max_results": {
+                "type": "integer",
+                "description": "Maximum results to return (default: %d). Must be a positive integer." % DEFAULT_SEARCH_RESULTS,
+            },
             "return_offsets": {"type": "boolean", "description": (
                 "If true, returns {start, end, text} character offsets for body text only "
                 "(no regex, no shapes/comments). Default: false.")},
@@ -798,6 +854,10 @@ class SearchInDocument(ToolBase):
     tier: str = "core"
 
     def execute(self, ctx: ToolContext, **kwargs: Any) -> dict[str, Any]:
+        raw_max = kwargs.get("max_results", DEFAULT_SEARCH_RESULTS)
+        if type(raw_max) is not int or raw_max < 1:
+            return self._tool_error("max_results must be a positive integer.", code="INVALID_PARAM")
+        max_results = raw_max
 
         pattern = kwargs.get("pattern", "")
         if not pattern:
@@ -805,7 +865,6 @@ class SearchInDocument(ToolBase):
 
         use_regex = kwargs.get("regex", False)
         case_sensitive = kwargs.get("case_sensitive", False)
-        max_results = kwargs.get("max_results", 20)
         return_offsets = kwargs.get("return_offsets", False)
 
         if return_offsets and use_regex:
@@ -814,7 +873,7 @@ class SearchInDocument(ToolBase):
                 code="INVALID_PARAM")
         if return_offsets:
             ranges = find_text_ranges(
-                ctx.doc, ctx.ctx, pattern, start=0, limit=max_results, case_sensitive=case_sensitive)
+                ctx.doc, ctx.ctx, pattern, start=0, limit=max_results, case_sensitive=case_sensitive, body_only=True)
             return {"status": "ok", "ranges": ranges}
 
         if use_regex:
@@ -824,28 +883,36 @@ class SearchInDocument(ToolBase):
 
         doc = ctx.doc
         label_cache: dict[int, str] = {}
-        truncated = False
         try:
             sd = doc.createSearchDescriptor()
             sd.SearchString = pattern
             sd.SearchRegularExpression = bool(use_regex)
             sd.SearchCaseSensitive = bool(case_sensitive)
             found = doc.findFirst(sd)
-        except Exception:
+        except Exception as exc:
             log.exception("search_in_document: createSearchDescriptor / findFirst failed")
-            return self._tool_error("search failed.", code="SEARCH_FAILED")
+            return self._tool_error("search failed: %s" % exc, code="SEARCH_FAILED")
 
         matches: list[dict[str, str]] = []
         total_count = 0
         guard = 0
+        zero_width = False
+        read_failed = False
         find_next_failed = False
-        while found is not None and guard < 10000:
+        hit_capped = False
+        while found is not None and guard < MAX_SEARCH_HITS and total_count < MAX_SEARCH_HITS:
             guard += 1
             try:
                 hit_text = found.getString()
             except Exception:
-                hit_text = ""
+                log.exception("search_in_document: getString failed")
+                read_failed = True
+                break
             if hit_text == "":
+                # What was wrong: silent break, and getString errors were folded into it by setting hit_text = ""
+                # How it happened: getEnd() does not advance a zero-length hit; b06524930 removed the comment and the distinct failure path
+                # Why this change: warn and still sweep shapes and comments; do not step one character
+                zero_width = True
                 break
             total_count += 1
             if len(matches) < max_results:
@@ -860,34 +927,37 @@ class SearchInDocument(ToolBase):
                 log.exception("search_in_document: findNext failed")
                 find_next_failed = True
                 break
-        if guard >= 10000:
-            truncated = True
+        if guard >= MAX_SEARCH_HITS or total_count >= MAX_SEARCH_HITS:
+            hit_capped = True
 
-        if hasattr(doc, "getDrawPage"):
+        for shape, shape_text in iter_floating_shape_texts(doc):
+            hits = shape_text_hits(shape_text, pattern, use_regex, case_sensitive)
+            if not hits:
+                continue
             try:
-                for shape in iter_draw_shapes(doc.getDrawPage()):
-                    try:
-                        if shape_is_as_character(shape) or shape_is_text_box(shape):
-                            continue
-                        shape_text = shape.getString() if hasattr(shape, "getString") else ""
-                    except Exception:
-                        continue
-                    hits = shape_text_hits(shape_text, pattern, use_regex, case_sensitive)
-                    if not hits:
-                        continue
-                    sname = (getattr(shape, "Name", "") or "").strip() or "(unnamed shape)"
-                    for hit in hits:
-                        total_count += 1
-                        if len(matches) < max_results:
-                            matches.append({
-                                "text": hit,
-                                "location": "shape '%s'" % sname,
-                                "context": shape_text.strip(),
-                            })
+                sname = (getattr(shape, "Name", "") or "").strip() or "(unnamed shape)"
             except Exception:
-                log.debug("search_in_document: draw-page sweep failed", exc_info=True)
+                sname = "(unnamed shape)"
+            shape_broken = False
+            for hit in hits:
+                if total_count >= MAX_SEARCH_HITS:
+                    hit_capped = True
+                    shape_broken = True
+                    break
+                total_count += 1
+                if len(matches) < max_results:
+                    matches.append({
+                        "text": hit,
+                        "location": "shape '%s'" % sname,
+                        "context": shape_text.strip(),
+                    })
+            if shape_broken:
+                break
 
         for hit, author, content in comment_matches(doc, pattern, use_regex, case_sensitive):
+            if total_count >= MAX_SEARCH_HITS:
+                hit_capped = True
+                break
             total_count += 1
             if len(matches) < max_results:
                 matches.append({
@@ -896,20 +966,24 @@ class SearchInDocument(ToolBase):
                     "context": content.strip(),
                 })
 
-        if total_count == 0 and use_regex:
-            rex_err = validate_regex_pattern(pattern)
-            if rex_err:
-                return self._tool_error(invalid_regex_tool_message(rex_err), code="INVALID_REGEX", count=0)
-
         result = {"status": "ok", "matches": matches, "count": total_count, "returned": len(matches)}
         if total_count == 0 and document_has_tracked_deletions(doc):
             result["note"] = _TRACKED_DELETION_HINT.strip()
-        if truncated or find_next_failed:
+
+        warning = None
+        if zero_width:
+            warning = "Search stopped on a zero-width match; count may be incomplete."
+        elif read_failed:
+            warning = "Text-model search ended early after a getString failure; count may be incomplete."
+        elif find_next_failed:
+            warning = "Text-model search ended early after a findNext failure; count may be incomplete."
+        elif hit_capped:
+            warning = "Search stopped after %d matches; count may be incomplete." % MAX_SEARCH_HITS
+
+        if warning is not None:
             result["truncated"] = True
-            if truncated:
-                result["warning"] = "Search stopped after 10000 text-model matches; count may be incomplete."
-            elif find_next_failed:
-                result["warning"] = "Text-model search ended early after a findNext failure; count may be incomplete."
+            result["warning"] = warning
+
         return result
 
 
@@ -932,6 +1006,10 @@ class AdvancedSearch(ToolBaseDummy):
     uno_services: list[str] | None = ["com.sun.star.text.TextDocument"]
 
     def execute(self, ctx: ToolContext, **kwargs: Any) -> dict[str, Any]:
+        query = kwargs.get("query")
+        if not isinstance(query, str) or not query.strip():
+            return self._tool_error("query is required.")
+
         idx_svc = ctx.services.writer_index
         around_page = kwargs.get("around_page")
         page_radius = kwargs.get("page_radius", 1)
@@ -941,7 +1019,7 @@ class AdvancedSearch(ToolBaseDummy):
             include_pages = True
 
         try:
-            result = idx_svc.search_boolean(ctx.doc, kwargs["query"], max_results=kwargs.get("max_results", 20), context_paragraphs=kwargs.get("context_paragraphs", 1))
+            result = idx_svc.search_boolean(ctx.doc, query, max_results=kwargs.get("max_results", 20), context_paragraphs=kwargs.get("context_paragraphs", 1))
         except ValueError as e:
             return self._tool_error(str(e))
 
@@ -963,25 +1041,23 @@ class AdvancedSearch(ToolBaseDummy):
         return {"status": "ok", **result}
 
 
-_page_map_cache: dict[str | int, dict[int, int]] = {}
+def _build_page_map(doc: Any) -> dict[int, int]:
+    """Build a mapping of paragraph_index to page number.
 
-
-def _build_page_map(doc: Any) -> dict[Any, Any]:
-    doc_url = doc.getURL() or id(doc)
-    if doc_url in _page_map_cache:
-        return _page_map_cache[doc_url]
-
-    page_map = {}
+    No module cache is kept because documents mutate, id() can be reused, and a failed
+    walk would be cached indefinitely as {}. Uses with_view_cursor_left_body_locked
+    to ensure controllers are unlocked before restoring the view cursor.
+    """
     try:
         controller = doc.getCurrentController()
         vc = controller.getViewCursor()
-        saved = None
-        try:
-            saved = clone_text_range(vc)
-        except Exception:
-            pass
+    except Exception:
+        log.exception("advanced_search: could not read the view cursor")
+        return {}
 
-        doc.lockControllers()
+    page_map: dict[int, int] = {}
+
+    def _walk() -> dict[int, int]:
         try:
             text = doc.getText()
             enum = text.createEnumeration()
@@ -992,17 +1068,13 @@ def _build_page_map(doc: Any) -> dict[Any, Any]:
                     vc.gotoRange(para.getStart(), False)
                     page_map[idx] = vc.getPage()
                 except Exception:
-                    pass
+                    log.debug("advanced_search: page lookup failed for paragraph %s", idx, exc_info=True)
                 idx += 1
-        finally:
-            if saved is not None:
-                vc.gotoRange(saved, False)
-            doc.unlockControllers()
-    except Exception:
-        pass
+        except Exception:
+            log.exception("advanced_search: page map walk failed")
+        return page_map
 
-    _page_map_cache[doc_url] = page_map
-    return page_map
+    return with_view_cursor_left_body_locked(doc, vc, _walk)
 
 
 class GetIndexStats(ToolBaseDummy):

@@ -285,7 +285,12 @@ class SendHandlersMixin:
         the first client's stop latch. The STT client is not registered with
         the send scope for the same reason.
         """
-        from plugin.audio.stt_service import SttStopped, status_for_transcription, terminate_stt_process, transcribe
+        from plugin.audio.stt_service import (
+            status_for_transcription,
+            terminate_stt_process,
+            transcribe,
+            uses_local_stt,
+        )
         from plugin.framework.queue_executor import post_to_main_thread
 
         # getattr: a duck-typed host (the smol _do_send double) has no field
@@ -303,16 +308,16 @@ class SendHandlersMixin:
                 self._terminal_status = "Stopped"
                 return ""
 
-            # Always create a fresh client to avoid reusing previous STT endpoint/key
-            api_config = get_api_config()
-            local_client = LlmClient(api_config, self.ctx, cancellation_scope=cancel_scope, register_with_send=False)
-
-            cl = local_client
-            assert cl is not None
-            if cancel_scope is not None and not cancel_scope.is_cancelled():
-                clearer = getattr(cl, "clear_stop", None)
-                if callable(clearer):
-                    clearer()
+            if uses_local_stt():
+                client = None
+            else:
+                # Always create a fresh client to avoid reusing previous STT endpoint/key
+                api_config = get_api_config()
+                client = LlmClient(api_config, self.ctx, cancellation_scope=cancel_scope, register_with_send=False)
+                if cancel_scope is not None and not cancel_scope.is_cancelled():
+                    clearer = getattr(client, "clear_stop", None)
+                    if callable(clearer):
+                        clearer()
 
             transcribing = status_for_transcription()
             self._set_status(transcribing)
@@ -334,7 +339,7 @@ class SendHandlersMixin:
             def _call() -> str:
                 return transcribe(
                     wav_path,
-                    client=cl,
+                    client=client,
                     model=stt_model,
                     on_status=on_status,
                     on_spawn=_on_spawn,
@@ -345,14 +350,10 @@ class SendHandlersMixin:
                 # and returns before the worker reaps the child, and Stop is
                 # meant to keep the transcript, so the worker runs to the end.
                 transcript_text = run_blocking_in_thread(self.ctx, _call)
-            except SttStopped:
-                log.info("Speech-to-text stopped")
-                self._terminal_status = "Stopped"
-                return ""
             except Exception as e:
                 log.exception("Transcription error in _transcribe_audio")
                 self._append_response("\n" + _("[Transcription error: {0}]").format(str(e)) + "\n")
-                raise e
+                raise
             if stop_checker():
                 log.info("Speech-to-text finished after Stop; preserving transcript for query box")
                 self._terminal_status = "Stopped"

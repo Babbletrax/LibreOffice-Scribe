@@ -166,3 +166,19 @@ def test_queue_executor_reexports_async_drain_guard():
     assert qe.get_suppressed_vcl_pump_count is get_suppressed_vcl_pump_count
     assert qe.reset_suppressed_vcl_pump_count is reset_suppressed_vcl_pump_count
     assert qe._note_suppressed_vcl_pump is note_suppressed_vcl_pump
+
+
+def test_release_underflow_logs_and_skips_idle_callbacks(_isolated_idle_callbacks, caplog):
+    ran: list[int] = []
+
+    def cb() -> None:
+        ran.append(1)
+
+    add_drain_idle_callback(cb)
+    assert get_drain_depth() == 0
+    with caplog.at_level("WARNING"):
+        release_drain_owner()
+    assert ran == []
+    assert get_drain_depth() == 0
+    assert get_drain_owner() is None
+    assert any("underflow" in r.message for r in caplog.records)

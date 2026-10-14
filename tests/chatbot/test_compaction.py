@@ -719,6 +719,28 @@ def test_resolve_context_window_openrouter_nitro_uses_cached_base():
         _clear_v1_context_cache_keys("58922")
 
 
+def test_resolve_context_window_uses_client_api_key():
+    from unittest.mock import patch
+
+    from plugin.framework.client import model_fetcher as mf
+
+    endpoint_pasted = "http://chat.openwebui.example/api"
+    endpoint_stripped = "http://chat.openwebui.example"
+    payload = {"data": [{"id": "m-owu", "context_length": 8192}]}
+    try:
+        with patch("plugin.framework.client.requests.sync_request", return_value=payload):
+            mf.fetch_available_models(endpoint_pasted, api_key_override="sk-owu")
+        client = DummyClient(
+            provider="custom",
+            endpoint=endpoint_stripped,
+            model="m-owu",
+        )
+        client.config["api_key"] = "sk-owu"
+        assert C.resolve_context_window(client) == 8192
+    finally:
+        _clear_v1_context_cache_keys("openwebui.example")
+
+
 def test_ollama_ignores_v1_context_cache(monkeypatch):
     from unittest.mock import patch
 
@@ -1366,4 +1388,126 @@ def test_matched_anchor_keeps_compaction():
     view = C.messages_for_llm(session)
     assert session.compaction is not None
     assert any("VALID SUMMARY" in m.get("content", "") for m in view)
+
+
+def test_summarizer_one_call_when_slice_fits():
+    session = DummySession(_history_3x1000())
+    client = DummyClient(content="test summary")
+    result = C.compact_session(session, client, window=4096, enabled=True)
+    assert result.compacted is True
+    assert len(client.calls) == 1
+    call = client.calls[0]
+    assert call["max_tokens"] == C._summary_budget(4096)
+    assert call["stream"] is False
+    assert call["tools"] is None
+    assert call["prepend_dev_build_system_prefix"] is False
+
+
+def test_summarizer_chunks_when_slice_exceeds_window():
+    msgs = [
+        _system_doc(400),
+        _msg("user", 1500, text="oldest_user_turn: " + _ascii(1480)),
+        _msg("assistant", 1500, text="first_asst_turn: " + _ascii(1480)),
+        _msg("user", 1500, text="newest_summarized_user_turn: " + _ascii(1480)),
+        _msg("assistant", 1500, text="second_asst_turn: " + _ascii(1480)),
+        _msg("user", 200, text="tail_user_turn: " + _ascii(190)),
+    ]
+    original_contents = [m["content"] for m in msgs]
+    session = DummySession(msgs)
+    client = DummyClient(content="compacted summary body")
+    result = C.compact_session(session, client, window=4096, force=True, enabled=True)
+
+    assert result.reason == "ok"
+    assert len(client.calls) >= 2
+    for call in client.calls:
+        req_tokens = C.estimate_tokens(call["messages"]) + call["max_tokens"] + C.gen_reserve(4096)
+        assert req_tokens <= 4096
+
+    assert "<previous-summary>" not in client.calls[0]["messages"][1]["content"]
+    later_calls_with_prev = [
+        c for c in client.calls[1:]
+        if "<previous-summary>" in c["messages"][1]["content"] and "compacted summary body" in c["messages"][1]["content"]
+    ]
+    assert len(later_calls_with_prev) >= 1
+
+    oldest_call_idx = next(i for i, c in enumerate(client.calls) if "oldest_user_turn" in c["messages"][1]["content"])
+    newest_call_idx = next(i for i, c in enumerate(client.calls) if "newest_summarized_user_turn" in c["messages"][1]["content"])
+    assert oldest_call_idx < newest_call_idx
+
+    assert session.messages is msgs
+    assert [m["content"] for m in session.messages] == original_contents
+
+
+def test_summarizer_truncates_one_oversized_turn():
+    msgs = [
+        _system_doc(400),
+        _msg("user", 4000, text="huge_user: " + _ascii(3990)),
+        _msg("user", 200, text="tail_user: " + _ascii(190)),
+    ]
+    session = DummySession(msgs)
+    client = DummyClient(content="summary of huge turn")
+    result = C.compact_session(session, client, window=4096, force=True, enabled=True)
+
+    assert result.reason == "ok"
+    assert len(client.calls) >= 1
+    for call in client.calls:
+        req_tokens = C.estimate_tokens(call["messages"]) + call["max_tokens"] + C.gen_reserve(4096)
+        assert req_tokens <= 4096
+
+    user_bodies = [c["messages"][1]["content"] for c in client.calls]
+    assert any("[turn truncated to fit summarizer]" in body for body in user_bodies)
+
+
+def test_summarizer_second_chunk_failure_does_not_publish():
+    class FailSecondCallClient(DummyClient):
+        def request_with_tools(self, messages, **kwargs):
+            self.calls.append({"messages": messages, **kwargs})
+            if len(self.calls) == 2:
+                raise RuntimeError("second chunk failed")
+            return {"content": self._content}
+
+    msgs = [
+        _system_doc(400),
+        _msg("user", 1500, text="first_user_turn: " + _ascii(1480)),
+        _msg("assistant", 1500, text="first_asst_turn: " + _ascii(1480)),
+        _msg("user", 1500, text="second_user_turn: " + _ascii(1480)),
+        _msg("assistant", 1500, text="second_asst_turn: " + _ascii(1480)),
+        _msg("user", 200, text="tail_user_turn: " + _ascii(190)),
+    ]
+    session = DummySession(msgs)
+    client = FailSecondCallClient(content="test-summary")
+    result = C.compact_session(session, client, window=4096, force=True, enabled=True)
+
+    assert result.reason == "failed"
+    assert session.compaction is None
+    assert len(client.calls) == 2
+
+
+def test_summarizer_stop_between_chunks_aborts():
+    calls_count = 0
+
+    def stop_checker():
+        return calls_count >= 1
+
+    class CountingClient(DummyClient):
+        def request_with_tools(self, messages, **kwargs):
+            nonlocal calls_count
+            res = super().request_with_tools(messages, **kwargs)
+            calls_count += 1
+            return res
+
+    msgs = [
+        _system_doc(400),
+        _msg("user", 1500, text="first_user_turn: " + _ascii(1480)),
+        _msg("assistant", 1500, text="first_asst_turn: " + _ascii(1480)),
+        _msg("user", 1500, text="second_user_turn: " + _ascii(1480)),
+        _msg("assistant", 1500, text="second_asst_turn: " + _ascii(1480)),
+        _msg("user", 200, text="tail_user_turn: " + _ascii(190)),
+    ]
+    session = DummySession(msgs)
+    client = CountingClient(content="test-summary")
+    result = C.compact_session(session, client, window=4096, force=True, enabled=True, stop_checker=stop_checker)
+
+    assert result.reason == "aborted"
+    assert session.compaction is None
 
