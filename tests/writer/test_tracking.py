@@ -1,4 +1,4 @@
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, patch, call
 
 
 from plugin.calc.base import ToolCalcSpecialBase
@@ -27,7 +27,11 @@ def _create_mock_ctx():
 
     # Default: empty redline table. The agent-self-resolution guard reads getCount() first; 0 means
     # "no changes pending" so bulk accept/reject is allowed (the pre-guard behavior for empty docs).
-    doc.getRedlines.return_value.getCount.return_value = 0
+    class _MockCount(MagicMock):
+        def __int__(self):
+            return 0
+
+    doc.getRedlines.return_value.getCount.return_value = _MockCount()
 
     ctx.doc = doc
     
@@ -377,7 +381,10 @@ def test_manage_tracked_changes_accept():
 
     res = tool.execute(ctx, action="accept", index=0)
     assert res["status"] == "ok"
-    ctx.doc.getCurrentController().select.assert_called_with(span_cursor)
+    assert ctx.doc.getCurrentController().select.call_args_list == [
+        call(span_cursor),
+        call(ctx.doc.getCurrentController().getSelection.return_value),
+    ]
     dispatcher.executeDispatch.assert_called_with(frame, ".uno:AcceptTrackedChange", "", 0, ())
 
 def test_manage_tracked_changes_reject():
@@ -399,7 +406,10 @@ def test_manage_tracked_changes_reject():
 
     res = tool.execute(ctx, action="reject", index=0)
     assert res["status"] == "ok"
-    ctx.doc.getCurrentController().select.assert_called_with(span_cursor)
+    assert ctx.doc.getCurrentController().select.call_args_list == [
+        call(span_cursor),
+        call(ctx.doc.getCurrentController().getSelection.return_value),
+    ]
     dispatcher.executeDispatch.assert_called_with(frame, ".uno:RejectTrackedChange", "", 0, ())
 
 
@@ -476,6 +486,7 @@ def test_accept_all_allowed_with_only_user_redlines():
     # The user's OWN tracked changes (no wa-review token) may be bulk-resolved on request.
     ctx, dispatcher, frame, _ = _create_mock_ctx()
     _install_redlines(ctx, [_fake_redline("")])
+    ctx.doc.getRedlines.return_value.getCount.side_effect = [1, 1, 1, 0]
     res = ManageTrackedChanges().execute(ctx, action="accept_all")
     assert res["status"] == "ok"
     dispatcher.executeDispatch.assert_called_with(frame, ".uno:AcceptAllTrackedChanges", "", 0, ())
@@ -654,4 +665,93 @@ def test_manage_tracked_changes_bulk_unsupported_when_dispatch_returns_none(acti
     assert res["code"] == "UNSUPPORTED"
     assert res["tracked_changes_bulk_unsupported"] is True
     assert res["message"] == "Accepting or rejecting all tracked changes is not supported on this document."
+
+
+def test_single_accept_other_text_illegal_argument_is_not_overlap():
+    class IllegalArgumentException(Exception):
+        pass
+
+    ctx, dispatcher, frame, _ = _create_mock_ctx()
+    r1 = _fake_redline("")
+    r2 = _fake_redline("")
+
+    text_mock = MagicMock()
+    text_mock.compareRegionStarts.side_effect = IllegalArgumentException("different XText")
+
+    start_mock1 = MagicMock()
+    start_mock1.getText.return_value = text_mock
+    r1.getPropertyValue.side_effect = lambda prop: start_mock1 if prop == "RedlineStart" else start_mock1
+
+    start_mock2 = MagicMock()
+    start_mock2.getText.return_value = text_mock
+    r2.getPropertyValue.side_effect = lambda prop: start_mock2 if prop == "RedlineStart" else start_mock2
+
+    _install_redlines(ctx, [r1, r2])
+    ctx.doc.getRedlines.return_value.getCount.side_effect = [2, 1]
+
+    res = ManageTrackedChanges().execute(ctx, action="accept", index=0)
+    assert res["status"] == "ok"
+    dispatcher.executeDispatch.assert_called_with(frame, ".uno:AcceptTrackedChange", "", 0, ())
+
+
+def test_single_accept_compare_runtime_error_still_fail_closed():
+    ctx, dispatcher, frame, _ = _create_mock_ctx()
+    r1 = _fake_redline("")
+    r2 = _fake_redline("")
+
+    text_mock = MagicMock()
+    text_mock.compareRegionStarts.side_effect = RuntimeError("compareRegionStarts boom")
+
+    start_mock1 = MagicMock()
+    start_mock1.getText.return_value = text_mock
+    r1.getPropertyValue.side_effect = lambda prop: start_mock1 if prop == "RedlineStart" else start_mock1
+
+    start_mock2 = MagicMock()
+    start_mock2.getText.return_value = text_mock
+    r2.getPropertyValue.side_effect = lambda prop: start_mock2 if prop == "RedlineStart" else start_mock2
+
+    _install_redlines(ctx, [r1, r2])
+    ctx.doc.getRedlines.return_value.getCount.side_effect = [2, 1]
+
+    res = ManageTrackedChanges().execute(ctx, action="accept", index=0)
+    assert res["status"] == "error"
+    assert "Failed to read bounds" in res["message"]
+    dispatcher.executeDispatch.assert_not_called()
+
+
+def test_accept_all_noop_when_count_is_zero():
+    ctx, dispatcher, _frame, _ = _create_mock_ctx()
+    ctx.doc.getRedlines.return_value.getCount.return_value = 0
+
+    res_accept = ManageTrackedChanges().execute(ctx, action="accept_all")
+    assert res_accept["status"] == "ok"
+    assert res_accept["message"] == "No tracked changes to accept."
+
+    res_reject = ManageTrackedChanges().execute(ctx, action="reject_all")
+    assert res_reject["status"] == "ok"
+    assert res_reject["message"] == "No tracked changes to reject."
+    dispatcher.executeDispatch.assert_not_called()
+
+
+def test_accept_all_errors_when_count_unchanged():
+    ctx, dispatcher, frame, _ = _create_mock_ctx()
+    _install_redlines(ctx, [_fake_redline("user1"), _fake_redline("user2"), _fake_redline("user3")])
+    ctx.doc.getRedlines.return_value.getCount.side_effect = [3, 3, 3, 3]
+    dispatcher.executeDispatch.return_value = MagicMock()
+
+    res = ManageTrackedChanges().execute(ctx, action="accept_all")
+    assert res["status"] == "error"
+    assert res["message"] == "Failed to accept all tracked changes: the redline count did not change."
+
+
+def test_accept_all_ok_when_count_drops():
+    ctx, dispatcher, frame, _ = _create_mock_ctx()
+    _install_redlines(ctx, [_fake_redline("user1"), _fake_redline("user2"), _fake_redline("user3")])
+    ctx.doc.getRedlines.return_value.getCount.side_effect = [3, 3, 3, 0]
+    dispatcher.executeDispatch.return_value = MagicMock()
+
+    res = ManageTrackedChanges().execute(ctx, action="accept_all")
+    assert res["status"] == "ok"
+    assert res["message"] == "All tracked changes accepted."
+
 

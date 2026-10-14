@@ -362,7 +362,7 @@ class ApplyDocumentContent(ToolBase):
     parameters: dict[str, Any] | None = {
         "type": "object",
         "properties": {
-            "content": {"type": ["array", "string"], "items": {"type": "string"}, "description": ("List of HTML fragments or plain-text fragments (one per block), or one string. A string is one block; execute still joins a list with newlines. Shape and math per the APPLY_DOCUMENT_CONTENT AND HTML rules — the editing-html guidance covers them if they are not already in your context. No Markdown.")},
+            "content": {"type": ["array", "string"], "items": {"type": "string"}, "description": ("List of HTML fragments or plain-text fragments (one per block), or one string. A string is one block; execute still joins a list with newlines. Shape and math per the APPLY_DOCUMENT_CONTENT AND HTML rules — the editing-html guidance covers them if they are not already in your context. No Markdown. An empty string at beginning, end, or selection inserts nothing and returns an error. An empty search replacement deletes the match.")},
             "target": {"type": "string", "enum": ["beginning", "end", "selection", "full_document", "search"], "description": "Where to apply the content."},
             "old_content": {"type": "string", "description": ("Substring to find when target='search'. Not for whole-document replace — use target='full_document' instead.")},
             "all_matches": {"type": "boolean", "description": "Replace all occurrences (true) or first only. Default false. Only for target='search' with position='replace'."},
@@ -493,17 +493,26 @@ class ApplyDocumentContent(ToolBase):
                 code="UNDO_UNAVAILABLE")
         changes_before = len(session.changes)
         applied_ok = False
+        reports = None
+        error_exc = None
+        rolled_back = True
         try:
             reports = run()
             applied_ok = True
-            return reports, None
         except Exception as exc:
             log.exception("apply_document_content: outline hyperlink update failed")
-            return None, self._tool_error(
-                "Outline hyperlink update failed; the text change was rolled back (%s)." % exc,
-                code="HYPERLINK_UPDATE_FAILED")
+            error_exc = exc
         finally:
-            close_surgical_context(mgr, session, changes_before, applied_ok, undo_title)
+            rolled_back = close_surgical_context(mgr, session, changes_before, applied_ok, undo_title)
+
+        if applied_ok:
+            return reports, None
+
+        if rolled_back:
+            msg = "Outline hyperlink update failed; the text change was rolled back (%s)." % error_exc
+        else:
+            msg = "Outline hyperlink update failed; the text change could not be rolled back and may still be in the document (%s)." % error_exc
+        return None, self._tool_error(msg, code="HYPERLINK_UPDATE_FAILED")
 
     def _record_table_deletions(self, session: EditReviewSession, doc: Any, ctx: ToolContext,
                                  doomed: list[tuple[Any, str]]) -> bool:
@@ -527,6 +536,61 @@ class ApplyDocumentContent(ToolBase):
 
             session.record_mutation(_apply)
         return tracked
+
+    def _finish_search_miss(
+        self,
+        ctx: ToolContext,
+        doc: Any,
+        session: EditReviewSession,
+        search_string: str,
+        opts_pattern: str,
+        regex_opt: bool,
+        use_opts: bool,
+        opts_cs: bool,
+        track_reviewable: bool,
+        new_text: str,
+        *,
+        all_matches: bool,
+    ) -> tuple[dict[str, Any], Any]:
+        shape = search_mod.drawing_shape_object_containing(
+            doc, opts_pattern if regex_opt else search_string,
+            use_regex=regex_opt, case_sensitive=opts_cs if use_opts else False)
+        if shape is not None:
+            shape_name = (getattr(shape, "Name", "") or "").strip() or "(unnamed shape)"
+            if track_reviewable:
+                return {"status": "error",
+                        "message": ("old_content is only inside a drawing shape / floating text box "
+                                    f"('{shape_name}'). In review mode it cannot be edited as a tracked "
+                                    "change; edit it via the shapes toolset "
+                                    "(delegate_to_specialized_writer_toolset domain='shapes')."),
+                        "replaced_count": 0}, session
+            undo = None
+            undo_title = next_agent_edit_undo_title()
+            try:
+                undo = doc.getUndoManager()
+                undo.enterUndoContext(undo_title)
+            except Exception:
+                undo = None
+            try:
+                edited = replace_text_in_shape(shape, search_string, new_text)
+            finally:
+                if undo is not None:
+                    try:
+                        undo.leaveUndoContext()
+                    except Exception:
+                        log.exception("apply_document_content: shape edit leaveUndoContext failed")
+            if edited:
+                result = attach_edited_context(
+                    {"status": "ok",
+                      "message": ("Replaced 1 occurrence inside drawing shape '%s' (edited the "
+                                  "shape's own text directly — NOT a tracked change; surrounding "
+                                  "formatting preserved)." % shape_name),
+                      "replaced_count": 1, "review_bypassed": True},
+                    None)
+                return self._annotate_review_status(ctx.ctx, result), session
+            return search_mod.build_search_not_found_response(shape_name=shape_name), session
+        return search_mod.build_search_not_found_response(
+            all_matches=all_matches, tracked_deletions=search_mod.document_has_tracked_deletions(doc)), session
 
     def _replace_found(self, session: EditReviewSession, doc: Any, found: Any, *,
                        use_preserve: bool, raw_content: str, content: Any,
@@ -629,6 +693,7 @@ class ApplyDocumentContent(ToolBase):
         try:
             return edit_review_wait_seconds(uno_ctx)
         except Exception:
+            log.exception("apply_document_content: could not read review wait seconds")
             return 0
 
     def _annotate_review_status(self, uno_ctx: Any, result: Any) -> dict[str, Any]:
@@ -824,6 +889,18 @@ class ApplyDocumentContent(ToolBase):
             result["selected_match"] = selected_match
         return result
 
+    def _release_review_session(self, session: Any, *, on_main: bool) -> None:
+        if session is None:
+            return
+        try:
+            if on_main:
+                session.cleanup()
+            else:
+                from plugin.framework.queue_executor import execute_on_main_thread
+                execute_on_main_thread(session.cleanup, timeout=60.0)
+        except Exception:
+            log.exception("apply_document_content: review session cleanup failed")
+
     def execute(self, ctx: ToolContext, **kwargs: Any) -> dict[str, Any]:
         # Thin wrapper so every return path gets the read-only-attribute note, including the
         # review-wait branch that does not go through _annotate_review_status.
@@ -868,11 +945,7 @@ class ApplyDocumentContent(ToolBase):
                 return self._tool_error(str(e))
             finally:
                 if session_box:
-                    if on_main:
-                        session_box[0].cleanup()
-                    else:
-                        from plugin.framework.queue_executor import execute_on_main_thread
-                        execute_on_main_thread(session_box[0].cleanup)
+                    self._release_review_session(session_box[0], on_main=on_main)
 
         # Review-wait path, on a background (MCP HTTP / chat worker) thread: run the edit
         # on the main thread, then block HERE until the user reviews the tracked changes.
@@ -895,15 +968,15 @@ class ApplyDocumentContent(ToolBase):
             result, session = execute_on_main_thread(_edit_on_main_thread, timeout=60.0)
         except ToolExecutionError as e:
             if session_box:
-                execute_on_main_thread(session_box[0].cleanup)
+                self._release_review_session(session_box[0], on_main=False)
             return self._tool_error(str(e))
         except Exception:
             if session_box:
-                execute_on_main_thread(session_box[0].cleanup)
+                self._release_review_session(session_box[0], on_main=False)
             raise
         if session is None or not session.changes or result.get("status") != "ok":
             if session is not None:
-                execute_on_main_thread(session.cleanup)
+                self._release_review_session(session, on_main=False)
             return result
 
         # In-app chat: surface a sidebar status while we block (MCP has no sidebar -> None, no-op).
@@ -987,22 +1060,21 @@ class ApplyDocumentContent(ToolBase):
                 if isinstance(parsed, list):
                     content = parsed
 
-        # Normalize list input to a single string for HTML import paths.
         if isinstance(content, list):
-            _parts = [str(x) for x in content]
-            _per_part_nl = [p.count("\n") for p in _parts]
-            log.debug(
-                "apply_document_content: list join n_parts=%d per_part_newline_counts=%s total_chars_before_join=%d",
-                len(_parts),
-                _per_part_nl[:20],  # cap log size
-                sum(len(p) for p in _parts),
-            )
-            content = "\n".join(_parts)
-            log.debug("apply_document_content: after join newline_count=%d has_math_tag=%s join_preview=%r", content.count("\n"), ("<math" in content.lower()), content[:500])
-        # Detect markup BEFORE any HTML wrapping.
-        use_preserve = isinstance(content, str) and not format_support.content_has_markup(content)
+            if any(not isinstance(x, str) for x in content):
+                return self._tool_error("content list items must be strings."), None
+            content = "\n".join(content)
 
-        if use_preserve and isinstance(content, str):
+        if not isinstance(content, str):
+            return self._tool_error("content must be a string or a list of strings."), None
+
+        if target in ("beginning", "end", "selection") and content.strip() == "":
+            return self._tool_error("content is empty; nothing was inserted."), None
+
+        # Detect markup BEFORE any HTML wrapping.
+        use_preserve = not format_support.content_has_markup(content)
+
+        if use_preserve:
             _nl_before_esc = content.count("\n")
             content = content.replace("\\n", "\n").replace("\\t", "\t")
             _nl_after_esc = content.count("\n")
@@ -1059,20 +1131,21 @@ class ApplyDocumentContent(ToolBase):
                     return s
             return s
 
+        content_to_insert = content
         if target == "full_document":
             session = _open_session()
             with session:
                 # Delete-then-import: make it atomic so a failed import can't strand a cleared document.
                 record_html_atomically(
                     session, ctx.doc,
-                    lambda: format_support.replace_full_document(ctx.doc, ctx.ctx, content, config_svc=config_svc),
+                    lambda: format_support.replace_full_document(ctx.doc, ctx.ctx, content_to_insert, config_svc=config_svc),
                     proposed_preview=_plain_preview(content))
             return {"status": "ok", "message": "Replaced entire document."}, session
         if target == "end":
             session = _open_session()
             with session:
                 session.record_mutation(
-                    lambda: format_support.insert_content_at_position(ctx.doc, ctx.ctx, content, "end", config_svc=config_svc),
+                    lambda: format_support.insert_content_at_position(ctx.doc, ctx.ctx, content_to_insert, "end", config_svc=config_svc),
                     proposed_preview=_plain_preview(content))
             return attach_edited_context(
                 {"status": "ok", "message": "Inserted content at end."},
@@ -1086,7 +1159,7 @@ class ApplyDocumentContent(ToolBase):
                 # Selection insert clears the selection first, then imports -> atomic (full_document above).
                 record_html_atomically(
                     session, ctx.doc,
-                    lambda: format_support.insert_content_at_position(ctx.doc, ctx.ctx, content, "selection", config_svc=config_svc),
+                    lambda: format_support.insert_content_at_position(ctx.doc, ctx.ctx, content_to_insert, "selection", config_svc=config_svc),
                     proposed_preview=_plain_preview(content))
             return attach_edited_context(
                 {"status": "ok", "message": "Inserted content at selection."}, anchor), session
@@ -1094,7 +1167,7 @@ class ApplyDocumentContent(ToolBase):
             session = _open_session()
             with session:
                 session.record_mutation(
-                    lambda: format_support.insert_content_at_position(ctx.doc, ctx.ctx, content, "beginning", config_svc=config_svc),
+                    lambda: format_support.insert_content_at_position(ctx.doc, ctx.ctx, content_to_insert, "beginning", config_svc=config_svc),
                     proposed_preview=_plain_preview(content))
             return attach_edited_context(
                 {"status": "ok", "message": "Inserted content at beginning."},
@@ -1154,8 +1227,9 @@ class ApplyDocumentContent(ToolBase):
             ranges = (search_mod.find_ranges_regex_case(doc, _opts_pattern, _regex_opt, _opts_cs, all_matches=True)
                       if _use_opts else search_mod.find_all_ranges(doc, search_string))
             if not ranges:
-                return search_mod.build_search_not_found_response(
-                    all_matches=True, tracked_deletions=search_mod.document_has_tracked_deletions(doc)), session
+                return self._finish_search_miss(
+                    ctx, doc, session, search_string, _opts_pattern, _regex_opt, _use_opts, _opts_cs,
+                    track_reviewable, _plain_preview(content), all_matches=True)
             max_limit_hit = len(ranges) >= search_mod.MAX_SEARCH_REPLACEMENTS
             # Decide before any replace. An empty replacement that is the last text
             # in a table deletes the table instead of leaving an empty shell; those
@@ -1218,10 +1292,13 @@ class ApplyDocumentContent(ToolBase):
                 applied_ok = True
             except Exception as e:
                 log.exception("apply_document_content all_matches failed mid-batch")
-                close_surgical_context(mgr, session, changes_before, False, undo_title)
+                rolled_back = close_surgical_context(mgr, session, changes_before, False, undo_title)
+                if rolled_back:
+                    msg = "all_matches aborted after %d replacement(s); document rolled back (%s)." % (count, e)
+                else:
+                    msg = "all_matches aborted after %d replacement(s); the document could not be rolled back and may be partially edited (%s)." % (count, e)
                 return {"status": "error",
-                        "message": ("all_matches aborted after %d replacement(s); document rolled back (%s)."
-                                    % (count, e)),
+                        "message": msg,
                         "replaced_count": 0, "partial_failure": True, "attempted": count}, session
             finally:
                 if applied_ok:
@@ -1258,59 +1335,9 @@ class ApplyDocumentContent(ToolBase):
                 else search_mod.find_first_range(doc, search_string)
             )
         if found is None:
-            # Search covers body/table cells/text frames but not drawing-layer shapes. If the text
-            # lives only inside such a floating box, say so (actionable) instead of a bare not-found
-            # -- otherwise the agent retries blindly or assumes failure where a shapes-toolset edit
-            # is needed (note 7).
-            shape = search_mod.drawing_shape_object_containing(
-                doc, _opts_pattern if _regex_opt else search_string,
-                use_regex=_regex_opt, case_sensitive=_opts_cs if _use_opts else False)
-            if shape is not None:
-                shape_name = (getattr(shape, "Name", "") or "").strip() or "(unnamed shape)"
-                if track_reviewable:
-                    # Review modes (record/wait) require edits to become reviewable tracked changes,
-                    # but drawing-shape text can't carry redlines and editing it directly would bypass
-                    # the review/session machinery. Route to the shapes toolset rather than silently
-                    # applying an UNtracked edit while the caller believes review is engaged.
-                    return {"status": "error",
-                            "message": ("old_content is only inside a drawing shape / floating text box "
-                                        f"('{shape_name}'). In review mode it cannot be edited as a tracked "
-                                        "change; edit it via the shapes toolset "
-                                        "(delegate_to_specialized_writer_toolset domain='shapes')."),
-                            "replaced_count": 0}, session
-                # Review off: the text lives only inside a floating drawing shape, which findFirst/
-                # replace can't reach. Edit the shape's own text directly (note 7), preserving format.
-                new_text = _plain_preview(content)
-                undo = None
-                undo_title = next_agent_edit_undo_title()
-                try:
-                    undo = doc.getUndoManager()
-                    undo.enterUndoContext(undo_title)
-                except Exception:
-                    undo = None
-                try:
-                    edited = replace_text_in_shape(shape, search_string, new_text)
-                finally:
-                    if undo is not None:
-                        try:
-                            undo.leaveUndoContext()
-                        except Exception:
-                            # What was wrong: leaveUndoContext failure swallowed with bare pass.
-                            # How it happened: shape fallback ignored leaveUndoContext error.
-                            # Why this change fixes it: log exception while preserving successful shape edit result.
-                            log.exception("apply_document_content: shape edit leaveUndoContext failed")
-                if edited:
-                    result = attach_edited_context(
-                        {"status": "ok",
-                          "message": ("Replaced 1 occurrence inside drawing shape '%s' (edited the "
-                                      "shape's own text directly — NOT a tracked change; surrounding "
-                                      "formatting preserved)." % shape_name),
-                          "replaced_count": 1, "review_bypassed": True},
-                        None)
-                    return self._annotate_review_status(ctx.ctx, result), session
-                return search_mod.build_search_not_found_response(shape_name=shape_name), session
-            return search_mod.build_search_not_found_response(
-                all_matches=False, tracked_deletions=search_mod.document_has_tracked_deletions(doc)), session
+            return self._finish_search_miss(
+                ctx, doc, session, search_string, _opts_pattern, _regex_opt, _use_opts, _opts_cs,
+                track_reviewable, _plain_preview(content), all_matches=False)
         if position in ("before", "after"):
             # INSERT next to the match instead of replacing it: the single most common petition
             # edit ("add a paragraph after clause X") previously forced resending the clause

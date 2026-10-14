@@ -66,6 +66,7 @@ Two trivial fast-paths: identical strings -> surgical mode with zero sub-edits;
 """
 
 import difflib
+import math
 from typing import Any, ClassVar
 
 from plugin.framework.deal_shim import DEAL_MAX_SOURCE, UNDER_CROSSHAIR, str_bounded, deal
@@ -275,6 +276,8 @@ def split_change(old: str, new: str, threshold: float = 0.6) -> SplitResult:
     try:
         threshold = float(threshold)
     except (TypeError, ValueError):
+        threshold = 0.6
+    if not math.isfinite(threshold):
         threshold = 0.6
 
     old_tokens = tokenize(old)

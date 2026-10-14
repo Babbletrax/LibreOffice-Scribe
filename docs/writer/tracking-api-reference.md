@@ -79,6 +79,12 @@ To use these, obtain a `com.sun.star.frame.DispatchHelper` and execute the comma
 - `.uno:RejectTrackedChange`: Rejects the currently selected tracked change (requires navigating the view cursor to the change first).
 - `.uno:ShowTrackedChanges`: On this build (LO 26.8.1.1) the dispatch returns a `DispatchResultEvent` and does not change `ShowChanges` or `RedlineDisplayType`. The tool sets `RedlineDisplayType` directly instead of dispatching this command.
 
+### Single and bulk resolve
+- **Cross-text redlines:** Calling `compareRegionStarts` on ranges from different text components (e.g. table cells, frames, footnotes) raises `com.sun.star.lang.IllegalArgumentException`. This is treated as no overlap rather than a failure to read bounds.
+- **View selection restoration:** Before selecting a single tracked change to dispatch accept or reject, the current view selection is recorded; after the dispatch completes (or fails), the previous view selection is restored in a `finally` block.
+- **Bulk resolve count checking:** Bulk accept and reject inspect the document redline count (`getRedlines().getCount()`). If the count is 0, the dispatch is skipped and a no-op message is returned. If after dispatch the integer count has not changed, an error is returned.
+
+
 
 ## Example Usage (Python-UNO)
 

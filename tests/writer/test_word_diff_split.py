@@ -590,3 +590,26 @@ def test_max_diff_words_caps_to_block_replacement(monkeypatch):
     assert sub.old_text == "one two three"
     assert sub.new_text == "one two three"
 
+
+def test_nan_and_infinite_threshold_use_default():
+    assert split_change("a", "b", threshold=float("nan")).mode == "block"
+    assert split_change("a", "b", threshold=float("inf")).mode == "block"
+    assert split_change("a", "b", threshold=float("-inf")).mode == "block"
+    r_same = split_change("a", "a", threshold=float("nan"))
+    assert r_same.mode == "surgical"
+    assert r_same.sub_edits == []
+
+
+def test_astral_offsets_are_python_code_points():
+    old = "a 😀 b"
+    new = "a 😁 b"
+    result = split_change(old, new)
+    assert result.mode == "surgical"
+    assert len(result.sub_edits) == 1
+    se = result.sub_edits[0]
+    assert se.old_text == "😀"
+    assert se.old_end - se.old_start == 1
+    assert old[se.old_start:se.old_end] == "😀"
+    assert apply_sub_edits(old, result.sub_edits) == new
+
+

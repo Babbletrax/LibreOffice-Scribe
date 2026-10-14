@@ -42,6 +42,7 @@ def _enum_has_more(enum: Any) -> bool:
     try:
         return enum.hasMoreElements() is True
     except Exception:
+        log.debug("redline enumeration hasMoreElements failed", exc_info=True)
         return False
 
 
@@ -184,11 +185,11 @@ class TrackChangesList(WriterAgentSpecialTracking, ToolCalcSpecialTracking):  # 
 
             return get_agent_edit_review_mode(uno_ctx)
         except Exception:
+            log.exception("track_changes_list: could not read agent review mode")
             return None
 
     def execute(self, ctx: ToolContext, **kwargs: Any) -> dict[str, Any]:
         doc = ctx.doc
-        recording: bool | None = False
         try:
             # What was wrong: failed RecordChanges read was reported as recording: False.
             # How it happened: recording initialized to False and exception swallowed with bare pass.
@@ -321,6 +322,19 @@ class ManageTrackedChanges(WriterAgentSpecialTracking, ToolCalcSpecialTracking):
         blocked = agent_self_resolution_block_reason(ctx.doc)
         if blocked:
             return self._tool_error(blocked)
+
+        count_before: int | None = None
+        if hasattr(ctx.doc, "getRedlines"):
+            try:
+                count_before = ctx.doc.getRedlines().getCount()
+            except Exception:
+                log.exception("manage_tracked_changes: could not read redline count")
+                count_before = None
+
+            if type(count_before) is int and count_before == 0:
+                verb = "accept" if is_accept else "reject"
+                return {"status": "ok", "message": f"No tracked changes to {verb}."}
+
         try:
             cmd = ".uno:AcceptAllTrackedChanges" if is_accept else ".uno:RejectAllTrackedChanges"
             res = _dispatch(ctx, cmd)
@@ -335,6 +349,19 @@ class ManageTrackedChanges(WriterAgentSpecialTracking, ToolCalcSpecialTracking):
                 )
                 err["tracked_changes_bulk_unsupported"] = True
                 return err
+
+            if hasattr(ctx.doc, "getRedlines") and type(count_before) is int and count_before > 0:
+                count_after: int | None = None
+                try:
+                    count_after = ctx.doc.getRedlines().getCount()
+                except Exception:
+                    log.exception("manage_tracked_changes: could not read redline count")
+                    count_after = None
+
+                if type(count_after) is int and count_after == count_before:
+                    verb = "accept" if is_accept else "reject"
+                    return self._tool_error(f"Failed to {verb} all tracked changes: the redline count did not change.")
+
             msg = "All tracked changes accepted." if is_accept else "All tracked changes rejected."
             return {"status": "ok", "message": msg}
         except Exception as e:
@@ -375,97 +402,120 @@ class ManageTrackedChanges(WriterAgentSpecialTracking, ToolCalcSpecialTracking):
             # Redline objects from getRedlines() have NO getAnchor() (live probe: AttributeError) —
             # they are property sets exposing RedlineStart/RedlineEnd (XTextRange). The old
             # getAnchor() call meant every real change died here with "Failed to select".
+            # Count agent changes before dispatch from already-materialized redline_objs
+            agent_changes_before = 0
+            for r in redline_objs:
+                is_agent_r, _ = redline_is_agent_change(r)
+                if is_agent_r:
+                    agent_changes_before += 1
+
+            start = target_redline.getPropertyValue("RedlineStart")
+            cur = start.getText().createTextCursorByRange(start)
+            end = start
             try:
-                # Count agent changes before dispatch from already-materialized redline_objs
-                agent_changes_before = 0
-                for r in redline_objs:
-                    is_agent_r, _ = redline_is_agent_change(r)
-                    if is_agent_r:
-                        agent_changes_before += 1
+                end_val = target_redline.getPropertyValue("RedlineEnd")
+                if end_val is not None:
+                    end = end_val
+                    cur.gotoRange(end, True)
+            except Exception:
+                log.debug("manage_tracked_changes: RedlineEnd unreadable; selecting the start point", exc_info=True)
 
-                start = target_redline.getPropertyValue("RedlineStart")
-                cur = start.getText().createTextCursorByRange(start)
-                end = start
+            # Guard: Overlapping or sibling changes clobber check.
+            # If there's another tracked change that intersects with the one we're resolving,
+            # the dispatcher resolve will break the UNO text model or clobber the other change.
+            text = start.getText()
+            for i, r in enumerate(redline_objs):
+                if i == index:
+                    continue
                 try:
-                    end_val = target_redline.getPropertyValue("RedlineEnd")
-                    if end_val is not None:
-                        end = end_val
-                        cur.gotoRange(end, True)
-                except Exception:
-                    pass  # collapsed span (e.g. a deletion) — selecting the start point suffices
+                    r_start = r.getPropertyValue("RedlineStart")
+                    r_end = r.getPropertyValue("RedlineEnd") or r_start
+                except Exception as rb_err:
+                    # Fail closed: if we cannot read the bounds of another redline, we cannot prove
+                    # it doesn't overlap.
+                    return self._tool_error(
+                        f"Failed to read bounds of tracked change at index {i} during overlap check. "
+                        f"Please resolve tracked changes manually in LibreOffice. Error: {rb_err}"
+                    )
 
-                # Guard: Overlapping or sibling changes clobber check.
-                # If there's another tracked change that intersects with the one we're resolving,
-                # the dispatcher resolve will break the UNO text model or clobber the other change.
-                text = start.getText()
-                for i, r in enumerate(redline_objs):
-                    if i == index:
-                        continue
-                    try:
-                        r_start = r.getPropertyValue("RedlineStart")
-                        r_end = r.getPropertyValue("RedlineEnd") or r_start
-
-                        # Overlap logic: Two ranges [start, end] and [r_start, r_end] overlap if
-                        # start < r_end AND r_start < end.
-                        # For compareRegionStarts: 1 means left < right, 0 means left == right.
-                        # For compareRegionEnds: -1 means left > right.
-                        # They do NOT overlap if they are completely distinct or strictly adjacent:
-                        # end <= r_start (i.e. compareRegionStarts(end, r_start) in (1, 0)) OR
-                        # start >= r_end (i.e. compareRegionStarts(r_end, start) in (1, 0))
-                        if text.compareRegionStarts(end, r_start) in (1, 0) or text.compareRegionStarts(r_end, start) in (1, 0):
-                            pass # No overlap
-                        else:
-                            return self._tool_error(
-                                f"Tracked change at index {index} overlaps with another change. "
-                                "Resolving it via the agent may clobber adjacent changes. "
-                                "Please resolve it manually in LibreOffice."
-                            )
-                    except Exception as rb_err:
-                        # Fail closed: if we cannot read the bounds of another redline, we cannot prove
-                        # it doesn't overlap.
+                try:
+                    # Overlap logic: Two ranges [start, end] and [r_start, r_end] overlap if
+                    # start < r_end AND r_start < end.
+                    # For compareRegionStarts: 1 means left < right, 0 means left == right.
+                    # For compareRegionEnds: -1 means left > right.
+                    # They do NOT overlap if they are completely distinct or strictly adjacent:
+                    # end <= r_start (i.e. compareRegionStarts(end, r_start) in (1, 0)) OR
+                    # start >= r_end (i.e. compareRegionStarts(r_end, start) in (1, 0))
+                    if text.compareRegionStarts(end, r_start) in (1, 0) or text.compareRegionStarts(r_end, start) in (1, 0):
+                        pass  # No overlap
+                    else:
                         return self._tool_error(
-                            f"Failed to read bounds of tracked change at index {i} during overlap check. "
-                            f"Please resolve tracked changes manually in LibreOffice. Error: {rb_err}"
+                            f"Tracked change at index {index} overlaps with another change. "
+                            "Resolving it via the agent may clobber adjacent changes. "
+                            "Please resolve it manually in LibreOffice."
                         )
+                except Exception as exc:
+                    if type(exc).__name__ == "IllegalArgumentException":
+                        continue
+                    return self._tool_error(
+                        f"Failed to read bounds of tracked change at index {i} during overlap check. "
+                        f"Please resolve tracked changes manually in LibreOffice. Error: {exc}"
+                    )
 
-                ctx.doc.getCurrentController().select(cur)
+            controller = ctx.doc.getCurrentController()
+            previous = None
+            try:
+                previous = controller.getSelection()
+            except Exception:
+                log.debug("manage_tracked_changes: could not read the view selection", exc_info=True)
+                previous = None
+
+            try:
+                controller.select(cur)
             except Exception as e:
                 return self._tool_error(f"Failed to select tracked change for processing: {e}")
 
-            initial_count = redlines.getCount()
+            try:
+                initial_count = redlines.getCount()
 
-            cmd = ".uno:AcceptTrackedChange" if is_accept else ".uno:RejectTrackedChange"
-            _dispatch(ctx, cmd)
+                cmd = ".uno:AcceptTrackedChange" if is_accept else ".uno:RejectTrackedChange"
+                _dispatch(ctx, cmd)
 
-            if redlines.getCount() == initial_count:
-                return self._tool_error("Failed to resolve tracked change: operation silently failed.")
+                if redlines.getCount() == initial_count:
+                    return self._tool_error("Failed to resolve tracked change: operation silently failed.")
 
-            # Enforce self-resolve invariant
-            enum_after = redlines.createEnumeration()
-            agent_changes_after = 0
-            while _enum_has_more(enum_after):
-                r = enum_after.nextElement()
-                is_agent_r, _ = redline_is_agent_change(r)
-                if is_agent_r:
-                    agent_changes_after += 1
+                # Enforce self-resolve invariant
+                enum_after = redlines.createEnumeration()
+                agent_changes_after = 0
+                while _enum_has_more(enum_after):
+                    r = enum_after.nextElement()
+                    is_agent_r, _ = redline_is_agent_change(r)
+                    if is_agent_r:
+                        agent_changes_after += 1
 
-            if agent_changes_after < agent_changes_before:
-                undo_failed = False
-                try:
-                    ctx.doc.getUndoManager().undo()
-                except Exception:
-                    # What was wrong: undo failure swallowed with bare pass.
-                    # How it happened: exception during undo of forbidden resolution was ignored.
-                    # Why this change fixes it: log exception and append warning that change remains resolved.
-                    log.exception("manage_tracked_changes: undo of a forbidden agent resolution failed")
-                    undo_failed = True
-                msg = "Agent edit was resolved, which is forbidden."
-                if undo_failed:
-                    msg += " Undo failed; the change is still resolved."
-                return self._tool_error(msg)
+                if agent_changes_after < agent_changes_before:
+                    undo_failed = False
+                    try:
+                        ctx.doc.getUndoManager().undo()
+                    except Exception:
+                        # What was wrong: undo failure swallowed with bare pass.
+                        # How it happened: exception during undo of forbidden resolution was ignored.
+                        # Why this change fixes it: log exception and append warning that change remains resolved.
+                        log.exception("manage_tracked_changes: undo of a forbidden agent resolution failed")
+                        undo_failed = True
+                    msg = "Agent edit was resolved, which is forbidden."
+                    if undo_failed:
+                        msg += " Undo failed; the change is still resolved."
+                    return self._tool_error(msg)
 
-            action_str = "Accepted" if is_accept else "Rejected"
-            return {"status": "ok", "message": f"{action_str} tracked change at index {index}."}
+                action_str = "Accepted" if is_accept else "Rejected"
+                return {"status": "ok", "message": f"{action_str} tracked change at index {index}."}
+            finally:
+                if previous is not None:
+                    try:
+                        controller.select(previous)
+                    except Exception:
+                        log.exception("manage_tracked_changes: could not restore the view selection")
 
         except Exception as e:
             return self._tool_error(f"Failed to process change {index}: {e}")
