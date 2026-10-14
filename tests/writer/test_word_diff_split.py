@@ -578,15 +578,62 @@ def test_max_diff_words_caps_to_block_replacement(monkeypatch):
     assert r_under.fraction_changed == 0.0
     assert r_under.sub_edits == []
 
-    # Over cap (3 + 3 = 6 > 4 words): capped to block mode with fraction 1.0 and whole replace
-    r_over = split_change("one two three", "one two three")
-    assert r_over.mode == "block"
-    assert r_over.fraction_changed == 1.0
-    assert len(r_over.sub_edits) == 1
-    sub = r_over.sub_edits[0]
-    assert sub.op == "replace"
-    assert sub.old_start == 0
-    assert sub.old_end == len("one two three")
-    assert sub.old_text == "one two three"
-    assert sub.new_text == "one two three"
+    # Over cap (3 + 3 = 6 > 4 words): identical text is surgical, fraction 0.0, no sub-edits
+    r_identical = split_change("one two three", "one two three")
+    assert r_identical.mode == "surgical"
+    assert r_identical.fraction_changed == 0.0
+    assert r_identical.sub_edits == []
+
+    # No shared words over the cap: "aa bb cc" / "xx yy zz" is mode="block", fraction 1.0, one replace of the whole old string.
+    old_no_shared = "aa bb cc"
+    new_no_shared = "xx yy zz"
+    r_no_shared = split_change(old_no_shared, new_no_shared)
+    assert r_no_shared.mode == "block"
+    assert r_no_shared.fraction_changed == 1.0
+    assert len(r_no_shared.sub_edits) == 1
+    sub_no_shared = r_no_shared.sub_edits[0]
+    assert sub_no_shared.op == "replace"
+    assert sub_no_shared.old_start == 0
+    assert sub_no_shared.old_end == len(old_no_shared)
+    assert sub_no_shared.old_text == old_no_shared
+    assert sub_no_shared.new_text == new_no_shared
+    assert apply_sub_edits(old_no_shared, r_no_shared.sub_edits) == new_no_shared
+
+    # Over the cap but the middle fits: "a b c d e" / "a b c d Z" is surgical, one replace, old_text == "e", new_text == "Z", fraction 2/6, and apply_sub_edits equals the new string.
+    old_mid_fits = "a b c d e"
+    new_mid_fits = "a b c d Z"
+    r_mid_fits = split_change(old_mid_fits, new_mid_fits)
+    assert r_mid_fits.mode == "surgical"
+    assert len(r_mid_fits.sub_edits) == 1
+    sub_mid = r_mid_fits.sub_edits[0]
+    assert sub_mid.op == "replace"
+    assert sub_mid.old_text == "e"
+    assert sub_mid.new_text == "Z"
+    assert r_mid_fits.fraction_changed == pytest.approx(2 / 6)
+    assert apply_sub_edits(old_mid_fits, r_mid_fits.sub_edits) == new_mid_fits
+
+    # Over the cap and the middle still does not fit: "a b c d e f" / "a b c X Y Z" is block. Prefix length 3, middle 3+3 > 4. Fraction is exactly 6/9, not 1.0.
+    old_mid_over = "a b c d e f"
+    new_mid_over = "a b c X Y Z"
+    r_mid_over = split_change(old_mid_over, new_mid_over)
+    assert r_mid_over.mode == "block"
+    assert r_mid_over.fraction_changed == pytest.approx(6 / 9)
+    assert len(r_mid_over.sub_edits) == 1
+    sub_mid_over = r_mid_over.sub_edits[0]
+    assert sub_mid_over.old_start == 0
+    assert sub_mid_over.old_end == len(old_mid_over)
+    assert sub_mid_over.new_text == new_mid_over
+
+    # Whitespace-only over the cap: "one two  three four five" / "one two three four five" is surgical and apply_sub_edits reconstructs the new string.
+    old_ws = "one two  three four five"
+    new_ws = "one two three four five"
+    r_ws = split_change(old_ws, new_ws)
+    assert r_ws.mode == "surgical"
+    assert apply_sub_edits(old_ws, r_ws.sub_edits) == new_ws
+
+    # split_change(long, long, 0.0) with six identical words and the cap at 4 is surgical and empty (identical wins over both the cap and threshold <= 0).
+    long_txt = "one two three four five six"
+    r_thr_zero = split_change(long_txt, long_txt, 0.0)
+    assert r_thr_zero.mode == "surgical"
+    assert r_thr_zero.sub_edits == []
 
