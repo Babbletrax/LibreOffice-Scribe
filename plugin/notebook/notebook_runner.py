@@ -22,7 +22,7 @@ from plugin.framework.uno_context import get_active_document
 from plugin.notebook import form_lookup
 from plugin.notebook.cell_registry import NotebookCodeCell, NotebookDocState, _IN_PROMPT_RE, _format_in_prompt, _prepare_display_text, find_cell_by_hex, load_registry, save_registry
 from plugin.notebook.notebook_controls import _doc_key, _resolve_para_style
-from plugin.notebook.writer_importer import _PARAGRAPH_BREAK, _STYLE_MD_H1, _STYLE_MD_H2, _STYLE_NOTEBOOK_IN, _STYLE_NOTEBOOK_OUT, _insert_image_in_flow, _strip_ansi, output_para_style
+from plugin.notebook.writer_importer import _PARAGRAPH_BREAK, _STYLE_MD_H1, _STYLE_MD_H2, _STYLE_NOTEBOOK_IN, _STYLE_NOTEBOOK_OUT, _collapse_cr, _insert_image_in_flow, _strip_ansi, output_para_style
 from plugin.scripting.payload_codec import find_image_payloads, host_unpack_data, is_image_payload
 from plugin.scripting.session_manager import notebook_session_id, pin_script_document, release_script_document
 from plugin.scripting.venv_worker import run_code_in_user_venv
@@ -686,12 +686,12 @@ def format_run_output_text(result: dict[str, Any], execution_count: int | None =
     ``Out [n]:`` is only for execute_result / last-line values, not print streams.
     """
     parts: list[str] = []
-    stdout = (result.get("stdout") or "").strip()
+    stdout = _collapse_cr(_strip_ansi(result.get("stdout") or "")).strip()
     if stdout:
         parts.append(stdout)
     if result.get("status") == "error":
         tb = result.get("traceback") or result.get("message") or "Error"
-        parts.append(_strip_ansi(str(tb)))
+        parts.append(_collapse_cr(_strip_ansi(str(tb))).strip())
     elif result.get("status") == "ok":
         wire = result.get("result")
 

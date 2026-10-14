@@ -31,7 +31,6 @@ from plugin.notebook.notebook_controls import (
     _text_area_width_units,
 )
 from plugin.notebook.writer_importer import (
-    _MAX_IMAGE_DECODE_BYTES,
     _PARAGRAPH_BREAK,
     _STYLE_MD_H1,
     _STYLE_MD_H2,
@@ -171,9 +170,12 @@ def test_jpeg_pixel_size_reads_sof():
     assert _jpeg_pixel_size(raw) == (20, 10)
 
 
-def test_decode_notebook_image_rejects_oversize():
-    huge = "A" * (_MAX_IMAGE_DECODE_BYTES + 1)
-    assert _decode_notebook_image(huge) is None
+def test_decode_notebook_image_caps_decoded_not_encoded_length(monkeypatch):
+    import plugin.notebook.writer_importer as wi
+
+    monkeypatch.setattr(wi, "_MAX_IMAGE_DECODE_BYTES", 6)
+    assert _decode_notebook_image("AAAAAAAA") is not None
+    assert _decode_notebook_image("AAAAAAAAAAAA") is None
 
 
 def test_format_output_plain_mime():
@@ -199,6 +201,7 @@ def test_format_outputs_for_body_interleaves_image_then_stream():
     segments, n_text = _format_outputs_for_body(outputs, 0)
     assert n_text == 1
     assert [kind for kind, _payload in segments] == ["image", "text"]
+    assert segments[0][1] == ("image/png", "abc")
     assert segments[1][1] == "hello printed\n"
 
 
@@ -1403,7 +1406,9 @@ def test_resolve_markdown_image_path_relative_to_notebook_dir(tmp_path):
     img.write_bytes(_TINY_PNG)
     resolved = _resolve_markdown_image_path("../images/foo.png", str(nb_dir))
     assert resolved is not None
-    assert Path(resolved).resolve() == img.resolve()
+    path, is_temp = resolved
+    assert is_temp is False
+    assert Path(path).resolve() == img.resolve()
     assert _resolve_markdown_image_path("../images/missing.png", str(nb_dir)) is None
 
 
@@ -1420,14 +1425,18 @@ def test_resolve_bourke_images_from_fixture_notebook_dir():
     ):
         resolved = _resolve_markdown_image_path(f"../images/{name}", str(fixtures))
         assert resolved is not None, name
-        assert Path(resolved).is_file(), name
+        path, is_temp = resolved
+        assert is_temp is False
+        assert Path(path).is_file(), name
 
 
-def test_svg_pixel_size_reads_viewbox():
+def test_svg_pixel_size_reads_comma_viewbox():
     from plugin.notebook.writer_importer import _svg_pixel_size
 
     svg = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 117 20"></svg>'
     assert _svg_pixel_size(svg) == (117, 20)
+    svg_comma = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0,0,117,20"></svg>'
+    assert _svg_pixel_size(svg_comma) == (117, 20)
     sized = b'<svg width="80" height="20"></svg>'
     assert _svg_pixel_size(sized) == (80, 20)
 
@@ -1467,7 +1476,7 @@ def test_import_mixed_html_img_cell_renders_markdown_and_image(tmp_path, monkeyp
         html_calls.append(html)
         return True
 
-    def fake_embed(d, src, notebook_dir, *, ctx=None):
+    def fake_embed(d, src, notebook_dir, *, ctx=None, **kwargs):
         embed_calls.append(src)
         return True
 
@@ -1520,9 +1529,9 @@ def test_import_html_img_fixture_notebook(monkeypatch):
 
     real_embed = wi._embed_markdown_image
 
-    def tracking_embed(d, src, notebook_dir, *, ctx=None):
+    def tracking_embed(d, src, notebook_dir, *, ctx=None, **kwargs):
         embed_srcs.append(src)
-        return real_embed(d, src, notebook_dir, ctx=ctx)
+        return real_embed(d, src, notebook_dir, ctx=ctx, **kwargs)
 
     monkeypatch.setattr("plugin.writer.html_import.insert_html_fragment_at_cursor", fake_insert_html)
     monkeypatch.setattr("plugin.notebook.writer_importer.insert_image_at_locator", fake_locator)
@@ -1540,3 +1549,200 @@ def test_import_html_img_fixture_notebook(monkeypatch):
     assert "<strong>Array</strong>" in joined_html
     assert embed_srcs == ["../images/numpy-anatomy-of-an-array-updated.png"]
     assert locator_calls, "relative HTML <img> was not embedded"
+
+
+def test_iter_markdown_blocks_fenced_code():
+    from plugin.notebook.writer_importer import _iter_markdown_blocks
+
+    src1 = "# Title\n```python\n# comment\n- not a list\n```\nAfter"
+    assert _iter_markdown_blocks(src1) == [
+        ("h1", "Title"),
+        ("pre", "# comment\n- not a list"),
+        ("p", "After"),
+    ]
+
+    src2 = "# Title\n~~~\n# comment\n- not a list\n~~~\nAfter"
+    assert _iter_markdown_blocks(src2) == [
+        ("h1", "Title"),
+        ("pre", "# comment\n- not a list"),
+        ("p", "After"),
+    ]
+
+    src_unclosed = "# Title\n```\n# comment\n- not a list"
+    assert _iter_markdown_blocks(src_unclosed) == [
+        ("h1", "Title"),
+        ("pre", "# comment\n- not a list"),
+    ]
+
+    src_empty = "```\n\n```"
+    assert _iter_markdown_blocks(src_empty) == []
+
+    src_4spaces = "    ```python\n    code\n    ```"
+    blocks = _iter_markdown_blocks(src_4spaces)
+    assert not any(k == "pre" for k, _p in blocks)
+    assert any(k == "p" for k, _p in blocks)
+
+
+def test_iter_markdown_blocks_atx_keeps_hash_in_word():
+    from plugin.notebook.writer_importer import _iter_markdown_blocks
+
+    assert _iter_markdown_blocks("## Learning C#") == [("h2", "Learning C#")]
+    assert _iter_markdown_blocks("## Learning C# #") == [("h2", "Learning C#")]
+    assert _iter_markdown_blocks("## foo # bar") == [("h2", "foo # bar")]
+
+
+def test_inline_markdown_does_not_eat_intraword_or_spaced_stars():
+    from plugin.notebook.writer_importer import _inline_markdown_to_html, _paragraph_needs_html
+
+    assert not _paragraph_needs_html("snake_case_name")
+    assert _inline_markdown_to_html("snake_case_name") == "snake_case_name"
+    assert _inline_markdown_to_html("2 * 3 * 4") == "2 * 3 * 4"
+    assert "<em>italic</em>" in _inline_markdown_to_html("*italic*")
+    assert "<strong>bold</strong>" in _inline_markdown_to_html("**bold**")
+    link_html = _inline_markdown_to_html("[**x**](http://example.com)")
+    assert '<a href="http://example.com"><strong>x</strong></a>' in link_html
+
+
+def test_inline_markdown_link_allows_one_paren_level():
+    from plugin.notebook.writer_importer import _inline_markdown_to_html
+
+    wiki = "[Python](https://en.wikipedia.org/wiki/Python_(programming_language))"
+    wiki_html = _inline_markdown_to_html(wiki)
+    assert 'href="https://en.wikipedia.org/wiki/Python_(programming_language)"' in wiki_html
+
+    title_link = '[a](http://x.com "title")'
+    title_html = _inline_markdown_to_html(title_link)
+    assert 'href="http://x.com"' in title_html
+    assert "title" not in title_html.split('href="')[1].split('"')[0]
+
+
+def test_iter_markdown_blocks_inline_and_linked_images(monkeypatch):
+    from plugin.notebook.writer_importer import _append_markdown_cell, _iter_markdown_blocks
+
+    blocks = _iter_markdown_blocks("See ![alt](pic.png) now")
+    assert len(blocks) == 1
+    assert blocks[0][0] == "p"
+    assert "![alt](pic.png)" in blocks[0][1]
+
+    linked_blocks = _iter_markdown_blocks("[![badge](b.png)](http://example.com)")
+    assert linked_blocks == [("img", ("badge", "b.png"))]
+
+    embed_calls = []
+
+    def fake_embed(doc, src, notebook_dir, *, ctx=None, budget=None):
+        embed_calls.append(src)
+        return True
+
+    monkeypatch.setattr("plugin.notebook.writer_importer._embed_markdown_image", fake_embed)
+    doc, body_text, _cursor = _writer_doc_mock()
+    _append_markdown_cell(doc, "See ![alt](pic.png) now", lead_break=False)
+    assert embed_calls == ["pic.png"]
+    inserted = [call.args[1] for call in body_text.insertString.call_args_list]
+    assert any("See" in s for s in inserted)
+    assert any("now" in s for s in inserted)
+
+
+def test_split_markdown_image_src_quotes_angles():
+    from plugin.notebook.writer_importer import _split_markdown_image_src
+
+    assert _split_markdown_image_src("<my pic.png>") == "my pic.png"
+    assert _split_markdown_image_src('"my pic.png"') == "my pic.png"
+    assert _split_markdown_image_src('my%20pic.png "title"') == "my%20pic.png"
+
+
+def test_resolve_markdown_image_path_unquotes_and_angles(tmp_path):
+    from plugin.notebook.writer_importer import _resolve_markdown_image_path
+
+    pic = tmp_path / "my pic.png"
+    pic.write_bytes(_TINY_PNG)
+    res1 = _resolve_markdown_image_path("my%20pic.png", str(tmp_path))
+    assert res1 is not None
+    path1, is_temp1 = res1
+    assert is_temp1 is False
+    assert Path(path1).resolve() == pic.resolve()
+
+    res2 = _resolve_markdown_image_path("<my pic.png>", str(tmp_path))
+    assert res2 is not None
+    path2, is_temp2 = res2
+    assert is_temp2 is False
+    assert Path(path2).resolve() == pic.resolve()
+
+
+def test_file_url_to_local_path_unquotes(monkeypatch):
+    import sys
+    from urllib.parse import unquote, urlparse
+    from urllib.request import url2pathname
+    from plugin.notebook.writer_importer import _file_url_to_local_path
+
+    fake_uno = MagicMock()
+    try:
+        import pyuno
+        fake_uno.fileUrlToSystemPath.side_effect = pyuno.fileUrlToSystemPath
+    except Exception:
+        fake_uno.fileUrlToSystemPath.side_effect = lambda u: url2pathname(unquote(urlparse(u).path))
+    monkeypatch.setitem(sys.modules, "uno", fake_uno)
+
+    res = _file_url_to_local_path("file:///tmp/my%20pic.png")
+    assert res.replace("\\", "/").endswith("/tmp/my pic.png")
+
+    fake_uno.fileUrlToSystemPath.side_effect = RuntimeError("no uno")
+    res_fallback = _file_url_to_local_path("file:///tmp/my%20pic.png")
+    assert res_fallback.replace("\\", "/").endswith("/tmp/my pic.png")
+
+
+def test_remote_image_budget_stops_fetches(monkeypatch):
+    import urllib.request
+    from plugin.notebook.writer_importer import _RemoteImageBudget, _resolve_markdown_image_path
+
+    def fail_urlopen(*args, **kwargs):
+        pytest.fail("urlopen should not be called when budget exhausted")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fail_urlopen)
+
+    budget1 = _RemoteImageBudget(max_images=0)
+    assert _resolve_markdown_image_path("https://example.com/a.png", None, budget=budget1) is None
+
+    budget2 = _RemoteImageBudget(budget_sec=-1.0)
+    assert _resolve_markdown_image_path("https://example.com/a.png", None, budget=budget2) is None
+
+
+def test_format_stream_strips_ansi_and_collapses_cr():
+    from plugin.notebook.writer_importer import format_output_text
+
+    out1 = {"output_type": "stream", "text": "\x1b[31mred\x1b[0m\rdone\n"}
+    assert format_output_text(out1) == "done\n"
+
+    out2 = {"output_type": "stream", "text": "0%\r50%\r100%"}
+    assert format_output_text(out2) == "100%"
+
+
+def test_format_error_uses_ename_when_traceback_empty():
+    from plugin.notebook.writer_importer import format_output_text
+
+    out = {"output_type": "error", "ename": "ValueError", "evalue": "bad", "traceback": []}
+    assert format_output_text(out) == "ValueError: bad"
+
+
+def test_format_html_only_is_not_dumped():
+    from plugin.notebook.writer_importer import format_output_text
+
+    out_html = {"output_type": "display_data", "data": {"text/html": "<p>x</p>"}}
+    assert format_output_text(out_html) == "[non-text output: text/html]"
+
+    out_md = {"output_type": "display_data", "data": {"text/html": "<p>x</p>", "text/markdown": "# heading"}}
+    assert format_output_text(out_md) == "# heading"
+
+
+def test_doc_body_nonempty_uses_region_compare():
+    from plugin.notebook.writer_importer import _doc_body_nonempty
+
+    mock_text = MagicMock()
+    mock_text.compareRegionStarts.return_value = 0
+    mock_doc = MagicMock()
+    mock_doc.getText.return_value = mock_text
+
+    assert _doc_body_nonempty(mock_doc) is False
+    mock_text.getString.assert_not_called()
+
+    mock_text.compareRegionStarts.return_value = 1
+    assert _doc_body_nonempty(mock_doc) is True

@@ -469,7 +469,7 @@ Unifying `detect_doc_type` onto `doc_type_label_for_enum` would change unknown â
 
 **Notebook markdown images**
 
-`writer_importer._resolve_markdown_image_path`: `uno.fileUrlToSystemPath` then naive `src.replace("file://", "", 1)` on failure. That fallback is not equivalent to `_system_path_from_url` (no `file:/` repair, no unquote).
+`writer_importer._resolve_markdown_image_path` resolves `file:` URLs via `_file_url_to_local_path`: `normalize_file_url` (`text_helpers`), then `uno.fileUrlToSystemPath`, falling back on `urllib.request.url2pathname(urllib.parse.unquote(urlparse(src).path))`.
 
 ### 3.5 `uno_context.py` scope creep
 
