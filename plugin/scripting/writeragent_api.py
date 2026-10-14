@@ -1243,16 +1243,16 @@ class _ImagesProxy:
         """
         return _rpc_call("image_get_info", name=name)
 
-    def insert(self, path: str, *, locator: str | None = None, paragraph: int | None = None, page: int | None = None, x_mm: float | None = None, y_mm: float | None = None, width_mm: int | None = None, height_mm: int | None = None, target: str | None = None, style: str | None = None, auto_height: bool | None = None) -> dict[str, Any]:
-        """Insert an image from local path or URL into the document. URLs are auto-downloaded first. For Writer letterheads, pass target='header' or 'footer' (optionally style) to insert into the page header/footer with auto-height so the logo does not overlap the body. A different-first-page letterhead logo needs first_is_shared=false on the page style (page_set_style_properties) so HeaderTextFirst is its own text object, then target='header_first' (or footer_first) — otherwise the image lands in the shared header and repeats on every page. On Draw/Impress, optional page (0-based) and x_mm/y_mm place the image; omitted x/y centers it. Sizes and positions are millimetres (not 1/100 mm).
+    def insert(self, path: str, *, locator: str | None = None, paragraph: int | None = None, page: int | None = None, x_mm: float | None = None, y_mm: float | None = None, width_mm: float | None = None, height_mm: float | None = None, target: str | None = None, style: str | None = None, auto_height: bool | None = None) -> dict[str, Any]:
+        """Insert an image from local path or URL into the document. URLs are auto-downloaded first. For Writer letterheads, pass target='header' or 'footer' (optionally style) to insert into the page header/footer with auto-height so the logo does not overlap the body. A different-first-page letterhead logo needs first_is_shared=false on the page style (page_set_style_properties) so HeaderTextFirst is its own text object, then target='header_first' (or footer_first) — otherwise the image lands in the shared header and repeats on every page. On Draw/Impress, optional page (0-based) and x_mm/y_mm place the image; omitted x/y centers it. On Calc, page is a 0-based sheet index; x_mm and y_mm are ignored. Sizes and positions are millimetres (not 1/100 mm).
 
         Args:
             path (required): Local file path or URL of the image to insert.
             locator (optional): Unified locator for insertion point (e.g. 'bookmark:NAME', 'heading_text:Title').
             paragraph (optional): Paragraph index for insertion point.
-            page (optional): Draw/Impress: 0-based page index (active page if omitted).
-            x_mm (optional): Draw/Impress: X position in millimetres (default: centered).
-            y_mm (optional): Draw/Impress: Y position in millimetres (default: centered).
+            page (optional): Draw/Impress: 0-based page index. Calc: 0-based sheet index. Active page or sheet if omitted.
+            x_mm (optional): Draw/Impress: X position in millimetres (default: centered). Ignored on Calc.
+            y_mm (optional): Draw/Impress: Y position in millimetres (default: centered). Ignored on Calc.
             width_mm (optional): Width in millimetres (default: 80).
             height_mm (optional): Height in millimetres (default: 80).
             target (optional): Writer insertion target (default: body). header/footer write the shared page-style region. header_first/footer_first write the first-page letterhead (set first_is_shared=false first, or the first page still shares HeaderText). One of: body, header, footer, header_first, footer_first.
@@ -1274,13 +1274,13 @@ class _ImagesProxy:
         return _rpc_call("image_list_nearby_files", filter=filter)
 
     def replace(self, name: str, path: str, *, width_mm: float | None = None, height_mm: float | None = None) -> dict[str, Any]:
-        """Replace an image's source file keeping position and frame.
+        """Replace an image's source file, keeping the same object, position, and frame. The new file is embedded. If only width_mm or only height_mm is set, the other side scales to keep the current aspect ratio. Setting both uses both sizes.
 
         Args:
             name (required): Name of the image to replace (from image_list).
             path (required): Local file path or URL of the replacement image.
-            width_mm (optional): Optionally update width in millimetres.
-            height_mm (optional): Optionally update height in millimetres.
+            width_mm (optional): New width in millimetres. If height_mm is omitted, height scales to keep the current aspect ratio.
+            height_mm (optional): New height in millimetres. If width_mm is omitted, width scales to keep the current aspect ratio.
         """
         return _rpc_call("image_replace", name=name, path=path, width_mm=width_mm, height_mm=height_mm)
 

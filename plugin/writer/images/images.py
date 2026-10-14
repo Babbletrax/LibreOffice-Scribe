@@ -27,7 +27,6 @@ larger single schema.
 import logging
 import hashlib
 import os
-import tempfile
 import typing
 from typing import Any
 
@@ -48,7 +47,7 @@ def _run_on_main(
         return fn(*args, **kwargs)
     return execute_on_main_thread(fn, *args, timeout=timeout, bound_scope=bound_scope, **kwargs)
 from .image_utils import ImageService
-from . import image_mark
+from . import image_mark, image_tools
 from plugin.framework.config import get_config_int, get_config_bool, get_config_str
 from plugin.framework.config_schema import DEFAULT_IMAGE_BASE_SIZE
 from plugin.framework.client.model_fetcher import get_image_model
@@ -57,7 +56,6 @@ from plugin.framework.model_lru import update_lru_history
 from plugin.doc.document_research import list_nearby_files
 from plugin.doc import visual_helpers
 from .image_tools import (
-    IMAGE_CACHE_DIR_NAME,
     insert_image,
     insert_image_at_locator,
     insert_image_into_header_footer,
@@ -155,7 +153,11 @@ class ImageGenerate(ToolWriterImageBase):
         if explicit_edit or source_image is None:
 
             def _read_selection_for_edit() -> tuple[str, tuple[str, int, int | None, int | None, int | None] | None]:
-                b64 = get_selected_image_base64(ctx.doc, ctx.ctx)
+                try:
+                    b64 = get_selected_image_base64(ctx.doc, ctx.ctx)
+                except Exception:
+                    log.exception("image_generate: selected image export failed")
+                    return ("export_failed", None)
                 if not b64:
                     return ("no_selection", None)
 
@@ -174,6 +176,8 @@ class ImageGenerate(ToolWriterImageBase):
                 return ("ok", (b64, nw, nh, dw, dh))
 
             tag, payload = _run_on_main(_read_selection_for_edit, timeout=mt_timeout)
+            if tag == "export_failed":
+                return self._tool_error("Could not export the selected image.", code="SELECTION_READ_ERROR")
             selection_available = tag == "ok"
             is_edit = resolve_image_generate_is_edit(source_image, selection_available=selection_available)
             if explicit_edit and not selection_available:
@@ -260,8 +264,40 @@ class ImageGenerate(ToolWriterImageBase):
         return {"status": "ok", "message": msg}
 
 
-# Persistent cache directory for downloaded images (embedded on insert, not linked).
-_IMAGE_CACHE_DIR = os.path.join(tempfile.gettempdir(), IMAGE_CACHE_DIR_NAME)
+def _download_for_tool(tool: Any, url: str, *, verify_ssl: bool = True, force: bool = False) -> str | dict[str, Any]:
+    try:
+        return _download_image_to_cache(url, verify_ssl=verify_ssl, force=force)
+    except Exception as exc:
+        log.exception("image download failed")
+        return tool._tool_error("Could not download image: %s" % exc, code="DOWNLOAD_FAILED", url=url)
+
+
+# Bugfix: Setting only width_mm or only height_mm left the unpassed dimension
+# at its old absolute size, distorting the aspect ratio. When only one dimension
+# is specified, we scale the other side proportionally to preserve the aspect ratio.
+def _replacement_size_units(
+    current_width: int,
+    current_height: int,
+    width_mm: int | float | None,
+    height_mm: int | float | None,
+) -> tuple[int, int]:
+    if width_mm is not None and height_mm is not None:
+        return visual_helpers.mm_to_unit(width_mm), visual_helpers.mm_to_unit(height_mm)
+    if width_mm is not None:
+        width_units = visual_helpers.mm_to_unit(width_mm)
+        if current_width == 0:
+            height_units = int(current_height)
+        else:
+            height_units = max(1, int(round(width_units * current_height / current_width)))
+        return width_units, height_units
+    if height_mm is not None:
+        height_units = visual_helpers.mm_to_unit(height_mm)
+        if current_height == 0:
+            width_units = int(current_width)
+        else:
+            width_units = max(1, int(round(height_units * current_width / current_height)))
+        return width_units, height_units
+    return int(current_width), int(current_height)
 
 
 # ------------------------------------------------------------------
@@ -636,10 +672,16 @@ class ImageSetProperties(ToolWriterImageBase):
         if width_mm is not None or height_mm is not None:
             from com.sun.star.awt import Size
 
-            current = graphic.getPropertyValue("Size")
+            try:
+                current = _object_size(graphic)
+                curr_w, curr_h = current.Width, current.Height
+            except Exception:
+                log.exception("image_set_properties: could not read size")
+                return self._tool_error("Could not read the image size.", code="SIZE_UNAVAILABLE", image_name=image_name)
+
             new_size = Size()
-            new_size.Width = int(width_mm * 100) if width_mm is not None else current.Width
-            new_size.Height = int(height_mm * 100) if height_mm is not None else current.Height
+            new_size.Width = visual_helpers.mm_to_unit(width_mm) if width_mm is not None else curr_w
+            new_size.Height = visual_helpers.mm_to_unit(height_mm) if height_mm is not None else curr_h
             graphic.setPropertyValue("Size", new_size)
             updated.append("size")
 
@@ -843,8 +885,10 @@ class ImageDownload(ToolWriterImageBase):
             verify_ssl = True
         force = kwargs.get("force", False)
 
-        local_path = _download_image_to_cache(url, verify_ssl=verify_ssl, force=force)
-        return {"status": "ok", "local_path": local_path, "url": url}
+        dl_result = _download_for_tool(self, url, verify_ssl=verify_ssl, force=force)
+        if isinstance(dl_result, dict):
+            return dl_result
+        return {"status": "ok", "local_path": dl_result, "url": url}
 
 
 # ------------------------------------------------------------------
@@ -866,6 +910,7 @@ class ImageInsert(ToolWriterImageBase):
         "target='header_first' (or footer_first) — otherwise the image lands in the shared "
         "header and repeats on every page. "
         "On Draw/Impress, optional page (0-based) and x_mm/y_mm place the image; omitted x/y centers it. "
+        "On Calc, page is a 0-based sheet index; x_mm and y_mm are ignored. "
         "Sizes and positions are millimetres (not 1/100 mm)."
     )
     parameters: dict[str, Any] | None = {
@@ -874,11 +919,11 @@ class ImageInsert(ToolWriterImageBase):
             "path": {"type": "string", "description": ("Local file path or URL of the image to insert.")},
             "locator": {"type": "string", "description": ("Unified locator for insertion point (e.g. 'bookmark:NAME', 'heading_text:Title').")},
             "paragraph": {"type": "integer", "description": "Paragraph index for insertion point."},
-            "page": {"type": "integer", "description": "Draw/Impress: 0-based page index (active page if omitted)."},
-            "x_mm": {"type": "number", "description": "Draw/Impress: X position in millimetres (default: centered)."},
-            "y_mm": {"type": "number", "description": "Draw/Impress: Y position in millimetres (default: centered)."},
-            "width_mm": {"type": "integer", "description": "Width in millimetres (default: 80)."},
-            "height_mm": {"type": "integer", "description": "Height in millimetres (default: 80)."},
+            "page": {"type": "integer", "description": "Draw/Impress: 0-based page index. Calc: 0-based sheet index. Active page or sheet if omitted."},
+            "x_mm": {"type": "number", "description": "Draw/Impress: X position in millimetres (default: centered). Ignored on Calc."},
+            "y_mm": {"type": "number", "description": "Draw/Impress: Y position in millimetres (default: centered). Ignored on Calc."},
+            "width_mm": {"type": "number", "description": "Width in millimetres (default: 80)."},
+            "height_mm": {"type": "number", "description": "Height in millimetres (default: 80)."},
             "target": {
                 "type": "string",
                 "enum": ["body", "header", "footer", "header_first", "footer_first"],
@@ -919,7 +964,10 @@ class ImageInsert(ToolWriterImageBase):
         doc = ctx.doc
 
         if image_path.startswith("http://") or image_path.startswith("https://"):
-            image_path = _download_image_to_cache(image_path)
+            dl_result = _download_for_tool(self, image_path)
+            if isinstance(dl_result, dict):
+                return dl_result
+            image_path = dl_result
         if not os.path.isfile(image_path):
             return self._tool_error(f"File not found: {image_path}", code="FILE_NOT_FOUND", path=image_path)
 
@@ -969,17 +1017,20 @@ class ImageInsert(ToolWriterImageBase):
                 return self._tool_error(f"Paragraph {paragraph_index} not found.", code="PARAGRAPH_NOT_FOUND", paragraph_index=paragraph_index)
             text_cursor = doc.getText().createTextCursorByRange(target_para.getEnd())
 
-        graphic = insert_image_at_locator(
-            ctx.ctx,
-            doc,
-            image_path,
-            width_mm=width_mm,
-            height_mm=height_mm,
-            text_cursor=text_cursor,
-            page_index=kwargs.get("page"),
-            x_mm=kwargs.get("x_mm"),
-            y_mm=kwargs.get("y_mm"),
-        )
+        try:
+            graphic = insert_image_at_locator(
+                ctx.ctx,
+                doc,
+                image_path,
+                width_mm=width_mm,
+                height_mm=height_mm,
+                text_cursor=text_cursor,
+                page_index=kwargs.get("page"),
+                x_mm=kwargs.get("x_mm"),
+                y_mm=kwargs.get("y_mm"),
+            )
+        except IndexError as exc:
+            return self._tool_error(str(exc), code="INVALID_PARAMETER", parameter="page")
         if graphic is None:
             return self._tool_error("Failed to insert image.", code="INSERT_FAILED", path=image_path)
 
@@ -1031,14 +1082,14 @@ class ImageReplace(ToolWriterImageBase):
 
     name: str | None = "image_replace"
     intent: str | None = "media"
-    description: str = "Replace an image's source file keeping position and frame."
+    description: str = "Replace an image's source file, keeping the same object, position, and frame. The new file is embedded. If only width_mm or only height_mm is set, the other side scales to keep the current aspect ratio. Setting both uses both sizes."
     parameters: dict[str, Any] | None = {
         "type": "object",
         "properties": {
             "name": {"type": "string", "description": "Name of the image to replace (from image_list)."},
             "path": {"type": "string", "description": "Local file path or URL of the replacement image."},
-            "width_mm": {"type": "number", "description": "Optionally update width in millimetres."},
-            "height_mm": {"type": "number", "description": "Optionally update height in millimetres."},
+            "width_mm": {"type": "number", "description": "New width in millimetres. If height_mm is omitted, height scales to keep the current aspect ratio."},
+            "height_mm": {"type": "number", "description": "New height in millimetres. If width_mm is omitted, width scales to keep the current aspect ratio."},
         },
         "required": ["name", "path"],
     }
@@ -1054,7 +1105,10 @@ class ImageReplace(ToolWriterImageBase):
             return self._tool_error("Image '%s' not found or document does not support graphic objects." % image_name, code="IMAGE_NOT_FOUND", image_name=image_name)
 
         if new_image_path.startswith("http://") or new_image_path.startswith("https://"):
-            new_image_path = _download_image_to_cache(new_image_path)
+            dl_result = _download_for_tool(self, new_image_path)
+            if isinstance(dl_result, dict):
+                return dl_result
+            new_image_path = dl_result
         if not os.path.isfile(new_image_path):
             return self._tool_error(f"File not found: {new_image_path}", code="FILE_NOT_FOUND", path=new_image_path)
 
@@ -1062,9 +1116,13 @@ class ImageReplace(ToolWriterImageBase):
         height_mm = kwargs.get("height_mm")
         width_units = height_units = None
         if width_mm is not None or height_mm is not None:
-            current = graphic.getPropertyValue("Size")
-            width_units = int(width_mm * 100) if width_mm is not None else current.Width
-            height_units = int(height_mm * 100) if height_mm is not None else current.Height
+            try:
+                current = _object_size(graphic)
+                current_width, current_height = current.Width, current.Height
+            except Exception:
+                log.exception("image_replace: could not read size")
+                return self._tool_error("Could not read the image size.", code="SIZE_UNAVAILABLE", image_name=image_name)
+            width_units, height_units = _replacement_size_units(current_width, current_height, width_mm, height_mm)
 
         if not replace_graphic_source(ctx.ctx, ctx.doc, graphic, new_image_path, width_units=width_units, height_units=height_units):
             return self._tool_error("Failed to replace image.", code="REPLACE_FAILED", image_name=image_name)
@@ -1087,7 +1145,8 @@ def _download_image_to_cache(url: str, verify_ssl: bool = True, force: bool = Fa
     fetched with hostname checks disabled.
     """
 
-    os.makedirs(_IMAGE_CACHE_DIR, exist_ok=True)
+    cache_dir = image_tools._image_cache_dir()
+    os.makedirs(cache_dir, exist_ok=True)
 
     # Derive a stable filename from the URL
     url_hash = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
@@ -1103,7 +1162,7 @@ def _download_image_to_cache(url: str, verify_ssl: bool = True, force: bool = Fa
     if not ext:
         ext = ".png"
 
-    local_path = os.path.join(_IMAGE_CACHE_DIR, url_hash + ext)
+    local_path = os.path.join(cache_dir, url_hash + ext)
 
     if not force and os.path.isfile(local_path):
         log.debug("image_download: cache hit %s -> %s", url, local_path)

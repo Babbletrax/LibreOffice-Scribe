@@ -20,6 +20,7 @@ from plugin.writer.images.images import (
     ImageReplace,
     _download_image_to_cache,
     _object_size,
+    _replacement_size_units,
     _resolve_crop_edges,
     _resolve_orient,
     resolve_image_generate_is_edit,
@@ -384,7 +385,7 @@ def test_download_image_to_cache_does_not_disable_tls(tmp_path, monkeypatch):
 
     from plugin.writer.images import images as images_mod
 
-    monkeypatch.setattr(images_mod, "_IMAGE_CACHE_DIR", str(tmp_path))
+    monkeypatch.setattr("plugin.writer.images.image_tools._image_cache_dir", lambda: str(tmp_path))
     seen = {}
 
     class _Resp:
@@ -513,3 +514,119 @@ def test_object_size_reads_writer_property_and_draw_getsize():
     draw.getPropertyValue.side_effect = Exception("UnknownPropertyException: Size")
     draw.getSize.return_value = "draw-size"
     assert _object_size(draw) == "draw-size"
+
+
+def test_replacement_size_units_preserves_aspect():
+    assert _replacement_size_units(2000, 1000, 40, None) == (4000, 2000)
+    assert _replacement_size_units(2000, 1000, None, 10) == (2000, 1000)
+    assert _replacement_size_units(2000, 1000, 40, 10) == (4000, 1000)
+    assert _replacement_size_units(0, 1000, 40, None) == (4000, 1000)
+
+
+def test_image_replace_one_side_scales():
+    ctx = TestingFactory.create_context(doc_type="writer")
+    graphic = MagicMock()
+    size = MagicMock()
+    size.Width = 2000
+    size.Height = 1000
+    with (
+        patch("plugin.writer.images.images._get_graphic_object", return_value=graphic),
+        patch("os.path.isfile", return_value=True),
+        patch("plugin.writer.images.images._object_size", return_value=size),
+        patch("plugin.writer.images.images.replace_graphic_source", return_value=True) as mock_replace,
+    ):
+        res = ImageReplace().execute(ctx, name="Graphic1", path="/tmp/new.png", width_mm=40)
+    assert res["status"] == "ok"
+    mock_replace.assert_called_once_with(
+        ctx.ctx, ctx.doc, graphic, "/tmp/new.png", width_units=4000, height_units=2000
+    )
+
+
+def test_image_replace_size_read_failure_is_tool_error():
+    ctx = TestingFactory.create_context(doc_type="writer")
+    graphic = MagicMock()
+    with (
+        patch("plugin.writer.images.images._get_graphic_object", return_value=graphic),
+        patch("os.path.isfile", return_value=True),
+        patch("plugin.writer.images.images._object_size", side_effect=RuntimeError("cannot read size")),
+        patch("plugin.writer.images.images.replace_graphic_source") as mock_replace,
+    ):
+        res = ImageReplace().execute(ctx, name="Graphic1", path="/tmp/new.png", width_mm=40)
+    assert res["status"] != "ok"
+    assert res.get("code") == "SIZE_UNAVAILABLE"
+    mock_replace.assert_not_called()
+
+
+def test_image_replace_download_failure_is_tool_error():
+    import urllib.error
+
+    ctx = TestingFactory.create_context(doc_type="writer")
+    graphic = MagicMock()
+    with (
+        patch("plugin.writer.images.images._get_graphic_object", return_value=graphic),
+        patch("plugin.writer.images.images._download_image_to_cache", side_effect=urllib.error.URLError("timed out")),
+    ):
+        res = ImageReplace().execute(ctx, name="Graphic1", path="https://example.com/pic.png")
+    assert res["status"] != "ok"
+    assert res.get("code") == "DOWNLOAD_FAILED"
+    assert res.get("message", "").startswith("Could not download image:")
+
+    # A local missing file still returns FILE_NOT_FOUND and does not call the downloader
+    with (
+        patch("plugin.writer.images.images._get_graphic_object", return_value=graphic),
+        patch("plugin.writer.images.images._download_image_to_cache") as mock_download,
+        patch("os.path.isfile", return_value=False),
+    ):
+        res_local = ImageReplace().execute(ctx, name="Graphic1", path="/nonexistent/pic.png")
+    assert res_local["status"] != "ok"
+    assert res_local.get("code") == "FILE_NOT_FOUND"
+    mock_download.assert_not_called()
+
+
+def test_image_insert_download_failure_is_tool_error():
+    import urllib.error
+
+    ctx = TestingFactory.create_context(doc_type="writer")
+    with patch("plugin.writer.images.images._download_image_to_cache", side_effect=urllib.error.URLError("timed out")):
+        res = ImageInsert().execute(ctx, path="https://example.com/pic.png")
+    assert res["status"] != "ok"
+    assert res.get("code") == "DOWNLOAD_FAILED"
+    assert res.get("message", "").startswith("Could not download image:")
+
+    # A local missing file still returns FILE_NOT_FOUND and does not call the downloader
+    with (
+        patch("plugin.writer.images.images._download_image_to_cache") as mock_download,
+        patch("os.path.isfile", return_value=False),
+    ):
+        res_local = ImageInsert().execute(ctx, path="/nonexistent/pic.png")
+    assert res_local["status"] != "ok"
+    assert res_local.get("code") == "FILE_NOT_FOUND"
+    mock_download.assert_not_called()
+
+
+def test_image_download_failure_is_tool_error():
+    import urllib.error
+
+    ctx = TestingFactory.create_context(doc_type="writer")
+    with patch("plugin.writer.images.images._download_image_to_cache", side_effect=urllib.error.URLError("timed out")):
+        res = ImageDownload().execute(ctx, url="https://example.com/pic.png")
+    assert res["status"] != "ok"
+    assert res.get("code") == "DOWNLOAD_FAILED"
+    assert res.get("message", "").startswith("Could not download image:")
+
+
+def test_image_generate_export_failure_is_selection_read_error():
+    ctx = TestingFactory.create_context(doc_type="writer")
+
+    def _run(fn, *args, timeout=60.0, bound_scope=None, **kwargs):
+        return fn(*args, **kwargs)
+
+    with (
+        patch("plugin.writer.images.images._run_on_main", side_effect=_run),
+        patch("plugin.writer.images.images.get_selected_image_base64", side_effect=RuntimeError("export")),
+    ):
+        res = ImageGenerate().execute(ctx, prompt="make it purple", source_image="selection")
+    assert res["status"] != "ok"
+    assert res.get("code") == "SELECTION_READ_ERROR"
+    assert res.get("message") == "Could not export the selected image."
+
