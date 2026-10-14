@@ -432,8 +432,11 @@ def execute_tool(
 
     from plugin.framework.queue_executor import execute_on_main_thread
 
-    # We keep two hops; collapsing resolve+execute into one hop changes queue semantics/races;
-    # a disposed doc between hops is acceptable vs merging hops.
+    # We keep two hops; collapsing resolve+execute into one hop changes queue semantics/races.
+    # Known window: the doc in tctx is resolved in the first hop and used in the second,
+    # so it can be closed in between and the tool then sees a dead UNO proxy
+    # (DisposedException). That is the same risk as a doc closing mid-tool, so we accept
+    # it rather than merge hops; the tool error path must report it cleanly.
     registry, tctx, is_async = execute_on_main_thread(_run)
 
     if is_async:
