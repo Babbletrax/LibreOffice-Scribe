@@ -112,3 +112,184 @@ def test_insert_optimize_result_into_calc() -> None:
         assert res == 1
         mock_insert.assert_called_once()
 
+
+def test_portfolio_daily_returns_are_not_equal_weight():
+    from scipy.optimize import minimize
+    rng = np.random.default_rng(0)
+    n = 500
+    z = rng.normal(size=(n, 4))
+    scales = [0.01, 0.015, 0.008, 0.02]
+    rets = z * scales
+    f = rng.normal(size=(n, 1)) * 0.01
+    rets = rets + f * [1.0, 0.5, 1.2, 0.3]
+    df = pd.DataFrame(rets, columns=["A", "B", "C", "D"])
+    cov = np.cov(rets, rowvar=False)
+    inv_cov = np.linalg.inv(cov)
+    ones = np.ones(4)
+    w_cf = inv_cov @ ones / (ones @ inv_cov @ ones)
+
+    result = optimize_portfolio(df)
+    assert result["status"] == "ok", result
+    table = result["tables"][0]
+    assert len(table["rows"]) == 4
+    weights = [row[1] for row in table["rows"]]
+    for w, cf in zip(weights, w_cf):
+        assert abs(w - cf) < 0.01
+    assert not all(abs(w - 0.25) < 0.01 for w in weights)
+
+    # Equal-weight volatility vs solver volatility
+    w_eq = np.array([0.25, 0.25, 0.25, 0.25])
+    vol_eq = float(np.sqrt(w_eq @ cov @ w_eq))
+    vol_reported = result["metrics"]["expected_volatility"]
+
+    scale = float(np.mean(np.diag(cov)))
+    res_solver = minimize(
+        lambda w: (w @ cov @ w) / scale,
+        np.ones(4) / 4.0,
+        method="SLSQP",
+        bounds=[(0, 1)] * 4,
+        constraints=[{"type": "eq", "fun": lambda w: np.sum(w) - 1.0}],
+        options={"ftol": 1e-12},
+    )
+    w_unrounded = res_solver.x
+    expected_vol = float(np.sqrt(max(float(w_unrounded @ cov @ w_unrounded), 0.0)))
+    assert abs(vol_reported - expected_vol) < 1e-9
+    assert vol_reported < vol_eq
+
+
+def test_portfolio_keeps_tiny_weights(monkeypatch):
+    from unittest.mock import MagicMock
+    mock_res = MagicMock()
+    mock_res.success = True
+    mock_res.x = np.array([0.5, 0.4999, 1e-8, 0.0])
+    mock_res.fun = 1.0
+    mock_res.message = "ok"
+
+    monkeypatch.setattr("scipy.optimize.minimize", lambda *args, **kwargs: mock_res)
+    df = pd.DataFrame(np.random.normal(size=(10, 4)), columns=["A", "B", "C", "D"])
+    result = optimize_portfolio(df)
+    assert result["status"] == "ok", result
+    table = result["tables"][0]
+    assert len(table["rows"]) == 4
+    vol = result["metrics"]["expected_volatility"]
+    assert np.isfinite(vol)
+    assert vol != 1.0
+
+
+def test_portfolio_one_row_is_insufficient():
+    df = pd.DataFrame({"A": [0.01], "B": [0.02]})
+    result = optimize_portfolio(df)
+    assert result["status"] == "error"
+    assert result["code"] == "INSUFFICIENT_DATA"
+    msg = result.get("error") or result.get("message", "")
+    assert "Need at least two complete return rows." in msg
+
+
+def test_portfolio_nan_rows():
+    df = pd.DataFrame({
+        "A": [0.01, np.nan, 0.03],
+        "B": [0.02, 0.01, 0.04],
+    })
+    result = optimize_portfolio(df)
+    assert result["status"] == "ok", result
+    assert "Dropped 1 return rows with a missing value" in result["flags"]
+
+
+def test_risk_free_rate_null_is_zero():
+    np.random.seed(42)
+    returns = pd.DataFrame({
+        "AAPL": np.random.normal(0.01, 0.02, 100),
+        "MSFT": np.random.normal(0.008, 0.015, 100),
+        "GOOG": np.random.normal(0.012, 0.025, 100),
+    })
+    res_none = run_optimize({
+        "helper": "optimize_portfolio",
+        "params": {"returns_col": ["AAPL", "MSFT", "GOOG"], "risk_free_rate": None},
+    }, returns)
+    res_zero = run_optimize({
+        "helper": "optimize_portfolio",
+        "params": {"returns_col": ["AAPL", "MSFT", "GOOG"], "risk_free_rate": 0},
+    }, returns)
+    assert res_none["status"] == "ok"
+    assert res_zero["status"] == "ok"
+    assert res_none["tables"][0]["rows"] == res_zero["tables"][0]["rows"]
+
+
+def test_lp_unknown_column():
+    data = pd.DataFrame({"c": [1, 2], "a1": [3, 4], "b": [5, 6]})
+    result = linear_programming(data, c_col="cost", a_cols=["a1"], b_col="b")
+    assert result["status"] == "error"
+    assert result["code"] == "UNKNOWN_COLUMN"
+    msg = result.get("error") or result.get("message", "")
+    assert "cost" in msg
+    assert "a1" in msg
+
+
+def test_lp_string_a_cols():
+    data = pd.DataFrame({
+        "c": [3, 2, 1],
+        "a1": [1, 1, 1],
+        "b": [10, 10, 10],
+    })
+    result = linear_programming(data, c_col="c", a_cols="a1", b_col="b", maximize=True)
+    assert result["status"] == "ok", result
+    assert abs(result["metrics"]["objective_value"] - 30.0) < 1e-6
+
+
+def test_lp_maximize_false_string():
+    data = pd.DataFrame({
+        "c": [3, 2, 1],
+        "a1": [1, 1, 1],
+        "b": [10, 10, 10],
+    })
+    result = linear_programming(data, c_col="c", a_cols=["a1"], b_col="b", maximize="false")
+    assert result["status"] == "ok", result
+    assert abs(result["metrics"]["objective_value"] - 0.0) < 1e-6
+
+
+def test_lp_per_variable_bounds():
+    data = pd.DataFrame({
+        "c": [3, 2],
+        "a1": [1, 2],
+        "b": [4, 4],
+    })
+    result = linear_programming(data, c_col="c", a_cols=["a1"], b_col="b", bounds=[[0, 1], [0, 1]], maximize=True)
+    assert result["status"] == "ok", result
+
+
+def test_scheduling_skips_worker_id():
+    df = pd.DataFrame({
+        "worker_id": [1, 2, 3],
+        "t1": [10, 25, 15],
+        "t2": [20, 12, 18],
+    })
+    result = solve_scheduling_problem(df)
+    assert result["status"] == "ok", result
+    table = result["tables"][0]
+    cols = table["columns"]
+    col_idx = cols.index("assigned_column")
+    for row in table["rows"]:
+        assert row[col_idx] in ["t1", "t2"]
+
+
+def test_scheduling_unassigned_rows():
+    df = pd.DataFrame({
+        "t1": [10, 20, 30],
+        "t2": [15, 25, 35],
+    })
+    result = solve_scheduling_problem(df, cost_cols=["t1", "t2"])
+    assert result["status"] == "ok", result
+    assert result["metrics"]["unassigned_rows"] == 1
+    assert any("1 rows were not assigned" in f for f in result["flags"])
+
+
+def test_string_returns_col_is_not_characters():
+    df = pd.DataFrame({
+        "AAPL": [0.01, 0.02, 0.03],
+        "MSFT": [0.02, 0.03, 0.04],
+    })
+    result = optimize_portfolio(df, returns_col="AAPL")
+    assert result["status"] == "error"
+    assert result["code"] == "INSUFFICIENT_DATA"
+
+

@@ -247,7 +247,7 @@ Calc plot replacement reuses only a `GraphicObjectShape` named `WriterAgentPlot`
 | `decompose_time_series` | Trend / seasonal / residual | `date_col`, `value_col`, `period`, `model` |
 | `anomaly_detection_time_series` | Series-aware outliers (STL residuals + robust z-score) | `date_col`, `value_col`, `period`, `threshold=3.0`, `method="stl_residual"` |
 
-**Seasonality:** The period is inferred from the date frequency (daily 7, business-day 5, weekly 52, monthly 12, quarterly 4), and only when the series covers at least two full cycles. Otherwise `model="auto"` stays trend-only and adds a flag. An explicit `seasonal_periods` (or `period` on decompose / anomaly) still wins. Row count alone used to pick 12 whenever there were 24 or more rows, so a daily sheet was fit as a 12-day season. Duplicate timestamps are averaged before the fit. Weekday-only series forecast on business days.
+**Seasonality:** The period is inferred from the date frequency (daily 7, business-day 5, weekly 52, monthly 12, quarterly 4), and only when the series covers at least two full cycles. Otherwise `model="auto"` stays trend-only and adds a flag. An explicit `seasonal_periods` (or `period` on decompose / anomaly) still wins. Row count alone used to pick 12 whenever there were 24 or more rows, so a daily sheet was fit as a 12-day season. Duplicate timestamps are averaged before the fit. Weekday-only series forecast on business days. Calc date serials and integer years are parsed in the venv. A numeric date column whose values all lie in 1900–2200 and are whole numbers is a year column (1 January). Any other positive serial uses the Calc epoch 1899-12-30. The host range read still returns raw serials. A gap that breaks frequency inference does not fall back to a flat moving average: the model is fit on row order, and future dates use month, quarter, or year offsets when the typical gap says so. An irregular series adds a flag because the model still assumes equal spacing. An explicit seasonal_periods with fewer than two full cycles does not run Holt-Winters; auto stays trend-only and says so. The forecast table contains the whole horizon up to the 10000-period cap. Decomposition edge NaNs are empty cells, not NaN tokens.
 
 **Holt-Winters intervals:** 95% bands are the 2.5 and 97.5 percentiles of `HoltWintersResults.simulate` paths. That results object has `forecast` / `predict` / `simulate` and no `get_prediction` (`get_prediction` is on ETS and statespace results). Calling `get_prediction` used to raise, get swallowed, and the sheet said intervals were unavailable with no `lower`/`upper`. If simulation cannot build a band, the result keeps the point forecast and sets `metrics.interval_note` (`available: false`) instead of inventing bounds.
 
@@ -263,7 +263,7 @@ Calc plot replacement reuses only a `GraphicObjectShape` named `WriterAgentPlot`
 
 **Run Python Script:** **Forecast Helpers →** `[Forecast] forecast_time_series`, `[Forecast] decompose_time_series`, `[Forecast] anomaly_detection_time_series`.
 
-**Output:** Predictions / decomposition / anomaly tables (analysis egress pattern). `forecast_data` `output_range` uses the same sheet-qualified anchor as `analyze_data` (`Report.B2`, `'Q1.Sales'!B2`, `'O''Brien'.A1`): the report is written on that sheet. `forecast_data` with `auto_plot=true` (or chart keywords in `task_hint`) inserts a confidence-band chart via extended `time_series_plot`.
+**Output:** Predictions / decomposition / anomaly tables (analysis egress pattern). `forecast_data` `output_range` uses the same sheet-qualified anchor as `analyze_data` (`Report.B2`, `'Q1.Sales'!B2`, `'O''Brien'.A1`): the report is written on that sheet. `forecast_data` with `auto_plot=true` (or chart keywords in `task_hint`) inserts a confidence-band chart via extended `time_series_plot`. A sheet-write failure leaves status ok and sets sheet_write_error. The forecast table is still returned, and auto-plot still runs.
 
 **Sub-agent:** [`forecast_data`](../../plugin/calc/forecast.py) in `domain="analysis"` — same delegation as EDA/regression (`optimize_data` precedent); supports `auto_plot` for band charts ([`forecast_auto_plot.py`](../../plugin/calc/forecast_auto_plot.py)).
 
@@ -624,7 +624,7 @@ Results are inserted as compact tables and usable from scripts.
 
 **Proposed helpers:**
 
-| `optimize_portfolio` | Mean-variance or constraint-based | `scipy.optimize`, numpy |
+| `optimize_portfolio` | Long-only minimum-variance (Sharpe is report-only) | `scipy.optimize`, numpy |
 | `linear_programming` | LP from spec dict | `scipy.optimize.linprog` (pulp deferred) |
 | `solve_scheduling_problem` | Assignment / small IP | `scipy.optimize.linear_sum_assignment` (ortools/pulp deferred) |
 
@@ -639,6 +639,8 @@ Results are inserted as compact tables and usable from scripts.
 **Packages:** `scipy` (required).
 
 **`linear_programming` layout:** Each row is a variable (`c` is that variable's objective coefficient). Each `a*` column is one `<=` constraint. `b` is one bound per constraint column. The template default `a_cols: ["a1"]` is a single constraint; repeat that same bound on every variable row. If `b` cannot be aligned to the constraint columns, the helper returns `SHAPE_MISMATCH` and does not replace `b` with zeros.
+
+`optimize_portfolio` minimizes variance of per-period returns. Weights are long-only and sum to 1. The objective is the covariance scaled by the mean diagonal, because raw daily variances sit under SLSQP's default tolerance and used to return the equal-weight start as optimal. risk_free_rate does not change the weights. When returns_col or cost_cols is omitted, date-named columns and monotonic unique integer columns are left out, so a worker id or a Date serial is not an asset or a task. linear_programming accepts one bounds pair for every variable, or one pair per variable. A missing column is UNKNOWN_COLUMN. Scheduling reports metrics.unassigned_rows when there are more rows than columns. A sheet-write failure on optimize_data leaves status ok and sets sheet_write_error.
 
 **Quant returns:** `efficient_frontier` reads the sheet as a returns grid, the same contract as `portfolio_tearsheet` and `optimize_portfolio`. PyPortfolioOpt's `mean_historical_return` and `CovarianceShrinkage` default `returns_data=False` (prices, then percent-change). The helper passes `returns_data=True` so a returns sheet does not come back `status: ok` with a corner portfolio. Annualization stays 252 trading days. `technical_analysis` and `portfolio_tearsheet` sort a `date` / `datetime` / `timestamp` column ascending before path-dependent indicators and drawdown; duplicate tearsheet dates are averaged. `fetch_historical_data` stringifies every datetime column, and a multi-ticker download labels columns `Close / AAPL`. A comma-separated ticker string is several symbols. `weight_bounds` must be a pair or omitted, and a non-finite `risk_free_rate` is `INVALID_PARAMS`. Incomplete frontier rows are dropped before the optimizer, because Ledoit-Wolf turns NaN into 0. `fetch_historical_data` passes `auto_adjust=True`, so Close is split-adjusted on every yfinance version.
 

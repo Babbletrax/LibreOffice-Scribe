@@ -6,9 +6,11 @@
 
 from __future__ import annotations
 
+import json
 from importlib.util import find_spec
 from unittest.mock import patch
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -187,6 +189,7 @@ def test_weekday_forecast_skips_weekends():
     result = forecast_time_series(frame, periods=5, model="moving_average")
     assert result["status"] == "ok"
     assert result["metrics"]["freq"] == "B"
+    assert not any("irregular" in flag.lower() for flag in result["flags"])
     for row in result["tables"][0]["rows"]:
         assert pd.Timestamp(row[0]).dayofweek < 5
 
@@ -196,8 +199,9 @@ def test_forecast_periods_are_capped():
     result = forecast_time_series(pd.DataFrame(rows), periods=10**9, model="moving_average")
     assert result["status"] == "ok", result
     assert result["metrics"]["periods"] == 10_000
-    # The sheet table is capped separately. The horizon itself must not be 1e9.
-    assert len(result["tables"][0]["rows"]) < 10_000
+    assert len(result["tables"][0]["rows"]) == 10_000
+    assert result["tables"][0]["truncated"] is False
+    assert "periods capped at 10000" in result["flags"]
 
 
 def test_holt_winters_intervals_use_simulate_not_get_prediction():
@@ -257,4 +261,145 @@ def test_insert_forecast_result_into_calc() -> None:
         res = insert_forecast_result_into_calc(doc, ctx, result)
         assert res == 1
         mock_insert.assert_called_once()
+
+
+def test_calc_serial_dates_are_not_1970():
+    _require_statsmodels_installed()
+    serials = [45292.0 + i for i in range(60)]
+    values = [10.0 + float(i % 7) * 2.0 + float(i) * 0.1 for i in range(60)]
+    frame = pd.DataFrame({"Date": serials, "Value": values})
+    result = forecast_time_series(frame, periods=7, model="auto")
+    assert result["status"] == "ok", result
+    first_forecast_date = str(result["tables"][0]["rows"][0][0])
+    assert first_forecast_date.startswith("2024-03-01")
+    assert result["metrics"]["seasonal_periods"] == 7
+    freq = str(result["metrics"].get("freq", ""))
+    assert "ns" not in freq.lower()
+    flags = result.get("flags", [])
+    assert not any("season" in f.lower() and "could not be inferred" in f.lower() for f in flags)
+
+
+def test_year_integers_forecast_the_next_year():
+    frame = pd.DataFrame({"Year": list(range(2000, 2024)), "Value": [float(i) for i in range(24)]})
+    result = forecast_time_series(frame, date_col="Year", periods=3)
+    assert result["status"] == "ok", result
+    rows = result["tables"][0]["rows"]
+    assert str(rows[0][0]).startswith("2024-01-01")
+    assert not any("1970" in str(r[0]) for r in rows)
+
+
+def test_gapped_month_end_is_not_a_flat_average():
+    _require_statsmodels_installed()
+    dates = pd.date_range("2018-01-31", periods=36, freq="ME").delete(15)
+    values = [float(np.sin(2 * np.pi * i / 12) * 10 + i * 0.5 + 50) for i in range(len(dates))]
+    frame = pd.DataFrame({"Date": dates, "Value": values})
+    result = forecast_time_series(frame, periods=6, model="auto")
+    assert result["status"] == "ok", result
+    assert result["metrics"]["model"] != "moving_average"
+    for row in result["tables"][0]["rows"]:
+        assert pd.Timestamp(row[0]).day >= 28
+    assert "Dates are irregular, so the forecast assumes equal spacing between observations." in result["flags"]
+
+
+def test_gapped_daily_is_not_a_flat_average():
+    _require_statsmodels_installed()
+    dates = pd.date_range("2024-01-01", periods=60, freq="D").delete(25)
+    values = [float(10.0 + (i % 7) * 3.0 + i * 0.1) for i in range(len(dates))]
+    frame = pd.DataFrame({"Date": dates, "Value": values})
+    result = forecast_time_series(frame, periods=7, model="auto")
+    assert result["status"] == "ok", result
+    assert result["metrics"]["model"] != "moving_average"
+    assert "Dates are irregular, so the forecast assumes equal spacing between observations." in result["flags"]
+
+
+def test_periods_over_50_returns_every_row():
+    frame = pd.DataFrame({"Date": pd.date_range("2024-01-01", periods=20, freq="D"), "Value": [float(i) for i in range(20)]})
+    result = forecast_time_series(frame, periods=100, model="moving_average")
+    assert result["status"] == "ok", result
+    table = result["tables"][0]
+    assert len(table["rows"]) == 100
+    assert table["truncated"] is False
+    assert table["total_rows"] == 100
+
+
+def test_explicit_season_too_short_is_flagged():
+    frame = pd.DataFrame({"Date": pd.date_range("2024-01-01", periods=20, freq="D"), "Value": [float(i) for i in range(20)]})
+    result = forecast_time_series(frame, periods=3, model="auto", seasonal_periods=12)
+    assert result["status"] == "ok", result
+    assert result["metrics"]["model"] != "holt_winters"
+    assert any("seasonal_periods=12" in f and "got 20" in f for f in result["flags"])
+
+
+def test_holt_winters_too_short_is_insufficient_data():
+    _require_statsmodels_installed()
+    frame = pd.DataFrame({"Date": pd.date_range("2024-01-01", periods=20, freq="D"), "Value": [float(i) for i in range(20)]})
+    result = forecast_time_series(frame, periods=3, model="holt_winters", seasonal_periods=12)
+    assert result["status"] == "error"
+    assert result["code"] == "INSUFFICIENT_DATA"
+    assert "heuristic method" not in result.get("error", "")
+
+
+def test_bad_seasonal_period_is_invalid_param():
+    frame = pd.DataFrame({"Date": pd.date_range("2024-01-01", periods=20, freq="D"), "Value": [float(i) for i in range(20)]})
+    res1 = forecast_time_series(frame, seasonal_periods="weekly")
+    assert res1["status"] == "error"
+    assert res1["code"] == "INVALID_PARAM"
+    res2 = run_forecast({"helper": "forecast_time_series", "params": {"seasonal_periods": "weekly"}}, data=frame)
+    assert res2["status"] == "error"
+    assert res2["code"] == "INVALID_PARAM"
+    dec_ok = decompose_time_series(frame, period="7")
+    assert dec_ok["status"] == "ok"
+    dec_bad = decompose_time_series(frame, period="weekly")
+    assert dec_bad["status"] == "error"
+    assert dec_bad["code"] == "INVALID_PARAM"
+
+
+def test_unknown_model_is_invalid_param():
+    frame = pd.DataFrame({"Date": pd.date_range("2024-01-01", periods=20, freq="D"), "Value": [float(i) for i in range(20)]})
+    result = forecast_time_series(frame, model="prophet")
+    assert result["status"] == "error"
+    assert result["code"] == "INVALID_PARAM"
+
+
+def test_decompose_nan_cells_are_none():
+    _require_statsmodels_installed()
+    frame = pd.DataFrame({"Date": pd.date_range("2024-01-01", periods=28, freq="D"), "Value": [float(i) for i in range(28)]})
+    res = decompose_time_series(frame, period=7)
+    assert res["status"] == "ok", res
+    table = res["tables"][0]
+    cols = table["columns"]
+    rows = table["rows"]
+    trend_idx = cols.index("trend")
+    resid_idx = cols.index("resid")
+    assert rows[0][trend_idx] is None
+    assert rows[0][resid_idx] is None
+    dumped = json.dumps(rows, allow_nan=False, default=str)
+    assert dumped is not None
+
+
+def test_unparseable_dates_are_counted():
+    rows = [{"Date": f"2024-01-{day:02d}", "Value": float(day)} for day in range(1, 11)]
+    rows.append({"Date": "not-a-date", "Value": 99.0})
+    frame = pd.DataFrame(rows)
+    res = forecast_time_series(frame, periods=3, model="moving_average")
+    assert res["status"] == "ok", res
+    assert "Dropped 1 rows with an unparseable date or value" in res["flags"]
+
+
+def test_moving_average_states_no_interval():
+    frame = pd.DataFrame({"Date": pd.date_range("2024-01-01", periods=10, freq="D"), "Value": [float(i) for i in range(10)]})
+    res = forecast_time_series(frame, periods=3, model="moving_average")
+    assert res["status"] == "ok", res
+    assert "moving_average has no prediction interval" in res["flags"]
+
+
+def test_anomaly_tables_use_200_rows():
+    _require_statsmodels_installed()
+    frame = pd.DataFrame({"Date": pd.date_range("2024-01-01", periods=60, freq="D"), "Value": [float(i % 7) for i in range(60)]})
+    res = anomaly_detection_time_series(frame, period=7, include_all=True)
+    assert res["status"] == "ok", res
+    all_scores = next(t for t in res["tables"] if t["name"] == "all_scores")
+    assert all_scores["truncated"] is False
+    assert len(all_scores["rows"]) == 60
+
 

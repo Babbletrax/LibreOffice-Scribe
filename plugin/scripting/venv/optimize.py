@@ -19,9 +19,78 @@ from plugin.scripting.venv.coerce import (
     numeric_columns as _numeric_columns,
     resolve_df as _resolve_df,
     table_from_df as _table_from_df,
+    _is_date_like_column_name,
+    coerce_str_list,
+    coerce_optional_float,
+    coerce_bool,
 )
 
 log = logging.getLogger(__name__)
+
+
+def _id_like(series: Any) -> bool:
+    import numpy as np
+    import pandas as pd
+
+    if len(series) < 2:
+        return False
+    if pd.api.types.is_bool_dtype(series) or not pd.api.types.is_numeric_dtype(series):
+        return False
+    try:
+        arr = series.to_numpy(dtype=float)
+        if not np.isfinite(arr).all():
+            return False
+        if not (arr % 1 == 0).all():
+            return False
+        if len(np.unique(arr)) != len(arr):
+            return False
+        diffs = np.diff(arr)
+        if (diffs > 0).all() or (diffs < 0).all():
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _auto_numeric(df: Any, requested: list[str] | None) -> list[str]:
+    if requested is not None:
+        return _numeric_columns(df, requested)
+    cols = _numeric_columns(df, None)
+    return [col for col in cols if not _is_date_like_column_name(col) and not _id_like(df[col])]
+
+
+def _is_bound_scalar(x: Any) -> bool:
+    import math
+    import numpy as np
+
+    if x is None:
+        return True
+    if isinstance(x, bool):
+        return False
+    if isinstance(x, (int, float, np.integer, np.floating)):
+        try:
+            return math.isfinite(float(x))
+        except (ValueError, TypeError):
+            return False
+    return False
+
+
+def _linprog_bounds(bounds: Any, n_vars: int) -> Any:
+    if bounds is None:
+        return None
+    if isinstance(bounds, (list, tuple)):
+        if len(bounds) == 2 and _is_bound_scalar(bounds[0]) and _is_bound_scalar(bounds[1]):
+            return (bounds[0], bounds[1])
+        if len(bounds) == n_vars:
+            res: list[tuple[Any, Any]] = []
+            for item in bounds:
+                if not isinstance(item, (list, tuple)) or len(item) != 2:
+                    raise ValueError("bounds must be one [low, high] pair or a list of one pair per variable")
+                if not _is_bound_scalar(item[0]) or not _is_bound_scalar(item[1]):
+                    raise ValueError("bounds must be one [low, high] pair or a list of one pair per variable")
+                res.append((item[0], item[1]))
+            return res
+    raise ValueError("bounds must be one [low, high] pair or a list of one pair per variable")
 
 
 def _constraint_bounds(b: Any, n_constraints: int) -> Any:
@@ -49,11 +118,11 @@ def _constraint_bounds(b: Any, n_constraints: int) -> Any:
 def linear_programming(
     data: Any,
     *,
-    c_col: str,
-    a_cols: list[str],
-    b_col: str,
-    bounds: tuple[float | None, float | None] | None = (0, None),
-    maximize: bool = False,
+    c_col: Any,
+    a_cols: Any,
+    b_col: Any,
+    bounds: Any = (0, None),
+    maximize: Any = False,
     headers: bool = True,
     header_row: int = 0,
     sheet_hint: str | None = None,
@@ -71,55 +140,90 @@ def linear_programming(
     import pandas as pd
     from scipy import optimize as scipy_optimize
 
+    helper = "linear_programming"
+    if not isinstance(c_col, str) or not c_col.strip():
+        return _error_result("INVALID_PARAM", f"c_col must be a string, got {c_col!r}", helper=helper)
+    if not isinstance(b_col, str) or not b_col.strip():
+        return _error_result("INVALID_PARAM", f"b_col must be a string, got {b_col!r}", helper=helper)
+
+    try:
+        a_cols_list = coerce_str_list(a_cols, name="a_cols")
+    except ValueError as exc:
+        return _error_result("INVALID_PARAM", str(exc), helper=helper)
+
+    if not a_cols_list:
+        return _error_result("INVALID_PARAM", "a_cols is required", helper=helper)
+
+    try:
+        maximize_val = coerce_bool(maximize, name="maximize", default=False)
+    except ValueError as exc:
+        return _error_result("INVALID_PARAM", str(exc), helper=helper)
+
     coerced = _resolve_df(data, headers=headers, header_row=header_row, sheet_hint=sheet_hint)
-    df = coerced.df.dropna(subset=[c_col, b_col] + a_cols)
-    
-    if df.empty:
-        return _error_result("INSUFFICIENT_DATA", "No data for linear programming", helper="linear_programming")
+    df = coerced.df
+
+    available = [str(c) for c in df.columns]
+    needed_cols = [c_col, b_col] + a_cols_list
+    missing = [c for c in needed_cols if c not in df.columns]
+    if missing:
+        return _error_result(
+            "UNKNOWN_COLUMN",
+            f"Columns not found: {', '.join(missing)}. Available: {', '.join(available)}",
+            helper=helper,
+        )
+
+    clean_df = df.dropna(subset=needed_cols)
+    if clean_df.empty:
+        return _error_result("INSUFFICIENT_DATA", "No data for linear programming", helper=helper)
 
     # Objective coefficients, one per variable row.
-    c = df[c_col].values.astype(float)
-    if maximize:
+    c = clean_df[c_col].values.astype(float)
+    if maximize_val:
         c = -c
 
     # a-columns are constraints, so transpose to linprog's (constraints, variables).
-    coeff = df[a_cols].values.astype(float)
+    coeff = clean_df[a_cols_list].values.astype(float)
     if getattr(coeff, "ndim", 0) != 2 or coeff.shape[1] == 0:
         return _error_result(
             "SHAPE_MISMATCH",
             "linear_programming needs at least one constraint column in a_cols.",
-            helper="linear_programming",
+            helper=helper,
         )
     n_constraints = int(coeff.shape[1])
     A_ub = coeff.T
-    b_ub = _constraint_bounds(df[b_col].values.astype(float), n_constraints)
+    b_ub = _constraint_bounds(clean_df[b_col].values.astype(float), n_constraints)
     if b_ub is None or A_ub.shape[1] != len(c) or A_ub.shape[0] != len(b_ub):
         return _error_result(
             "SHAPE_MISMATCH",
             (
                 "linear_programming constraint shapes do not match: "
                 f"{len(c)} variable rows and {n_constraints} constraint column(s) "
-                f"({', '.join(str(name) for name in a_cols)}). "
+                f"({', '.join(str(name) for name in a_cols_list)}). "
                 "Each row is a variable and each a-column is a <= constraint, so b "
                 "needs one bound per constraint column. A single constraint column "
                 "may repeat that same bound on every row. Mismatched b is rejected "
                 "instead of being replaced with zeros."
             ),
-            helper="linear_programming",
+            helper=helper,
             details={
                 "n_variables": int(len(c)),
                 "n_constraints": n_constraints,
-                "b_len": int(len(df)),
+                "n_rows": int(len(clean_df)),
             },
         )
 
     try:
-        res = scipy_optimize.linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=(bounds,) * len(c) if bounds else None)
+        lp_bounds = _linprog_bounds(bounds, len(c))
+    except ValueError as exc:
+        return _error_result("INVALID_PARAM", str(exc), helper=helper)
+
+    try:
+        res = scipy_optimize.linprog(c, A_ub=A_ub, b_ub=b_ub, bounds=lp_bounds)
     except Exception as e:
-        return _error_result("OPTIMIZATION_FAILED", str(e), helper="linear_programming")
+        return _error_result("OPTIMIZATION_FAILED", str(e), helper=helper)
 
     if not res.success:
-        return _error_result("OPTIMIZATION_FAILED", res.message, helper="linear_programming")
+        return _error_result("OPTIMIZATION_FAILED", res.message, helper=helper)
 
     solution_df = pd.DataFrame({
         "variable_index": range(len(res.x)),
@@ -128,93 +232,135 @@ def linear_programming(
     table = _table_from_df(solution_df, name="lp_solution")
 
     metrics = {
-        "objective_value": float(-res.fun) if maximize else float(res.fun),
+        "objective_value": float(-res.fun) if maximize_val else float(res.fun),
         "status": res.message,
         "iterations": int(res.nit)
     }
 
-    return _ok_result("linear_programming", metrics=metrics, tables=[table], metadata=coerced.metadata)
+    return _ok_result(helper, metrics=metrics, tables=[table], metadata=coerced.metadata)
 
 
 def optimize_portfolio(
     data: Any,
     *,
-    returns_col: list[str] | None = None,
-    target_return: float | None = None,
-    risk_free_rate: float = 0.0,
+    returns_col: Any = None,
+    target_return: Any = None,
+    risk_free_rate: Any = 0.0,
     headers: bool = True,
     header_row: int = 0,
     sheet_hint: str | None = None,
 ) -> dict[str, Any]:
-    """Mean-variance portfolio optimization."""
+    """Long-only minimum-variance portfolio optimization.
+
+    Weights are in [0, 1] and sum to 1. target_return is an optional
+    per-period equality constraint. risk_free_rate does not affect weights;
+    not annualized; no short sales.
+    """
+    import math
     import numpy as np
     import pandas as pd
     from scipy import optimize as scipy_optimize
 
+    helper = "optimize_portfolio"
+    try:
+        returns_col_list = coerce_str_list(returns_col, name="returns_col")
+    except ValueError as exc:
+        return _error_result("INVALID_PARAM", str(exc), helper=helper)
+
+    try:
+        target_return_val = coerce_optional_float(target_return, name="target_return")
+    except ValueError as exc:
+        return _error_result("INVALID_PARAM", str(exc), helper=helper)
+
+    try:
+        rf_val = coerce_optional_float(risk_free_rate, name="risk_free_rate")
+        if rf_val is None:
+            rf_val = 0.0
+    except ValueError as exc:
+        return _error_result("INVALID_PARAM", str(exc), helper=helper)
+
     coerced = _resolve_df(data, headers=headers, header_row=header_row, sheet_hint=sheet_hint)
     df = coerced.df
-    
+
     try:
-        numeric_cols = _numeric_columns(df, returns_col)
+        numeric_cols = _auto_numeric(df, returns_col_list)
     except ValueError as exc:
-        return _error_result("UNKNOWN_COLUMN", str(exc), helper="optimize_portfolio")
+        return _error_result("UNKNOWN_COLUMN", str(exc), helper=helper)
 
     if not numeric_cols or len(numeric_cols) < 2:
-        return _error_result("INSUFFICIENT_DATA", "Need at least two numeric columns (assets).", helper="optimize_portfolio")
+        return _error_result("INSUFFICIENT_DATA", "Need at least two numeric columns (assets).", helper=helper)
 
-    returns = df[numeric_cols].astype(float)
-    mean_returns = returns.mean().values
-    cov_matrix = returns.cov().values
-    num_assets = len(mean_returns)
+    returns_raw = df[numeric_cols].apply(pd.to_numeric, errors="coerce")
+    n_before_drop = len(returns_raw)
+    returns = returns_raw.dropna()
+    dropped_rows = n_before_drop - len(returns)
+    flags: list[str] = []
+    if dropped_rows > 0:
+        flags.append(f"Dropped {dropped_rows} return rows with a missing value")
 
-    # Objective: Minimize portfolio variance
-    def portfolio_variance(weights: Any) -> Any:
-        return weights.T @ cov_matrix @ weights
+    if len(returns) < 2:
+        return _error_result("INSUFFICIENT_DATA", "Need at least two complete return rows.", helper=helper)
 
-    # Constraints: sum of weights = 1
+    cov_matrix = returns.cov().to_numpy()
+    mean_returns = returns.mean().to_numpy()
+
+    if not np.isfinite(cov_matrix).all():
+        return _error_result("INSUFFICIENT_DATA", "Return covariance is not positive.", helper=helper)
+
+    scale = float(np.mean(np.diag(cov_matrix)))
+    if not math.isfinite(scale) or scale <= 0:
+        return _error_result("INSUFFICIENT_DATA", "Return covariance is not positive.", helper=helper)
+
+    scaled_cov = cov_matrix / scale
+    num_assets = len(numeric_cols)
+
+    # Objective: Minimize scaled portfolio variance
+    def scaled_portfolio_variance(weights: Any) -> Any:
+        return weights.T @ scaled_cov @ weights
+
     constraints: list[dict[str, Any]] = [
-        {"type": "eq", "fun": lambda x: np.sum(x) - 1}
+        {"type": "eq", "fun": lambda x: np.sum(x) - 1.0}
     ]
 
-    # If target_return is specified, add it to constraints
-    if target_return is not None:
+    if target_return_val is not None:
         constraints.append({
             "type": "eq",
-            "fun": lambda x: np.sum(mean_returns * x) - target_return
+            "fun": lambda x: np.sum(mean_returns * x) - target_return_val
         })
 
-    # Bounds: weights between 0 and 1 (no short selling)
     bounds = tuple((0.0, 1.0) for _unused in range(num_assets))
-    
-    # Initial guess: equal weighting
     init_guess = np.array(num_assets * [1.0 / num_assets])
 
+    # Portfolio objective: daily variances sit under SLSQP's default ftol,
+    # so the equal-weight start is reported as optimal (nit == 1, about 34%
+    # more volatility on a four-asset daily book). Scaling makes the objective
+    # O(1); ftol=1e-12 covers a still-flat direction. Volatility uses the
+    # original covariance because result.fun is scaled.
     try:
         result = scipy_optimize.minimize(
-            portfolio_variance,
+            scaled_portfolio_variance,
             init_guess,
             method="SLSQP",
             bounds=bounds,
-            constraints=constraints
+            constraints=constraints,
+            options={"ftol": 1e-12},
         )
     except Exception as e:
-        return _error_result("OPTIMIZATION_FAILED", str(e), helper="optimize_portfolio")
+        return _error_result("OPTIMIZATION_FAILED", str(e), helper=helper)
 
     if not result.success:
-        return _error_result("OPTIMIZATION_FAILED", result.message, helper="optimize_portfolio")
+        return _error_result("OPTIMIZATION_FAILED", result.message, helper=helper)
 
-    weights = np.round(result.x, 4)
-    expected_return = np.sum(mean_returns * weights)
-    expected_volatility = np.sqrt(result.fun)
-    sharpe_ratio = (expected_return - risk_free_rate) / expected_volatility if expected_volatility > 0 else 0
+    raw_weights = result.x
+    expected_return = float(np.sum(mean_returns * raw_weights))
+    variance = float(raw_weights.T @ cov_matrix @ raw_weights)
+    expected_volatility = float(math.sqrt(max(variance, 0.0)))
+    sharpe_ratio = float((expected_return - rf_val) / expected_volatility) if expected_volatility > 0 else 0.0
 
     weights_df = pd.DataFrame({
         "asset": numeric_cols,
-        "weight": weights
+        "weight": np.round(raw_weights, 4)
     })
-    # Filter out near-zero weights
-    weights_df = weights_df[weights_df["weight"] > 1e-4]
-    
     table = _table_from_df(weights_df, name="portfolio_weights")
 
     metrics = {
@@ -223,13 +369,21 @@ def optimize_portfolio(
         "sharpe_ratio": float(sharpe_ratio)
     }
 
-    return _ok_result("optimize_portfolio", metrics=metrics, tables=[table], metadata=coerced.metadata)
+    res_payload: dict[str, Any] = {
+        "metrics": metrics,
+        "tables": [table],
+        "metadata": coerced.metadata,
+    }
+    if flags:
+        res_payload["flags"] = flags
+
+    return _ok_result(helper, **res_payload)
 
 
 def solve_scheduling_problem(
     data: Any,
     *,
-    cost_cols: list[str] | None = None,
+    cost_cols: Any = None,
     headers: bool = True,
     header_row: int = 0,
     sheet_hint: str | None = None,
@@ -238,40 +392,70 @@ def solve_scheduling_problem(
     import pandas as pd
     from scipy import optimize as scipy_optimize
 
+    helper = "solve_scheduling_problem"
+    try:
+        cost_cols_list = coerce_str_list(cost_cols, name="cost_cols")
+    except ValueError as exc:
+        return _error_result("INVALID_PARAM", str(exc), helper=helper)
+
     coerced = _resolve_df(data, headers=headers, header_row=header_row, sheet_hint=sheet_hint)
     df = coerced.df
-    
+
     try:
-        numeric_cols = _numeric_columns(df, cost_cols)
+        numeric_cols = _auto_numeric(df, cost_cols_list)
     except ValueError as exc:
-        return _error_result("UNKNOWN_COLUMN", str(exc), helper="solve_scheduling_problem")
+        return _error_result("UNKNOWN_COLUMN", str(exc), helper=helper)
 
     if not numeric_cols:
-        return _error_result("INSUFFICIENT_DATA", "Need numeric columns for cost matrix.", helper="solve_scheduling_problem")
+        return _error_result("INSUFFICIENT_DATA", "Need numeric columns for cost matrix.", helper=helper)
 
-    cost_matrix = df[numeric_cols].values.astype(float)
-    
+    df_cost = df[numeric_cols].apply(pd.to_numeric, errors="coerce")
+    df_clean = df_cost.dropna()
+    if df_clean.empty:
+        return _error_result("INSUFFICIENT_DATA", "Need numeric columns for cost matrix.", helper=helper)
+
+    n_rows = len(df_clean)
+    n_cols = len(numeric_cols)
+    unassigned = max(0, n_rows - n_cols)
+    flags: list[str] = []
+    if unassigned > 0:
+        flags.append(f"{unassigned} rows were not assigned because there are more rows than columns")
+
+    cost_matrix = df_clean.to_numpy(dtype=float)
+
     try:
         row_ind, col_ind = scipy_optimize.linear_sum_assignment(cost_matrix)
     except Exception as e:
-        return _error_result("OPTIMIZATION_FAILED", str(e), helper="solve_scheduling_problem")
+        return _error_result("OPTIMIZATION_FAILED", str(e), helper=helper)
 
-    total_cost = cost_matrix[row_ind, col_ind].sum()
-    
+    total_cost = float(cost_matrix[row_ind, col_ind].sum())
+
+    kept_index = list(df_clean.index)
+    assigned_row_labels = [kept_index[i] for i in row_ind]
+
     assignment_df = pd.DataFrame({
-        "row_index": row_ind,
+        "row_index": assigned_row_labels,
         "assigned_column": [numeric_cols[i] for i in col_ind],
         "cost": cost_matrix[row_ind, col_ind]
     })
-    
+
     table = _table_from_df(assignment_df, name="optimal_assignment")
 
     metrics = {
         "total_cost": float(total_cost),
-        "assignments": len(row_ind)
+        "assignments": len(row_ind),
+        "unassigned_rows": unassigned,
     }
 
-    return _ok_result("solve_scheduling_problem", metrics=metrics, tables=[table], metadata=coerced.metadata)
+    res_payload: dict[str, Any] = {
+        "metrics": metrics,
+        "tables": [table],
+        "metadata": coerced.metadata,
+    }
+    if flags:
+        res_payload["flags"] = flags
+
+    return _ok_result(helper, **res_payload)
 
 
 def _dispatch_helper(name: str, data: Any, params: dict[str, Any], *, headers: bool, header_row: int, context: dict[str, Any]) -> dict[str, Any]:
@@ -279,11 +463,25 @@ def _dispatch_helper(name: str, data: Any, params: dict[str, Any], *, headers: b
     common: dict[str, Any] = {"headers": headers, "header_row": header_row, "sheet_hint": sheet_hint}
 
     if name == "optimize_portfolio":
-        return optimize_portfolio(data, returns_col=params.get("returns_col"), target_return=params.get("target_return"), risk_free_rate=params.get("risk_free_rate", 0.0), **common)
+        return optimize_portfolio(
+            data,
+            returns_col=params.get("returns_col"),
+            target_return=params.get("target_return"),
+            risk_free_rate=params.get("risk_free_rate", 0.0),
+            **common,
+        )
     if name == "linear_programming":
         if "c_col" not in params or "a_cols" not in params or "b_col" not in params:
             return _error_result("MISSING_PARAM", "linear_programming requires c_col, a_cols, and b_col", helper=name)
-        return linear_programming(data, c_col=params["c_col"], a_cols=params["a_cols"], b_col=params["b_col"], bounds=params.get("bounds", (0, None)), maximize=params.get("maximize", False), **common)
+        return linear_programming(
+            data,
+            c_col=params.get("c_col"),
+            a_cols=params.get("a_cols"),
+            b_col=params.get("b_col"),
+            bounds=params.get("bounds", (0, None)),
+            maximize=params.get("maximize", False),
+            **common,
+        )
     if name == "solve_scheduling_problem":
         return solve_scheduling_problem(data, cost_cols=params.get("cost_cols"), **common)
 

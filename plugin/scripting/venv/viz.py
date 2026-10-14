@@ -13,6 +13,7 @@ from plugin.scripting.venv.coerce import (
     error_result as _error_result,
     missing_package_error as _missing_package_error,
     numeric_columns as _numeric_columns,
+    parse_date_column,
     resolve_df as _resolve_df,
 )
 
@@ -244,7 +245,7 @@ def time_series_plot(
         plot_cols.append(upper_col)
 
     series = df[plot_cols].copy()
-    dates_all = cast(pd.Series, pd.to_datetime(series[date_col], errors="coerce"))
+    dates_all = cast(pd.Series, parse_date_column(series[date_col]))
     if dates_all.isna().all():
         return _error_result("INVALID_DATES", "Could not parse date column.", helper="time_series_plot")
 

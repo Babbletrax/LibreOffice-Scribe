@@ -106,6 +106,43 @@ def test_time_series_plot_with_forecast_bands(mock_plt, _mock_payload):
     ax.fill_between.assert_called_once()
 
 
+@patch("plugin.scripting.venv.viz._figure_payload", return_value=_mock_figure_payload())
+@patch("plugin.scripting.venv.viz._require_matplotlib")
+def test_time_series_plot_parses_serial_history_beside_iso_forecast(mock_plt, _mock_payload):
+    plt_mod = _mock_plt_module()
+    mock_plt.return_value = plt_mod
+    fig, ax = plt_mod.subplots.return_value
+    ax.get_legend_handles_labels.return_value = ([], [])
+
+    df = pd.DataFrame(
+        {
+            "date": [45292.0, "2024-03-01"],
+            "Value": [100.0, None],
+            "forecast": [None, 120.0],
+        }
+    )
+
+    result = run_viz(
+        {
+            "helper": "time_series_plot",
+            "params": {
+                "date_col": "date",
+                "value_col": "Value",
+                "forecast_col": "forecast",
+            },
+        },
+        df,
+        {},
+    )
+
+    assert result["status"] == "ok"
+    assert ax.plot.call_count >= 1
+    for call in ax.plot.call_args_list:
+        x_vals = call[0][0]
+        for x in x_vals:
+            assert pd.Timestamp(x).year == 2024
+
+
 def test_insert_image_payload_writer_uses_product_display_name():
     ctx = MagicMock()
     doc = MagicMock()
