@@ -161,6 +161,37 @@ class TestShouldLinkImagePath:
         finally:
             os.unlink(path)
 
+    def test_symlink_into_temp_is_embedded(self, tmp_path):
+        temp_dir = tmp_path / "temp"
+        temp_dir.mkdir()
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        real_file = temp_dir / "target.png"
+        real_file.write_bytes(b"png")
+        symlink_file = outside_dir / "link.png"
+        symlink_file.symlink_to(real_file)
+
+        with patch("plugin.writer.images.image_tools.tempfile.gettempdir", return_value=str(temp_dir)):
+            assert not image_tools._should_link_image_path(str(symlink_file))
+
+    def test_path_under_dir_follows_directory_symlink(self, tmp_path):
+        target_dir = tmp_path / "real_dir"
+        target_dir.mkdir()
+        dir_symlink = tmp_path / "link_dir"
+        dir_symlink.symlink_to(target_dir)
+
+        real_file = target_dir / "file.txt"
+        real_file.write_bytes(b"data")
+        outside_dir = tmp_path / "other"
+        outside_dir.mkdir()
+        file_symlink = outside_dir / "link_file.txt"
+        file_symlink.symlink_to(real_file)
+
+        # File via symlink into directory
+        assert image_tools._path_under_dir(str(file_symlink), str(target_dir))
+        # Directory via symlink
+        assert image_tools._path_under_dir(str(real_file), str(dir_symlink))
+
 
 class TestWriterImageCursorConversion:
     def _make_writer_model(self, image_instance):
@@ -323,11 +354,17 @@ class TestWriterImageCursorConversion:
         frame = MagicMock()
         controller = MagicMock()
         controller.getFrame.return_value = frame
-        selection = MagicMock()
-        selection.getCount.return_value = 1
+
+        before_selection = MagicMock()
+        before_selection.getCount.return_value = 0
+
         inserted = MagicMock()
-        selection.getByIndex.return_value = inserted
-        controller.getSelection.return_value = selection
+        inserted.getName.return_value = "Graphic1"
+        after_selection = MagicMock()
+        after_selection.getCount.return_value = 1
+        after_selection.getByIndex.return_value = inserted
+
+        controller.getSelection.side_effect = [before_selection, after_selection]
         model.getCurrentController.return_value = controller
         dispatcher = MagicMock()
         ctx.ServiceManager.createInstanceWithContext.return_value = dispatcher
@@ -343,6 +380,32 @@ class TestWriterImageCursorConversion:
         assert (prop_map["FileName"]) == ("file:///home/user/photo.png")
         assert (prop_map["AsLink"])
         assert (result) is (inserted)
+
+    def test_dispatch_insert_linked_graphic_rejects_unchanged_selection(self):
+        from plugin.doc import visual_helpers
+
+        ctx = MagicMock()
+        model = MagicMock()
+        frame = MagicMock()
+        controller = MagicMock()
+        controller.getFrame.return_value = frame
+
+        existing = MagicMock()
+        existing.getName.return_value = "ExistingGraphic"
+        existing.supportsService.side_effect = lambda svc: svc == visual_helpers.WRITER_GRAPHIC_SERVICE
+        selection = MagicMock()
+        selection.getCount.return_value = 1
+        selection.getByIndex.return_value = existing
+
+        controller.getSelection.side_effect = [selection, selection]
+        model.getCurrentController.return_value = controller
+        dispatcher = MagicMock()
+        ctx.ServiceManager.createInstanceWithContext.return_value = dispatcher
+
+        result = image_tools._dispatch_insert_linked_graphic(ctx, model, "file:///home/user/photo.png")
+
+        dispatcher.executeDispatch.assert_called_once()
+        assert result is None
 
     def test_insert_image_to_writer_fallback_rejumps_and_recreates_cursor(self):
         doc_text = MagicMock()
@@ -402,6 +465,8 @@ class TestWriterImageCursorConversion:
         text_frame_instance = MagicMock(name="text_frame")
         frame_text_obj = MagicMock(name="frame_text_obj")
         frame_text_obj.createTextCursor.return_value = frame_text_cursor
+        caption_cursor = MagicMock(name="caption_cursor")
+        frame_text_obj.createTextCursorByRange.return_value = caption_cursor
         frame_text_obj.insertString = MagicMock()
         text_frame_instance.getText.return_value = frame_text_obj
 
@@ -421,8 +486,172 @@ class TestWriterImageCursorConversion:
             )
 
         doc_text.insertTextContent.assert_called_once_with("frame-text-cursor", text_frame_instance, False)
-        text_frame_instance.insertTextContent.assert_called_once_with(frame_text_cursor, image_instance, False)
-        frame_text_obj.insertString.assert_called_once_with(frame_text_cursor, "\nhello", False)
+        frame_text_obj.insertTextContent.assert_called_once_with(frame_text_cursor, image_instance, False)
+        frame_text_obj.insertString.assert_called_once_with(caption_cursor, "\nhello", False)
+
+    def test_insert_frame_title_pads_height_only(self):
+        doc_text = MagicMock()
+        view_cursor = MagicMock()
+        view_cursor.getText.return_value = doc_text
+        model = MagicMock()
+        model.CurrentController.ViewCursor = view_cursor
+        ctx = MagicMock()
+
+        frame_with_title = MagicMock()
+        frame_without_title = MagicMock()
+        model.createInstance.side_effect = [frame_with_title, frame_without_title]
+
+        with (
+            patch.object(image_tools, "_cursor_for_writer_view", return_value=(doc_text, MagicMock())),
+            patch.object(image_tools, "_insert_writer_graphic"),
+        ):
+            image_tools._insert_frame(ctx, model, "/tmp/img.png", width=2000, height=1000, title="hello", description="")
+            image_tools._insert_frame(ctx, model, "/tmp/img.png", width=2000, height=1000, title="", description="")
+
+        size_with = frame_with_title.setSize.call_args[0][0]
+        assert size_with.Width == 2000
+        assert size_with.Height == 1500
+
+        size_without = frame_without_title.setSize.call_args[0][0]
+        assert size_without.Width == 2000
+        assert size_without.Height == 1000
+
+    def test_insert_frame_removes_frame_when_image_insert_raises(self):
+        host = MagicMock()
+        view_cursor = MagicMock()
+        view_cursor.getText.return_value = host
+        model = MagicMock()
+        model.CurrentController.ViewCursor = view_cursor
+        frame = MagicMock()
+        model.createInstance.return_value = frame
+        ctx = MagicMock()
+
+        with (
+            patch.object(image_tools, "_cursor_for_writer_view", return_value=(host, MagicMock())),
+            patch.object(image_tools, "_insert_writer_graphic", side_effect=RuntimeError("insert failure")),
+        ):
+            with pytest.raises(RuntimeError, match="insert failure"):
+                image_tools._insert_frame(ctx, model, "/tmp/img.png", width=10, height=20, title="", description="")
+
+        host.removeTextContent.assert_called_once_with(frame)
+
+    def test_insert_writer_graphic_embeds_when_view_cursor_move_fails(self):
+        ctx = MagicMock()
+        model = MagicMock()
+        text_cursor = MagicMock()
+
+        with (
+            patch.object(image_tools, "_should_link_image_path", return_value=True),
+            patch.object(image_tools, "_place_view_cursor_at_text_range", return_value=False),
+            patch.object(image_tools, "_dispatch_insert_linked_graphic") as dispatch,
+            patch.object(image_tools, "_insert_embedded_at_writer_cursor", return_value="embedded_img") as embed,
+        ):
+            res = image_tools._insert_writer_graphic(
+                ctx, model, "/home/user/file.png", 100, 200, "t", "d", text_cursor=text_cursor,
+            )
+
+        dispatch.assert_not_called()
+        embed.assert_called_once_with(
+            model, "/home/user/file.png", 100, 200, "t", "d", text_cursor=text_cursor, text_container=None, ctx=ctx,
+        )
+        assert res == "embedded_img"
+
+    def test_draw_embed_passes_ctx_and_positions_after_add(self):
+        ctx = MagicMock()
+        model = MagicMock()
+        draw_page = MagicMock()
+        image = MagicMock()
+        call_order = []
+        draw_page.add.side_effect = lambda shape: call_order.append("add")
+        image.setPosition.side_effect = lambda pos: call_order.append("setPosition")
+
+        with (
+            patch.object(image_tools, "_draw_page_for_insert", return_value=draw_page),
+            patch.object(image_tools, "_should_link_image_path", return_value=False),
+            patch.object(image_tools, "_create_embedded_graphic", return_value=image) as create_embed,
+            patch.object(image_tools, "_apply_graphic_properties"),
+        ):
+            res = image_tools._insert_image_to_drawpage(
+                ctx, model, "draw", "/tmp/img.png", 1000, 1000, "t", "d", x_mm=10, y_mm=20,
+            )
+
+        assert res is image
+        create_embed.assert_called_once_with(model, "draw", "file:////tmp/img.png", ctx=ctx)
+        assert call_order == ["add", "setPosition"]
+
+        # Calc: setPosition is not called
+        calc_image = MagicMock()
+        calc_draw_page = MagicMock()
+        with (
+            patch.object(image_tools, "_draw_page_for_insert", return_value=calc_draw_page),
+            patch.object(image_tools, "_should_link_image_path", return_value=False),
+            patch.object(image_tools, "_create_embedded_graphic", return_value=calc_image),
+            patch.object(image_tools, "_apply_graphic_properties"),
+        ):
+            image_tools._insert_image_to_drawpage(
+                ctx, model, "calc", "/tmp/img.png", 1000, 1000, "t", "d", x_mm=10, y_mm=20,
+            )
+
+        calc_image.setPosition.assert_not_called()
+
+    def test_draw_page_index_skips_dispatch(self):
+        ctx = MagicMock()
+        model = MagicMock()
+        pages = MagicMock()
+        pages.getCount.return_value = 3
+        target_page = MagicMock()
+        pages.getByIndex.return_value = target_page
+        model.getDrawPages.return_value = pages
+
+        image = MagicMock()
+        with (
+            patch.object(image_tools, "_should_link_image_path", return_value=True),
+            patch.object(image_tools, "_dispatch_insert_linked_graphic") as dispatch,
+            patch.object(image_tools, "_create_embedded_graphic", return_value=image),
+            patch.object(image_tools, "_apply_graphic_properties"),
+        ):
+            res = image_tools._insert_image_to_drawpage(
+                ctx, model, "draw", "/home/user/file.png", 1000, 1000, "t", "d", page_index=1,
+            )
+
+        dispatch.assert_not_called()
+        pages.getByIndex.assert_called_once_with(1)
+        target_page.add.assert_called_once_with(image)
+        assert res is image
+
+    def test_calc_page_index_is_sheet_index(self):
+        model = MagicMock()
+        sheets = MagicMock()
+        sheets.getCount.return_value = 2
+        sheet0 = MagicMock()
+        sheet1 = MagicMock()
+        sheet1_draw_page = MagicMock()
+        sheet1.getDrawPage.return_value = sheet1_draw_page
+        sheets.getByIndex.side_effect = lambda idx: [sheet0, sheet1][idx]
+        model.getSheets.return_value = sheets
+
+        dp = image_tools._draw_page_for_insert(model, "calc", page_index=1)
+        assert dp is sheet1_draw_page
+
+        with pytest.raises(IndexError, match="Sheet index 5 out of range"):
+            image_tools._draw_page_for_insert(model, "calc", page_index=5)
+
+    def test_insert_image_at_locator_returns_draw_helper_graphic(self):
+        ctx = MagicMock()
+        model = MagicMock()
+        sentinel = MagicMock()
+
+        with (
+            patch.object(image_tools, "get_type_doc", return_value="draw"),
+            patch.object(image_tools, "_insert_image_to_drawpage", return_value=sentinel) as insert_dp,
+            patch.object(image_tools, "_selection_graphic_object") as sel_obj,
+            patch("plugin.writer.edit_review.WriterCompoundUndo"),
+        ):
+            res = image_tools.insert_image_at_locator(ctx, model, "/tmp/img.png", width_mm=40, height_mm=30)
+
+        assert res is sentinel
+        insert_dp.assert_called_once()
+        sel_obj.assert_not_called()
 
 
 class TestReplaceGraphicSource:
@@ -443,24 +672,43 @@ class TestReplaceGraphicSource:
         assert (ok)
         graphic.setPropertyValue.assert_any_call("GraphicURL", "file:////tmp/new.png")
 
-    def test_link_path_dispatches_for_writer(self):
-        graphic = MagicMock()
-        graphic.getAnchor.return_value = MagicMock()
+    def test_user_path_updates_graphic_url_in_place(self):
+        graphic = MagicMock(spec=["getPropertyValue", "setPropertyValue", "getPropertySetInfo"])
         graphic.getPropertyValue.return_value = MagicMock(Width=5000, Height=4000)
+        psi = MagicMock()
+        psi.hasPropertyByName.return_value = True
+        graphic.getPropertySetInfo.return_value = psi
         model = MagicMock()
         model.getText.return_value = MagicMock()
         model.supportsService.side_effect = lambda svc: svc == "com.sun.star.text.TextDocument"
-        new_graphic = MagicMock()
         ctx = MagicMock()
 
-        with patch.object(image_tools, "_should_link_image_path", return_value=True):
-            with patch.object(image_tools, "_place_view_cursor_at_text_range"):
-                with patch.object(image_tools, "_dispatch_insert_linked_graphic", return_value=new_graphic) as dispatch:
-                    ok = image_tools.replace_graphic_source(ctx, model, graphic, "/home/user/new.png")
+        with (
+            patch.object(image_tools, "_should_link_image_path", return_value=True),
+            patch.object(image_tools.uno, "systemPathToFileUrl", return_value="file:///home/user/new.png"),
+            patch.object(image_tools, "_dispatch_insert_linked_graphic") as dispatch,
+        ):
+            ok = image_tools.replace_graphic_source(ctx, model, graphic, "/home/user/new.png")
 
-        assert (ok)
-        dispatch.assert_called_once()
-        model.getText.return_value.removeTextContent.assert_called_once_with(graphic)
+        assert ok
+        graphic.setPropertyValue.assert_any_call("GraphicURL", "file:///home/user/new.png")
+        dispatch.assert_not_called()
+        model.getText.return_value.removeTextContent.assert_not_called()
+
+    def test_replace_returns_false_when_graphic_url_and_provider_fail(self):
+        graphic = MagicMock()
+        graphic.getSize.return_value = MagicMock(Width=5000, Height=4000)
+        model = MagicMock()
+        ctx = MagicMock()
+
+        with (
+            patch.object(image_tools, "get_type_doc", return_value="writer"),
+            patch.object(image_tools, "_safe_set_property", return_value=False),
+            patch.object(image_tools, "_graphic_from_provider", return_value=None),
+        ):
+            ok = image_tools.replace_graphic_source(ctx, model, graphic, "/tmp/new.png")
+
+        assert not ok
 
 
 class TestImageCompoundUndo:
@@ -616,5 +864,78 @@ class TestDrawPageInsertPosition:
         pos = image_tools._position_on_draw_page(page, 8000, 4000, 30, 40)
         assert (pos.X) == (3000)
         assert (pos.Y) == (4000)
+
+
+class TestAddImageToGallery:
+    def test_gallery_same_basename_does_not_overwrite(self, tmp_path):
+        import hashlib
+        gallery_storage = tmp_path / "gallery_store"
+        gallery_storage.mkdir()
+        gallery_dir = gallery_storage / image_tools.GALLERY_IMAGE_DIR
+        gallery_dir.mkdir()
+
+        # Existing file in gallery
+        existing_file = gallery_dir / "logo.png"
+        existing_file.write_bytes(b"existing content")
+
+        # Source file with same basename but in another folder
+        src_dir = tmp_path / "src"
+        src_dir.mkdir()
+        src_file = src_dir / "logo.png"
+        src_file.write_bytes(b"new content")
+
+        src_real = os.path.realpath(str(src_file))
+        digest = hashlib.sha256(src_real.encode("utf-8")).hexdigest()[:8]
+        expected_target = gallery_dir / f"logo-{digest}.png"
+
+        theme = MagicMock()
+        themes_list = MagicMock()
+        themes_list.hasByName.return_value = True
+        themes_list.getByName.return_value = theme
+
+        ctx = MagicMock()
+        psettings = MagicMock()
+        psettings.Storage_writable = f"file://{gallery_storage}"
+        ctx.getValueByName.return_value = psettings
+        ctx.ServiceManager.createInstanceWithContext.return_value = themes_list
+
+        with patch.object(image_tools.uno, "fileUrlToSystemPath", return_value=str(gallery_storage)):
+            image_tools.add_image_to_gallery(ctx, str(src_file))
+
+        assert existing_file.read_bytes() == b"existing content"
+        assert expected_target.exists()
+        assert expected_target.read_bytes() == b"new content"
+        theme.insertURLByIndex.assert_called_once_with(f"file:///{expected_target}", -1)
+        theme.update.assert_called_once()
+
+    def test_gallery_same_realpath_skips_copy_and_still_inserts(self, tmp_path):
+        gallery_storage = tmp_path / "gallery_store"
+        gallery_storage.mkdir()
+        gallery_dir = gallery_storage / image_tools.GALLERY_IMAGE_DIR
+        gallery_dir.mkdir()
+
+        file_in_gallery = gallery_dir / "logo.png"
+        file_in_gallery.write_bytes(b"already in gallery")
+
+        theme = MagicMock()
+        themes_list = MagicMock()
+        themes_list.hasByName.return_value = True
+        themes_list.getByName.return_value = theme
+
+        ctx = MagicMock()
+        psettings = MagicMock()
+        psettings.Storage_writable = f"file://{gallery_storage}"
+        ctx.getValueByName.return_value = psettings
+        ctx.ServiceManager.createInstanceWithContext.return_value = themes_list
+
+        with (
+            patch.object(image_tools.uno, "fileUrlToSystemPath", return_value=str(gallery_storage)),
+            patch("shutil.copy2") as copy_mock,
+        ):
+            image_tools.add_image_to_gallery(ctx, str(file_in_gallery))
+
+        copy_mock.assert_not_called()
+        theme.insertURLByIndex.assert_called_once_with(f"file:///{file_in_gallery}", -1)
+        theme.update.assert_called_once()
 
 

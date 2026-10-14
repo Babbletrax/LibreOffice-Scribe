@@ -336,7 +336,10 @@ def test_get_visual_doc_type_draw_and_impress():
 
 
 def test_unit_conversions_match_existing_image_tool_assumptions():
-    assert visual_helpers.mm_to_units(12.9, 3.1) == (1200, 300)
+    assert visual_helpers.mm_to_units(12.9, 3.1) == (1290, 310)
+    assert visual_helpers.mm_to_unit(12.7) == 1270
+    assert visual_helpers.mm_to_unit(12.75) == 1275
+    assert visual_helpers.mm_to_units(-1.2, 0) == (-120, 0)
     assert visual_helpers.px_to_units(10, 20) == (264, 529)
     assert visual_helpers.units_to_px(2540, 1270) == (96, 48)
 

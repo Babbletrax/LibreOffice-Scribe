@@ -1020,6 +1020,42 @@ class TestToolIsolation:
         assert "Document was closed" not in result["message"]
         assert "BareRuntimeException" in result["message"]
 
+    def test_execute_safe_uses_uno_message_attribute(self):
+        class CustomUnoException(Exception):
+            def __init__(self, message: str):
+                super().__init__("")
+                self.Message = message
+
+            def __str__(self) -> str:
+                return ""
+
+        class LiveDoc:
+            def getImplementationName(self):
+                return "SwXTextDocument"
+
+        class FailingAsyncTool(ToolBase):
+            name = "failing_async"
+            description = "x"
+            parameters = {"type": "object", "properties": {}}
+
+            def is_async(self):
+                return True
+
+            def execute(self, ctx, **kwargs):
+                raise CustomUnoException("sheet is protected")
+
+        class LiveContext:
+            doc = LiveDoc()
+            doc_type = "writer"
+            caller = None
+
+        result = FailingAsyncTool().execute_safe(LiveContext())
+        assert result["status"] == "error"
+        assert result["code"] == "TOOL_EXECUTION_ERROR"
+        assert "sheet is protected" in result["message"]
+        assert result["details"]["original_error"] == "sheet is protected"
+        assert "Document was closed" not in result["message"]
+
     def test_execute_safe_async_off_main_thread_probe_skipped(self):
         """From a background thread, an async tool must not probe the live doc model."""
         class BareRuntimeException(Exception):
@@ -1787,6 +1823,19 @@ def test_doc_type_probe_on_main_thread_only() -> None:
         mock_probe.assert_not_called()
         reg.get_schemas(doc=doc)
         mock_probe.assert_not_called()
+
+
+def test_get_schemas_unknown_protocol_does_not_probe() -> None:
+    reg = ToolRegistry(MagicMock())
+    doc = MagicMock()
+
+    with patch("plugin.framework.tool.on_main_thread", return_value=True), \
+         patch("plugin.framework.tool._doc_type_str_from_doc", return_value="writer") as mock_probe, \
+         patch("plugin.framework.tool.ToolRegistry.get_tools") as mock_get_tools:
+        with pytest.raises(ValueError, match="Unknown protocol: xml"):
+            reg.get_schemas("xml", doc=doc)
+        mock_probe.assert_not_called()
+        mock_get_tools.assert_not_called()
 
 
 def test_specialized_domain_flag() -> None:

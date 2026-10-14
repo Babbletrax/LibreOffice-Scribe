@@ -46,6 +46,7 @@ from plugin.framework.errors import (
     is_real_disposal,
     is_tool_document_disposed,
     make_tool_error,
+    resolve_exception_message,
 )
 from plugin.framework.worker_pool import run_in_background
 from plugin.framework.thread_guard import assert_main_thread, on_main_thread
@@ -336,8 +337,9 @@ class ToolBase(_ToolErrorMixin, ABC):
             if key not in kwargs:
                 return False, f"Missing required parameter: {key}"
         extra_ok = getattr(self, "scripting_only_parameters", None) or frozenset()
-        # Same allow-list as execute and the pre-shim check. Empty
-        # properties {} is a closed schema, not "accept any kwargs".
+        # scripting_only_parameters stay allowed here because validate has no caller;
+        # _execute_impl drops them unless caller == "script" before this method runs;
+        # empty properties {} is a closed schema, not "accept any kwargs".
         props_dict = call_properties(schema)
         for key in kwargs:
             if props_dict is not None and key not in props_dict and key not in extra_ok:
@@ -413,8 +415,8 @@ class ToolBase(_ToolErrorMixin, ABC):
             if isinstance(e, WriterAgentException):
                 return format_error_payload(e)
             # Bare RuntimeException often has an empty message; fall back to the type name.
-            err_msg = str(e).strip() or type(e).__name__
-            return self._tool_error(f"Tool execution failed: {err_msg}", code="TOOL_EXECUTION_ERROR", original_error=str(e), error_type=type(e).__name__)
+            err_msg = resolve_exception_message(e)
+            return self._tool_error(f"Tool execution failed: {err_msg}", code="TOOL_EXECUTION_ERROR", original_error=err_msg, error_type=type(e).__name__)
 
     def get_collection(self, doc: Any, getter_name: str, missing_msg: str | None = None) -> Any:
         """Helper to safely fetch a named collection from a document.
@@ -740,6 +742,10 @@ class ToolRegistry:
             **kwargs: Filters passed to get_tools().
         """
         # crosshair: off
+        # An unknown protocol must not call get_tools, which probes the document on the main thread.
+        if protocol not in ("openai", "mcp"):
+            raise ValueError(f"Unknown protocol: {protocol}")
+
         # Doc-type probe is main-thread-only because get_document_type accesses UNO.
         # In release builds @main_thread_only logs and continues rather than raising,
         # so off-thread callers must avoid probing UNO directly.
@@ -769,14 +775,12 @@ class ToolRegistry:
 
             schemas = filter_peer_message_schemas(schemas, ctx, doc=doc, active_domain=active_domain)
             return schemas
-        elif protocol == "mcp":
-            # Never advertise peer send tools on MCP, including find_tools(domain=…).
-            from plugin.doc.peer_message import filter_peer_message_schemas
 
-            schemas = [to_mcp_schema(t, doc_type=doc_type) for t in tools]
-            return filter_peer_message_schemas(schemas, kwargs.get("ctx"), doc=doc, active_domain=None)
-        else:
-            raise ValueError(f"Unknown protocol: {protocol}")
+        # Never advertise peer send tools on MCP, including find_tools(domain=…).
+        from plugin.doc.peer_message import filter_peer_message_schemas
+
+        schemas = [to_mcp_schema(t, doc_type=doc_type) for t in tools]
+        return filter_peer_message_schemas(schemas, kwargs.get("ctx"), doc=doc, active_domain=None)
 
     def get(self, name: str) -> ToolBase | None:
         """Get a tool by name, or None."""
@@ -1019,14 +1023,7 @@ class ToolRegistry:
             def _run_tool() -> Any:
                 return runner(ctx, **kwargs)
 
-            # What was wrong: Main-thread marshaling verification tests inspected _invoke's
-            # freevars for 'runner' to assert execution targets execute_safe before running.
-            # How it happened: Wrapping runner inside the zero-argument _run_tool helper moved
-            # runner out of _invoke's immediate closure freevars.
-            # Why this fixes it: Referencing runner inside _invoke keeps runner in _invoke's
-            # freevars while _run_tool avoids keyword collision with _execute_with_timeout.
             def _invoke() -> Any:
-                _unused_runner = runner
                 return self._execute_with_timeout(_run_tool, timeout=timeout, tool_name=tool_name, run_threaded=run_threaded)
 
             if bypass_thread_guard or tool.is_async():

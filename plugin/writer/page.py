@@ -24,12 +24,105 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
-from plugin.framework.errors import make_tool_error
+from plugin.framework.errors import is_disposed_exception, make_tool_error
 from plugin.framework.uno_context import uno_same
-from .format import record_walk_cap
+from .edit_review import flag_style_unreviewed
+from .format import PAGE_NUMBER_NUMBERING_TYPE_NAMES, record_walk_cap
 from .specialized_base import ToolWriterPageBase
 
 log = logging.getLogger("writeragent.writer")
+
+
+def _mm_to_hmm(val: Any) -> int:
+    """Convert mm to 1/100 mm integer. Rejects bool, non-numbers, and negative values."""
+    if isinstance(val, bool) or not isinstance(val, (int, float)):
+        raise ValueError(f"Expected a non-negative number of mm, got {val!r}")
+    if val < 0:
+        raise ValueError(f"mm value must be non-negative, got {val!r}")
+    # round before int avoids 2.3 * 100 truncating to 229 instead of 230
+    return int(round(float(val) * 100))
+
+
+def _uno_len(text: str) -> int:
+    """Length in UTF-16 code units (what LibreOffice XText cursor positions count)."""
+    return len(text.encode("utf-16-le")) // 2
+
+
+_LAYOUT_NAMES = ("ALL", "LEFT", "RIGHT", "MIRRORED")
+
+
+def _page_style_layout_to_int(raw: Any) -> int | None:
+    """Map PageStyleLayout enum or int to 0..3 (or passthrough int). None if unknown."""
+    if raw is None or isinstance(raw, bool):
+        return None
+    if isinstance(raw, int):
+        return raw
+    name = getattr(raw, "value", None)
+    if isinstance(name, str):
+        upper = name.strip().upper()
+        if upper in _LAYOUT_NAMES:
+            return _LAYOUT_NAMES.index(upper)
+    return None
+
+
+def _page_style_layout_to_uno(val: Any) -> Any:
+    """Validate int 0..3 and return UNO PageStyleLayout enum constant."""
+    if isinstance(val, bool) or not isinstance(val, int) or val not in (0, 1, 2, 3):
+        raise ValueError("page_style_layout must be 0=ALL, 1=LEFT, 2=RIGHT, or 3=MIRRORED.")
+    from com.sun.star.style.PageStyleLayout import ALL, LEFT, RIGHT, MIRRORED
+    return (ALL, LEFT, RIGHT, MIRRORED)[val]
+
+
+def _mirrored_region_skip(style_name: str, region: str) -> dict[str, Any]:
+    shared = _region_kind(region)
+    return {
+        "status": "skipped",
+        "style": style_name,
+        "region": region,
+        "mirrored": True,
+        "message": (
+            f"{region} mirrors the shared {shared}. Edit region='{shared}', "
+            f"or turn sharing off (first_is_shared / header_is_shared / footer_is_shared) "
+            f"before writing a distinct first or left region."
+        ),
+    }
+
+
+def _in_text_table(cursor: Any) -> bool:
+    """True when the cursor is positioned inside a table cell."""
+    try:
+        tbl = cursor.getPropertyValue("TextTable")
+        return tbl is not None
+    except Exception as e:
+        if is_disposed_exception(e):
+            raise
+        return False
+
+
+_PAGE_SET_SPECS = (
+    ("width_mm", "width", "Width", "mm"),
+    ("height_mm", "height", "Height", "mm"),
+    ("left_margin_mm", "left_margin", "LeftMargin", "mm"),
+    ("right_margin_mm", "right_margin", "RightMargin", "mm"),
+    ("top_margin_mm", "top_margin", "TopMargin", "mm"),
+    ("bottom_margin_mm", "bottom_margin", "BottomMargin", "mm"),
+    ("gutter_margin_mm", "gutter_margin", "GutterMargin", "mm"),
+    ("header_is_on", "header_is_on", "HeaderIsOn", "bool"),
+    ("footer_is_on", "footer_is_on", "FooterIsOn", "bool"),
+    ("header_is_shared", "header_is_shared", "HeaderIsShared", "bool"),
+    ("footer_is_shared", "footer_is_shared", "FooterIsShared", "bool"),
+    ("first_is_shared", "first_is_shared", "FirstIsShared", "bool"),
+    ("header_height_mm", "header_height", "HeaderHeight", "mm"),
+    ("footer_height_mm", "footer_height", "FooterHeight", "mm"),
+    ("header_body_distance_mm", "header_body_distance", "HeaderBodyDistance", "mm"),
+    ("footer_body_distance_mm", "footer_body_distance", "FooterBodyDistance", "mm"),
+    ("back_color", "back_color", "BackColor", "color_int"),
+    ("back_transparent", "back_transparent", "BackTransparent", "bool"),
+    ("numbering_type", "numbering_type", "NumberingType", "int"),
+    ("footnote_height_mm", "footnote_height", "FootnoteHeight", "mm"),
+    ("register_paragraph_style", "register_paragraph_style", "RegisterParagraphStyle", "str"),
+    ("page_style_layout", "page_style_layout", "PageStyleLayout", "layout"),
+)
 
 if TYPE_CHECKING:
     from plugin.framework.tool import ToolContext
@@ -462,15 +555,10 @@ def copy_page_style(
     """
     from .styles import _copy_direct_style_properties
 
+    source, source_name = resolve_page_style(doc, source_name)
     styles = doc.getStyleFamilies().getByName("PageStyles")
-    if not styles.hasByName(source_name):
-        available = list(styles.getElementNames())
-        raise ValueError(
-            "No page style named '%s'. Available: %s" % (source_name, ", ".join(available))
-        )
     if styles.hasByName(new_name):
         raise ValueError("Style '%s' already exists in PageStyles." % new_name)
-    source = styles.getByName(source_name)
     clone = doc.createInstance("com.sun.star.style.PageStyle")
     if not clone:
         raise RuntimeError("Failed to create a page style instance.")
@@ -529,12 +617,12 @@ def get_page_style_properties(doc: Any, style_name: str = "Standard") -> dict[st
     general ``style_get_info`` vs the page toolkit); deferred for now.
     """
     try:
-        style_families = doc.getStyleFamilies()
-        page_styles = style_families.getByName("PageStyles")
-        if not page_styles.hasByName(style_name):
-            return make_tool_error(f"Page style '{style_name}' not found.")
-        style = page_styles.getByName(style_name)
+        style, style_name = resolve_page_style(doc, style_name)
+    except ValueError as e:
+        return make_tool_error(str(e))
     except Exception as e:
+        if is_disposed_exception(e):
+            raise
         return make_tool_error(f"Error accessing page style '{style_name}': {e}")
 
     try:
@@ -560,8 +648,13 @@ def get_page_style_properties(doc: Any, style_name: str = "Standard") -> dict[st
             "back_transparent": style.getPropertyValue("BackTransparent"),
             "numbering_type": style.getPropertyValue("NumberingType"),
             "footnote_height_mm": _mm(style, "FootnoteHeight"),
-            "register_paragraph_style": style.getPropertyValue("RegisterParagraphStyle"),
         }
+        # RegisterParagraphStyle is optional and missing in some page styles; isolate it
+        # so one missing property doesn't fail the read.
+        try:
+            props["register_paragraph_style"] = style.getPropertyValue("RegisterParagraphStyle")
+        except Exception:
+            pass
         # False means the first page has its OWN header/footer — the usual setup for a
         # letterhead — reachable only through the header_first / footer_first regions. Fetched
         # separately: not every page style offers it, and one missing property must not sink
@@ -570,14 +663,17 @@ def get_page_style_properties(doc: Any, style_name: str = "Standard") -> dict[st
             props["first_is_shared"] = style.getPropertyValue("FirstIsShared")
         except Exception:
             pass
-        # Attempt to safely fetch PageStyleLayout enum
+        # PageStyleLayout enum or int -> int 0=ALL, 1=LEFT, 2=RIGHT, 3=MIRRORED
         try:
-            psl = style.getPropertyValue("PageStyleLayout")
-            props["page_style_layout"] = psl.value if hasattr(psl, "value") else int(psl)
+            psl = _page_style_layout_to_int(style.getPropertyValue("PageStyleLayout"))
+            if psl is not None:
+                props["page_style_layout"] = psl
         except Exception:
             pass
         return {"status": "ok", "properties": props}
     except Exception as e:
+        if is_disposed_exception(e):
+            raise
         return make_tool_error(f"Error reading properties from page style '{style_name}': {e}")
 
 
@@ -618,7 +714,7 @@ class PageSetStyleProperties(ToolWriterPageBase):
             "style": {"type": "string", "description": "The name of the page style (e.g., 'Standard' or 'Default Style'). Defaults to 'Standard'."},
             "width_mm": {"type": "number", "description": "New width in mm."},
             "height_mm": {"type": "number", "description": "New height in mm."},
-            "is_landscape": {"type": "boolean", "description": "Set orientation to landscape."},
+            "is_landscape": {"type": "boolean", "description": "Sets the IsLandscape flag only. Does not change Width or Height unless width_mm and height_mm are also passed. Landscape A4 is width_mm 297 and height_mm 210."},
             "left_margin_mm": {"type": "number", "description": "Left margin in mm."},
             "right_margin_mm": {"type": "number", "description": "Right margin in mm."},
             "top_margin_mm": {"type": "number", "description": "Top margin in mm."},
@@ -652,7 +748,10 @@ class PageSetStyleProperties(ToolWriterPageBase):
             "footer_body_distance_mm": {"type": "number", "description": "Spacing from footer to body in mm."},
             "back_color": {"type": "integer", "description": "Background color (RGB long)."},
             "back_transparent": {"type": "boolean", "description": "Make background transparent."},
-            "numbering_type": {"type": "integer", "description": "Numbering type enum (4=Arabic, 0=Roman)."},
+            "numbering_type": {
+                "type": "integer",
+                "description": f"com.sun.star.style.NumberingType short ({', '.join(f'{k}={PAGE_NUMBER_NUMBERING_TYPE_NAMES[k]}' for k in (0, 1, 2, 3, 4))}).",
+            },
             "footnote_height_mm": {"type": "number", "description": "Max footnote area height in mm."},
             "register_paragraph_style": {"type": "string", "description": "Register true reference style."},
             "page_style_layout": {"type": "integer", "description": "0=ALL, 1=LEFT, 2=RIGHT, 3=MIRRORED"},
@@ -666,12 +765,12 @@ class PageSetStyleProperties(ToolWriterPageBase):
         doc = ctx.doc
 
         try:
-            style_families = doc.getStyleFamilies()
-            page_styles = style_families.getByName("PageStyles")
-            if not page_styles.hasByName(style_name):
-                return self._tool_error(f"Page style '{style_name}' not found.")
-            style = page_styles.getByName(style_name)
+            style, style_name = resolve_page_style(doc, style_name)
+        except ValueError as e:
+            return self._tool_error(str(e))
         except Exception as e:
+            if is_disposed_exception(e):
+                raise
             return self._tool_error(f"Error accessing page style '{style_name}': {e}")
 
         # F5: HeaderIsOn/FooterIsOn=false *clears* content. Refuse while
@@ -681,86 +780,90 @@ class PageSetStyleProperties(ToolWriterPageBase):
         if blocked:
             return self._tool_error(blocked)
 
-        updated = []
-        try:
-            if "width_mm" in kwargs:
-                style.setPropertyValue("Width", int(kwargs["width_mm"] * 100))
-                updated.append("width")
-            if "height_mm" in kwargs:
-                style.setPropertyValue("Height", int(kwargs["height_mm"] * 100))
-                updated.append("height")
-            if "is_landscape" in kwargs:
-                style.setPropertyValue("IsLandscape", kwargs["is_landscape"])
+        # Preflight validation: validate every supplied value before any UNO mutation
+        conversions: dict[str, Any] = {}
+        if "is_landscape" in kwargs:
+            val = kwargs["is_landscape"]
+            if not isinstance(val, bool):
+                return self._tool_error("is_landscape must be a boolean.")
+            conversions["is_landscape"] = val
+
+        for kwarg, _label, _uno_prop, kind in _PAGE_SET_SPECS:
+            if kwarg in kwargs:
+                val = kwargs[kwarg]
+                if kind == "mm":
+                    try:
+                        conversions[kwarg] = _mm_to_hmm(val)
+                    except (ValueError, TypeError) as e:
+                        return self._tool_error(str(e))
+                elif kind == "bool":
+                    if not isinstance(val, bool):
+                        return self._tool_error(f"{kwarg} must be a boolean.")
+                    conversions[kwarg] = val
+                elif kind in ("color_int", "int"):
+                    if isinstance(val, bool) or not isinstance(val, int):
+                        return self._tool_error(f"{kwarg} must be an integer.")
+                    conversions[kwarg] = val
+                elif kind == "str":
+                    if not isinstance(val, str):
+                        return self._tool_error(f"{kwarg} must be a string.")
+                    conversions[kwarg] = val
+                elif kind == "layout":
+                    try:
+                        conversions[kwarg] = _page_style_layout_to_uno(val)
+                    except ValueError as e:
+                        return self._tool_error(str(e))
+
+        updated: list[str] = []
+
+        # is_landscape is applied first. If width/height were not passed, restore
+        # the snapshotted dimensions so the setter doesn't swap them silently.
+        if "is_landscape" in conversions:
+            try:
+                w_snap = style.getPropertyValue("Width")
+                h_snap = style.getPropertyValue("Height")
+                style.setPropertyValue("IsLandscape", conversions["is_landscape"])
+                if "width_mm" not in conversions:
+                    style.setPropertyValue("Width", w_snap)
+                if "height_mm" not in conversions:
+                    style.setPropertyValue("Height", h_snap)
                 updated.append("is_landscape")
-            if "left_margin_mm" in kwargs:
-                style.setPropertyValue("LeftMargin", int(kwargs["left_margin_mm"] * 100))
-                updated.append("left_margin")
-            if "right_margin_mm" in kwargs:
-                style.setPropertyValue("RightMargin", int(kwargs["right_margin_mm"] * 100))
-                updated.append("right_margin")
-            if "top_margin_mm" in kwargs:
-                style.setPropertyValue("TopMargin", int(kwargs["top_margin_mm"] * 100))
-                updated.append("top_margin")
-            if "bottom_margin_mm" in kwargs:
-                style.setPropertyValue("BottomMargin", int(kwargs["bottom_margin_mm"] * 100))
-                updated.append("bottom_margin")
-            if "gutter_margin_mm" in kwargs:
-                style.setPropertyValue("GutterMargin", int(kwargs["gutter_margin_mm"] * 100))
-                updated.append("gutter_margin")
-            if "header_is_on" in kwargs:
-                style.setPropertyValue("HeaderIsOn", kwargs["header_is_on"])
-                updated.append("header_is_on")
-            if "footer_is_on" in kwargs:
-                style.setPropertyValue("FooterIsOn", kwargs["footer_is_on"])
-                updated.append("footer_is_on")
-            if "header_is_shared" in kwargs:
-                style.setPropertyValue("HeaderIsShared", kwargs["header_is_shared"])
-                updated.append("header_is_shared")
-            if "footer_is_shared" in kwargs:
-                style.setPropertyValue("FooterIsShared", kwargs["footer_is_shared"])
-                updated.append("footer_is_shared")
-            if "first_is_shared" in kwargs:
-                style.setPropertyValue("FirstIsShared", kwargs["first_is_shared"])
-                updated.append("first_is_shared")
-            if "header_height_mm" in kwargs:
-                style.setPropertyValue("HeaderHeight", int(kwargs["header_height_mm"] * 100))
-                updated.append("header_height")
-            if "footer_height_mm" in kwargs:
-                style.setPropertyValue("FooterHeight", int(kwargs["footer_height_mm"] * 100))
-                updated.append("footer_height")
-            if "header_body_distance_mm" in kwargs:
-                style.setPropertyValue("HeaderBodyDistance", int(kwargs["header_body_distance_mm"] * 100))
-                updated.append("header_body_distance")
-            if "footer_body_distance_mm" in kwargs:
-                style.setPropertyValue("FooterBodyDistance", int(kwargs["footer_body_distance_mm"] * 100))
-                updated.append("footer_body_distance")
-            if "back_color" in kwargs:
-                style.setPropertyValue("BackColor", kwargs["back_color"])
-                updated.append("back_color")
-            if "back_transparent" in kwargs:
-                style.setPropertyValue("BackTransparent", kwargs["back_transparent"])
-                updated.append("back_transparent")
-            if "numbering_type" in kwargs:
-                style.setPropertyValue("NumberingType", kwargs["numbering_type"])
-                updated.append("numbering_type")
-            if "footnote_height_mm" in kwargs:
-                style.setPropertyValue("FootnoteHeight", int(kwargs["footnote_height_mm"] * 100))
-                updated.append("footnote_height")
-            if "register_paragraph_style" in kwargs:
-                style.setPropertyValue("RegisterParagraphStyle", kwargs["register_paragraph_style"])
-                updated.append("register_paragraph_style")
-            if "page_style_layout" in kwargs:
-                from com.sun.star.style.PageStyleLayout import ALL, LEFT, RIGHT, MIRRORED
+            except Exception as e:
+                if is_disposed_exception(e):
+                    raise
+                return {
+                    "status": "error",
+                    "style_name": style_name,
+                    "updated": updated,
+                    "failed": {"is_landscape": str(e)},
+                    "message": f"Failed to set is_landscape on page style '{style_name}': {e}. Nothing was changed.",
+                }
 
-                m = {0: ALL, 1: LEFT, 2: RIGHT, 3: MIRRORED}
-                val = m.get(kwargs["page_style_layout"])
-                if val is not None:
-                    style.setPropertyValue("PageStyleLayout", val)
-                    updated.append("page_style_layout")
-        except Exception as e:
-            return self._tool_error(f"Error setting properties on page style '{style_name}': {e}")
+        # Write remaining properties in spec order, stopping at first failure.
+        for kwarg, label, uno_prop, _kind in _PAGE_SET_SPECS:
+            if kwarg in conversions:
+                try:
+                    style.setPropertyValue(uno_prop, conversions[kwarg])
+                    updated.append(label)
+                except Exception as e:
+                    if is_disposed_exception(e):
+                        raise
+                    failed_dict = {label: str(e)}
+                    if not updated:
+                        msg = f"Failed to set {label} on page style '{style_name}': {e}. Nothing was changed."
+                    else:
+                        msg = f"Failed to set {label} on page style '{style_name}': {e}. Earlier properties ({', '.join(updated)}) stay applied."
+                    return {
+                        "status": "error",
+                        "style_name": style_name,
+                        "updated": updated,
+                        "failed": failed_dict,
+                        "message": msg,
+                    }
 
-        return {"status": "ok", "style_name": style_name, "updated": updated}
+        result = {"status": "ok", "style_name": style_name, "updated": updated}
+        flag_style_unreviewed(getattr(ctx, "ctx", None), result)
+        return result
 
 
 # ------------------------------------------------------------------
@@ -817,7 +920,11 @@ class PageGetHeaderFooterText(ToolWriterPageBase):
 
         try:
             style, style_name = resolve_page_style(ctx.doc, style_name)
+        except ValueError as e:
+            return self._tool_error(str(e))
         except Exception as e:
+            if is_disposed_exception(e):
+                raise
             return self._tool_error(f"Error accessing page style '{style_name}': {e}")
 
         try:
@@ -880,8 +987,10 @@ class PageSetHeaderFooterText(ToolWriterPageBase):
         "pointed at the region's XText. Call page_get_header_footer_text first and edit "
         "that HTML. Enables the region if it is off. Pass auto_height=true so a taller "
         "letterhead grows instead of overlapping the body. Plain text is wrapped as a "
-        "paragraph and still goes through import. To change one substring and leave "
-        "fields and floating graphics alone, use page_replace_header_footer_text."
+        "paragraph and still goes through import. A _first or _left region that only mirrors "
+        "the shared header or footer is skipped; edit header/footer or turn sharing off. "
+        "To change one substring and leave fields and floating graphics alone, use "
+        "page_replace_header_footer_text."
     )
     parameters: dict[str, Any] | None = {
         "type": "object",
@@ -928,19 +1037,41 @@ class PageSetHeaderFooterText(ToolWriterPageBase):
 
         try:
             style, style_name = resolve_page_style(ctx.doc, style_name)
+        except ValueError as e:
+            return self._tool_error(str(e))
         except Exception as e:
+            if is_disposed_exception(e):
+                raise
             return self._tool_error(f"Error accessing page style '{style_name}': {e}")
 
+        # Mirrors cannot be set independently without turning sharing off first.
+        if _region_mirrors_shared(style, region):
+            return _mirrored_region_skip(style_name, region)
+
+        is_on_prop, text_prop = _REGION_PROPS[region]
+        was_on = False
         try:
-            is_on_prop, text_prop = _REGION_PROPS[region]
+            was_on = style.getPropertyValue(is_on_prop) is True
+        except Exception:
+            was_on = False
+
+        auto_height = kwargs.get("auto_height")
+        old_auto_height = None
+        if auto_height is not None:
+            dyn_prop, _spacing_prop, _height_prop = _height_props(region)
+            try:
+                old_auto_height = bool(style.getPropertyValue(dyn_prop))
+            except Exception:
+                old_auto_height = None
+
+        try:
             style.setPropertyValue(is_on_prop, True)
-            auto_height = kwargs.get("auto_height")
             if auto_height is not None:
                 set_header_footer_auto_height(style, region, auto_height)
 
             text_obj = style.getPropertyValue(text_prop)
             if not text_obj:
-                return self._tool_error(f"Could not retrieve text object for {region} on style '{style_name}'.")
+                raise RuntimeError(f"Could not retrieve text object for {region} on style '{style_name}'.")
 
             config_svc = None
             services = getattr(ctx, "services", None)
@@ -961,8 +1092,24 @@ class PageSetHeaderFooterText(ToolWriterPageBase):
             }
             if auto_height is not None:
                 result["auto_height"] = bool(auto_height)
+            flag_style_unreviewed(getattr(ctx, "ctx", None), result)
             return result
         except Exception as e:
+            if is_disposed_exception(e):
+                raise
+            # What was wrong: a failed HTML import left a previously disabled region half-enabled.
+            # How it happened: is_on was set True before replace_xtext_with_html was called.
+            # Why this change fixes it: roll back is_on to False if it wasn't on before, or restore auto_height.
+            if not was_on:
+                try:
+                    style.setPropertyValue(is_on_prop, False)
+                except Exception:
+                    pass
+            elif auto_height is not None and old_auto_height is not None:
+                try:
+                    set_header_footer_auto_height(style, region, old_auto_height)
+                except Exception:
+                    pass
             return self._tool_error(f"Error writing to {region} text on page style '{style_name}': {e}")
 
 
@@ -1007,7 +1154,7 @@ def _paragraph_cursor_text(para: Any) -> str | None:
     return "".join(parts)
 
 
-def _casefold_keeps_length(text: str) -> bool:
+def _lower_keeps_length(text: str) -> bool:
     folded = text.lower()
     return len(folded) == len(text)
 
@@ -1021,7 +1168,7 @@ def _match_offsets(hay: str, needle: str, case_sensitive: bool) -> list[int]:
     """
     if not needle:
         return []
-    if case_sensitive or not (_casefold_keeps_length(hay) and _casefold_keeps_length(needle)):
+    if case_sensitive or not (_lower_keeps_length(hay) and _lower_keeps_length(needle)):
         src, pat = hay, needle
     else:
         src, pat = hay.lower(), needle.lower()
@@ -1041,18 +1188,18 @@ def _same_region_text(selected: Any, needle: str, case_sensitive: bool) -> bool:
     """True when the cursor selection is the requested match."""
     if not isinstance(selected, str):
         return False
-    if case_sensitive or not (_casefold_keeps_length(selected) and _casefold_keeps_length(needle)):
+    if case_sensitive or not (_lower_keeps_length(selected) and _lower_keeps_length(needle)):
         return selected == needle
     return selected.lower() == needle.lower()
 
 
-def _find_region_matches(text_obj: Any, needle: str, case_sensitive: bool) -> tuple[list[tuple[Any, int]], list[str]]:
-    """Return (paragraph, offset) hits and any walk-cap notes.
+def _find_region_matches(text_obj: Any, needle: str, case_sensitive: bool) -> tuple[list[tuple[Any, int, int]], list[str]]:
+    """Return (paragraph, offset, length) hits and any walk-cap notes.
 
-    The offset is a goRight count from the paragraph start. A match may span
+    The offset and length count UTF-16 code units from the paragraph start. A match may span
     portions (mixed bold). It does not span a paragraph break.
     """
-    hits: list[tuple[Any, int]] = []
+    hits: list[tuple[Any, int, int]] = []
     notes: list[str] = []
     try:
         enum = text_obj.createEnumeration()
@@ -1069,7 +1216,13 @@ def _find_region_matches(text_obj: Any, needle: str, case_sensitive: bool) -> tu
         if hay is None:
             continue
         for offset in _match_offsets(hay, needle, case_sensitive):
-            hits.append((para, offset))
+            # What was wrong: Python string indexing counts Unicode code points, but
+            # LibreOffice XText cursor positions count UTF-16 code units. Non-BMP chars
+            # (like emojis) caused goRight to land short and fail the match.
+            # Why this change fixes it: measure uno_offset and uno_length via _uno_len.
+            uno_offset = _uno_len(hay[:offset])
+            uno_length = _uno_len(hay[offset:offset + len(needle)])
+            hits.append((para, uno_offset, uno_length))
     record_walk_cap(enum, seen, _SCAN_PARA_LIMIT, "paragraphs", notes)
     return hits, notes
 
@@ -1080,11 +1233,40 @@ def _cursor_for_match(text_obj: Any, para: Any, offset: int, length: int) -> Any
         cursor = text_obj.createTextCursorByRange(para.getStart())
     except Exception:
         return None
+
+    # What was wrong: in LibreOffice Writer, XTextCursor.goRight steps by Unicode code points
+    # (characters), but _find_region_matches measures UTF-16 code units (uno_offset and uno_length).
+    # Non-BMP characters (like emojis) have length 2 in UTF-16 but count as 1 character in goRight,
+    # causing goRight to overshoot and getString() to mismatch the needle.
+    # Why this change fixes it: if the paragraph text is available, convert UTF-16 counts to code points.
+    go_offset = offset
+    go_length = length
+    hay = _paragraph_cursor_text(para)
+    if hay:
+        u16_cur = 0
+        char_offset = None
+        char_end = None
+        target_end = offset + length
+        for char_idx, ch in enumerate(hay):
+            if char_offset is None and u16_cur >= offset:
+                char_offset = char_idx
+            if char_end is None and u16_cur >= target_end:
+                char_end = char_idx
+                break
+            u16_cur += 2 if ord(ch) > 0xFFFF else 1
+        if char_offset is None and u16_cur >= offset:
+            char_offset = len(hay)
+        if char_end is None and u16_cur >= target_end:
+            char_end = len(hay)
+        if char_offset is not None and char_end is not None:
+            go_offset = char_offset
+            go_length = char_end - char_offset
+
     try:
         # `is False`: a MagicMock goRight() is truthy and must not abort the walk.
-        if offset and cursor.goRight(offset, False) is False:
+        if go_offset and cursor.goRight(go_offset, False) is False:
             return None
-        if cursor.goRight(length, True) is False:
+        if cursor.goRight(go_length, True) is False:
             return None
     except Exception:
         return None
@@ -1099,22 +1281,15 @@ def _point_before(text: Any, left: Any, right: Any) -> bool:
         return False
 
 
-def _point_after(text: Any, left: Any, right: Any) -> bool:
-    """True when *left* ends after *right* (compareRegionEnds == -1)."""
+def _anchor_point_in_match(text: Any, anchor: Any, cursor: Any) -> bool:
+    """True when a collapsed anchor's start lies inside [cursor.start, cursor.end)."""
     try:
-        return int(text.compareRegionEnds(left, right)) == -1
+        a_start = anchor.getStart()
+        m_start = cursor.getStart()
+        m_end = cursor.getEnd()
     except Exception:
         return False
-
-
-def _ranges_overlap(text: Any, left: Any, right: Any) -> bool:
-    """True when the two ranges share a character. Touching at an edge does not."""
-    try:
-        a0, a1 = left.getStart(), left.getEnd()
-        b0, b1 = right.getStart(), right.getEnd()
-    except Exception:
-        return False
-    return _point_before(text, a0, b1) and _point_after(text, a1, b0)
+    return not _point_before(text, a_start, m_start) and _point_before(text, a_start, m_end)
 
 
 def _character_anchor_in_matches(doc: Any, text_obj: Any, cursors: list[Any]) -> str | None:
@@ -1150,7 +1325,7 @@ def _character_anchor_in_matches(doc: Any, text_obj: Any, cursors: list[Any]) ->
         except Exception:
             continue
         for cursor in cursors:
-            if _ranges_overlap(text_obj, anchor, cursor):
+            if _anchor_point_in_match(text_obj, anchor, cursor):
                 return _shape_name(shape)
     return None
 
@@ -1190,6 +1365,7 @@ def _apply_match_cursors(doc: Any, text_obj: Any, cursors: list[Any], new_text: 
     except Exception as exc:
         error = str(exc)
     left = False
+    undone = False
     if mgr is not None:
         try:
             mgr.leaveUndoContext()
@@ -1202,9 +1378,15 @@ def _apply_match_cursors(doc: Any, text_obj: Any, cursors: list[Any], new_text: 
                 titles = mgr.getAllUndoActionTitles()
                 if titles and titles[0] == title:
                     mgr.undo()
+                    undone = True
             except Exception:
                 log.exception("header/footer replace rollback failed")
     if error:
+        # What was wrong: if a post-check failed or replacement error occurred but undo() did not run,
+        # the error message did not warn that edits were already written.
+        # Why this change fixes it: prefix with note that replacement could not be rolled back.
+        if not undone:
+            error = "the replacement was written and could not be rolled back: " + error
         return error, 0, 0
     return None, len(after["fields"]), len(after["images"])
 
@@ -1293,23 +1475,17 @@ class PageReplaceHeaderFooterText(ToolWriterPageBase):
 
         try:
             style, style_name = resolve_page_style(ctx.doc, style_name)
+        except ValueError as e:
+            return self._tool_error(str(e))
         except Exception as e:
+            if is_disposed_exception(e):
+                raise
             return self._tool_error("Error accessing page style '%s': %s" % (style_name, e))
 
         # A shared mirror is the same text as header/footer. Editing it would
         # surprise the caller who asked for the first or left page only.
         if _region_mirrors_shared(style, region):
-            shared = _region_kind(region)
-            return {
-                "status": "skipped",
-                "style": style_name,
-                "region": region,
-                "mirrored": True,
-                "message": (
-                    "%s mirrors the shared %s. Edit region='%s' instead."
-                    % (region, shared, shared)
-                ),
-            }
+            return _mirrored_region_skip(style_name, region)
 
         is_on_prop, text_prop = _REGION_PROPS[region]
         try:
@@ -1347,8 +1523,8 @@ class PageReplaceHeaderFooterText(ToolWriterPageBase):
             chosen = [hits[occurrence]]
 
         cursors: list[Any] = []
-        for para, offset in chosen:
-            cursor = _cursor_for_match(text_obj, para, offset, len(old_content))
+        for para, offset, length in chosen:
+            cursor = _cursor_for_match(text_obj, para, offset, length)
             if cursor is None:
                 return self._tool_error(
                     "Could not select '%s' in the %s. Nothing was changed." % (old_content, region)
@@ -1390,6 +1566,7 @@ class PageReplaceHeaderFooterText(ToolWriterPageBase):
         }
         if notes:
             result["warning"] = notes[0]
+        flag_style_unreviewed(getattr(ctx, "ctx", None), result)
         return result
 
 
@@ -1402,7 +1579,7 @@ class PageGetColumns(ToolWriterPageBase):
     """Get the column layout for a page style."""
 
     name: str | None = "page_get_columns"
-    description: str = "Get the column layout for a page style."
+    description: str = "Get the column layout for a page style. Column widths are relative weights, not millimetres. Margins are millimetres."
     parameters: dict[str, Any] | None = {"type": "object", "properties": {"style": {"type": "string", "description": "The name of the page style. Defaults to 'Standard'."}}, "required": []}
 
     def execute(self, ctx: ToolContext, **kwargs: Any) -> dict[str, Any]:
@@ -1410,12 +1587,12 @@ class PageGetColumns(ToolWriterPageBase):
         doc = ctx.doc
 
         try:
-            style_families = doc.getStyleFamilies()
-            page_styles = style_families.getByName("PageStyles")
-            if not page_styles.hasByName(style_name):
-                return self._tool_error(f"Page style '{style_name}' not found.")
-            style = page_styles.getByName(style_name)
+            style, style_name = resolve_page_style(doc, style_name)
+        except ValueError as e:
+            return self._tool_error(str(e))
         except Exception as e:
+            if is_disposed_exception(e):
+                raise
             return self._tool_error(f"Error accessing page style '{style_name}': {e}")
 
         try:
@@ -1428,7 +1605,12 @@ class PageGetColumns(ToolWriterPageBase):
 
             columns_data = []
             for col in cols:
-                columns_data.append({"width": col.Width, "left_margin_mm": col.LeftMargin / 100.0, "right_margin_mm": col.RightMargin / 100.0})
+                columns_data.append({
+                    "width": col.Width,
+                    "width_unit": "relative",
+                    "left_margin_mm": col.LeftMargin / 100.0,
+                    "right_margin_mm": col.RightMargin / 100.0,
+                })
 
             return {"status": "ok", "style": style_name, "style_name": style_name, "column_count": column_count, "columns": columns_data}
         except Exception as e:
@@ -1459,20 +1641,27 @@ class PageSetColumns(ToolWriterPageBase):
     def execute(self, ctx: ToolContext, **kwargs: Any) -> dict[str, Any]:
         style_name = kwargs.get("style", "Standard")
         column_count = kwargs.get("column_count")
-        spacing_mm = kwargs.get("spacing_mm", 0)
+        spacing_raw = kwargs.get("spacing_mm", 0)
 
-        if column_count is None or column_count < 1:
+        # What was wrong: column_count="2" raised TypeError when compared against < 1.
+        # Why this change fixes it: validate column_count is int and not bool before comparing.
+        if isinstance(column_count, bool) or not isinstance(column_count, int) or column_count < 1:
             return self._tool_error("column_count must be at least 1.")
+
+        try:
+            spacing_hmm = _mm_to_hmm(spacing_raw)
+        except (ValueError, TypeError) as e:
+            return self._tool_error(str(e))
 
         doc = ctx.doc
 
         try:
-            style_families = doc.getStyleFamilies()
-            page_styles = style_families.getByName("PageStyles")
-            if not page_styles.hasByName(style_name):
-                return self._tool_error(f"Page style '{style_name}' not found.")
-            style = page_styles.getByName(style_name)
+            style, style_name = resolve_page_style(doc, style_name)
+        except ValueError as e:
+            return self._tool_error(str(e))
         except Exception as e:
+            if is_disposed_exception(e):
+                raise
             return self._tool_error(f"Error accessing page style '{style_name}': {e}")
 
         try:
@@ -1483,12 +1672,12 @@ class PageSetColumns(ToolWriterPageBase):
             text_columns.setColumnCount(column_count)
             cols = list(text_columns.getColumns())
 
-            spacing = int(spacing_mm * 100)
-
             # Divide spacing between adjacent columns
             # Column 1 right margin gets half spacing, Column 2 left margin gets half, etc.
-            if column_count > 1 and spacing > 0:
-                half_spacing = spacing // 2
+            # What was wrong: when spacing was 0, the inner margins were skipped leaving old spacing intact.
+            # Why this change fixes it: always update inner margins for column_count > 1, setting them to 0 if spacing is 0.
+            if column_count > 1:
+                half_spacing = spacing_hmm // 2
                 for i in range(column_count - 1):
                     cols[i].RightMargin = half_spacing
                     cols[i + 1].LeftMargin = half_spacing
@@ -1496,8 +1685,17 @@ class PageSetColumns(ToolWriterPageBase):
             text_columns.setColumns(tuple(cols))
             style.setPropertyValue("TextColumns", text_columns)
 
-            return {"status": "ok", "style_name": style_name, "column_count": column_count, "spacing_mm": spacing_mm}
+            result: dict[str, Any] = {
+                "status": "ok",
+                "style_name": style_name,
+                "column_count": column_count,
+                "spacing_mm": spacing_raw,
+            }
+            flag_style_unreviewed(getattr(ctx, "ctx", None), result)
+            return result
         except Exception as e:
+            if is_disposed_exception(e):
+                raise
             return self._tool_error(f"Error setting columns on page style '{style_name}': {e}")
 
 
@@ -1562,6 +1760,10 @@ class PageInsertBreak(ToolWriterPageBase):
                     return self._tool_error(
                         "The anchor is in the document's last paragraph; there is nothing after it "
                         "to start a new page with. Use before_text, or append content first.")
+                # What was wrong: setting BreakType inside a table cell corrupted table layout or had no effect.
+                # Why this change fixes it: refuse to set BreakType if the cursor is inside a text table.
+                if _in_text_table(para):
+                    return self._tool_error("Page breaks are ignored inside a table cell. Nothing was changed.")
                 para.setPropertyValue("BreakType", PAGE_BEFORE)
                 return {"status": "ok", "message": "Page break inserted %s the anchor." % ("before" if before_text else "after")}
 
@@ -1578,7 +1780,11 @@ class PageInsertBreak(ToolWriterPageBase):
             from com.sun.star.style.BreakType import PAGE_BEFORE
             text = view_cursor.getText()
             cursor = text.createTextCursorByRange(view_cursor.getStart())
+            if _in_text_table(cursor):
+                return self._tool_error("Page breaks are ignored inside a table cell. Nothing was changed.")
             cursor.setPropertyValue("BreakType", PAGE_BEFORE)
             return {"status": "ok", "message": "Page break inserted."}
         except Exception as e:
+            if is_disposed_exception(e):
+                raise
             return self._tool_error(f"Error inserting page break: {e}")

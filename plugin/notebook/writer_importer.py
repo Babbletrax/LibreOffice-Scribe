@@ -9,10 +9,12 @@
 
 Future work (do not forget — leave these until the matching phase, not drive-bys):
 
-- Markdown ``![](http(s):…)`` is fetched at File → Open (2s timeout, 8MB cap) in
-  ``_fetch_remote_image``. Useful, but opening an untrusted notebook is an
-  attacker-controlled GET. Add a config kill-switch when notebook Settings
-  keys land (Phase 4 ``notebook.enable_interactive``).
+- Markdown ``![](http(s):…)`` is fetched at File → Open in ``_fetch_remote_image``.
+  Fetch is still UI-thread and still follows redirects, but each import stops
+  after 8 fetches or 4 seconds, whichever comes first (each fetch at most 2s,
+  8MB cap). Useful, but opening an untrusted notebook is an attacker-controlled
+  GET. Add a config kill-switch when notebook Settings keys land (Phase 4
+  ``notebook.enable_interactive``).
 - ``_apply_no_spellcheck_for_import`` sets ``zxx`` on Standard / Heading 1/2.
   Safe today because File → Open always targets a fresh doc. Phase 3
   append/merge must use notebook-owned styles so a user's styles keep
@@ -37,7 +39,7 @@ import tempfile
 import time
 from contextlib import contextmanager
 from types import SimpleNamespace
-from typing import Any, Iterator
+from typing import Any, Iterator, final
 
 from com.sun.star.text.TextContentAnchorType import AS_CHARACTER
 
@@ -56,14 +58,14 @@ _DEFAULT_IMAGE_HEIGHT_MM = 80
 _IMAGE_MIME_SUFFIX = {"image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg", "image/webp": ".webp", "image/gif": ".gif", "image/svg+xml": ".svg"}
 _NOTEBOOK_IN_CHAR_COLOR = 0x307FC1
 _HTTP_IMAGE_TIMEOUT_SEC = 2
+_MAX_REMOTE_IMAGES = 8
+_REMOTE_IMAGE_BUDGET_SEC = 4.0
 
 # Writer paragraph styles (document locale usually provides these English names).
 # Markdown ATX uses Heading 1/2. Cell chrome (Heading 3 "Cell N: …" / Heading 4
 # "Output") is no longer written — Jupyter has neither.
 _STYLE_MD_H1 = "Heading 1"
 _STYLE_MD_H2 = "Heading 2"
-_STYLE_CELL_HEADING = "Heading 3"
-_STYLE_SECTION_HEADING = "Heading 4"
 _STYLE_OUTPUT = "Preformatted Text"
 _STYLE_BODY = "Text Body"
 
@@ -79,19 +81,25 @@ _NOTEBOOK_IN_MARGIN_BOTTOM = 40
 _PARAGRAPH_BREAK = 0  # com.sun.star.text.ControlCharacter.PARAGRAPH_BREAK
 _HTML_TAG_RE = re.compile(r"<\s*[a-zA-Z]", re.DOTALL)
 # CommonMark ATX: 1–6 hashes, space, title, optional closing hashes.
-_ATX_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t]*#*[ \t]*$")
+_ATX_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*?)(?:[ \t]+#+)?[ \t]*$")
 _INLINE_CODE_RE = re.compile(r"`([^`]+)`")
-_BOLD_RE = re.compile(r"\*\*(.+?)\*\*|__(.+?)__")
-_ITALIC_RE = re.compile(r"(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)|(?<!_)_(?!_)(.+?)(?<!_)_(?!_)")
-_MD_IMAGE_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+)\)")
+_BOLD_RE = re.compile(r"\*\*(?!\s)(.+?)(?<!\s)\*\*|(?<![A-Za-z0-9])__(?!\s)(.+?)(?<!\s)__(?![A-Za-z0-9])")
+_ITALIC_RE = re.compile(r"(?<!\*)\*(?!\*|\s)(.+?)(?<!\s|\*)\*(?!\*)|(?<![A-Za-z0-9_])_(?!_|\s)(.+?)(?<![_\s])_(?![A-Za-z0-9_])")
+
+_MD_DEST = r"(<[^>\n]+>|[^()\s]+(?:\([^()\s]*\)[^()\s]*)*)"
+_MD_TITLE = r'(?:[ \t]+(?:"[^"]*"|\'[^\']*\'|\([^)]*\)))?'
+_MD_IMAGE_RE = re.compile(rf"!\[([^\]]*)\]\({_MD_DEST}{_MD_TITLE}\)")
 # Negative lookbehind so ``![alt](src)`` is not treated as a markdown link.
-_MD_LINK_RE = re.compile(r"(?<!!)\[([^\]]*)\]\(([^)]+)\)")
+_MD_LINK_RE = re.compile(rf"(?<!!)\[([^\]]*)\]\({_MD_DEST}{_MD_TITLE}\)")
+_MD_IMAGE_LINE_RE = re.compile(rf"^!\[([^\]]*)\]\({_MD_DEST}{_MD_TITLE}\)\s*$")
+_MD_LINKED_IMAGE_LINE_RE = re.compile(rf"^\[!\[([^\]]*)\]\({_MD_DEST}{_MD_TITLE}\)\]\({_MD_DEST}{_MD_TITLE}\)\s*$")
+_FENCE_OPEN_RE = re.compile(r"^[ ]{0,3}(`{3,}|~{3,})(.*)$")
+
 # Optional indent so nested ``* `` / ``1. `` under a list item are list items,
 # not a paragraph that still contains the literal marker (Bourke “help” cell).
 _MD_UL_RE = re.compile(r"^([ \t]*)[*+-][ \t]+(.*)$")
 _MD_OL_RE = re.compile(r"^([ \t]*)(\d+)[.)][ \t]+(.*)$")
 _MD_BQ_RE = re.compile(r"^[ \t]*>[ \t]?(.*)$")
-_MD_IMAGE_LINE_RE = re.compile(r"^!\[([^\]]*)\]\(([^)]+)\)\s*$")
 _HTML_IMG_RE = re.compile(r"(?is)<img\b[^>]*?/?>")
 _HTML_A_RE = re.compile(r"(?is)<a\b([^>]*)>(.*?)</a>")
 _HTML_A_OR_IMG_TAG_RE = re.compile(r"(?is)</?(?:img|a)\b[^>]*?/?>")
@@ -187,6 +195,30 @@ def flush_ui_idle(ctx: Any | None, *, log_phase: str | None = None) -> None:
         log.info("notebook import %s elapsed_ms=%d", log_phase, _mono_ms(t0))
 
 
+@final
+class _RemoteImageBudget:
+    """Per-import budget for remote image downloads on the UI thread."""
+
+    remaining_count: int
+    deadline: float
+    _logged_exhausted: bool
+
+    def __init__(self, *, max_images: int = _MAX_REMOTE_IMAGES, budget_sec: float = _REMOTE_IMAGE_BUDGET_SEC) -> None:
+        self.remaining_count = max_images
+        self.deadline = time.monotonic() + budget_sec
+        self._logged_exhausted = False
+
+    def allow(self) -> float | None:
+        time_left = self.deadline - time.monotonic()
+        if self.remaining_count <= 0 or time_left <= 0:
+            if not self._logged_exhausted:
+                self._logged_exhausted = True
+                log.info("notebook import remote image budget exhausted")
+            return None
+        self.remaining_count -= 1
+        return min(float(_HTTP_IMAGE_TIMEOUT_SEC), time_left)
+
+
 def _get_para_styles(doc: Any) -> Any | None:
     try:
         return doc.getStyleFamilies().getByName("ParagraphStyles")
@@ -226,7 +258,9 @@ def _apply_no_spellcheck_for_import(doc: Any) -> None:
     para_styles = _get_para_styles(doc)
     if para_styles is None:
         return
-    for style_name in ("Standard", _STYLE_BODY, _STYLE_MD_H1, _STYLE_MD_H2, _STYLE_CELL_HEADING, _STYLE_SECTION_HEADING, _STYLE_OUTPUT, _STYLE_NOTEBOOK_IN):
+    # Cell chrome no longer writes Heading 3 / Heading 4; zxx stays because a raw HTML cell
+    # can still produce them through StarWriter, and File -> Open is a fresh document.
+    for style_name in ("Standard", _STYLE_BODY, _STYLE_MD_H1, _STYLE_MD_H2, "Heading 3", "Heading 4", _STYLE_OUTPUT, _STYLE_NOTEBOOK_IN):
         resolved = _resolve_para_style(doc, style_name)
         if not resolved:
             continue
@@ -353,12 +387,18 @@ def output_para_style(doc: Any) -> str | None:
 
 
 def _doc_body_nonempty(doc: Any) -> bool:
+    """True when the document body already contains visible text or shapes.
+
+    Previously used cursor.gotoStart() + cursor.gotoEnd() + cursor.getString().strip(),
+    which ignored in-flow AS_CHARACTER graphics (getString() skips frames/shapes)
+    causing following blocks to merge into the graphic's paragraph, and had
+    O(document) cost selecting and copying the entire document text on every block.
+    compareRegionStarts(text.getStart(), text.getEnd()) is O(1) and correctly sees
+    in-flow graphics because start != end even when text is empty.
+    """
     try:
         text = doc.getText()
-        cursor = text.createTextCursor()
-        cursor.gotoStart(False)
-        cursor.gotoEnd(True)
-        return bool((cursor.getString() or "").strip())
+        return int(text.compareRegionStarts(text.getStart(), text.getEnd())) != 0
     except Exception:
         return True
 
@@ -395,7 +435,7 @@ def _numbering_kind(name: str) -> str:
     lowered = (name or "").strip().lower()
     if not lowered:
         return "none"
-    if lowered == "outline" or "outline" in lowered:
+    if "outline" in lowered:
         return "outline"
     return "list"
 
@@ -509,7 +549,7 @@ def _clear_para_numbering(cursor: Any) -> None:
         log.debug("notebook import NumberingRules clear failed", exc_info=True)
 
 
-def _append_body_paragraph(doc: Any, content: str, para_style: str | None, *, lead_break: bool, keep_with_next: bool = False) -> None:
+def _append_body_paragraph(doc: Any, content: str, para_style: str | None, *, lead_break: bool) -> None:
     """Append one paragraph to the Writer body (end of document)."""
     if not content and not para_style:
         return
@@ -527,17 +567,15 @@ def _append_body_paragraph(doc: Any, content: str, para_style: str | None, *, le
             cursor.setPropertyValue("ParaStyleName", resolved)
         except Exception:
             log.debug("notebook import ParaStyleName %r not applied", resolved)
-    if keep_with_next:
-        for prop, val in (("ParaKeepTogether", True), ("ParaKeepWithNext", True)):
-            try:
-                cursor.setPropertyValue(prop, val)
-            except Exception:
-                log.debug("notebook import %s not applied", prop, exc_info=True)
     text.insertString(cursor, content, False)
 
 
 def _append_body_text_block(doc: Any, block: str, para_style: str | None, *, lead_break: bool = True) -> None:
-    """Append one paragraph; internal newlines stay in the same block."""
+    """Append one paragraph; internal newlines stay in the same block.
+
+    SwUnoCursorHelper::DocInsertStringSplitCR splits paragraphs only on \\r;
+    \\n is an in-paragraph line break.
+    """
     display, _unused = _prepare_display_text(block)
     if not display:
         return
@@ -690,7 +728,6 @@ def _inline_markdown_to_html(text: str) -> str:
         return "".join(parts)
 
     work = text or ""
-    work = _MD_IMAGE_RE.sub("", work)
 
     def stash_code(match: re.Match[str]) -> str:
         return hold(f"<code>{html_lib.escape(match.group(1))}</code>")
@@ -714,9 +751,9 @@ def _inline_markdown_to_html(text: str) -> str:
         return hold(f'<a href="{href}">{escape_non_placeholders(inner)}</a>')
 
     work = _INLINE_CODE_RE.sub(stash_code, work)
-    work = _MD_LINK_RE.sub(stash_link, work)
     work = _BOLD_RE.sub(stash_bold, work)
     work = _ITALIC_RE.sub(stash_italic, work)
+    work = _MD_LINK_RE.sub(stash_link, work)
     escaped = escape_non_placeholders(work)
 
     def restore(match: re.Match[str]) -> str:
@@ -804,17 +841,21 @@ def _single_ol_start(html: str) -> int | None:
 
 
 def _iter_markdown_blocks(source: str) -> list[tuple[str, Any]]:
-    """Split CommonMark source into ATX headings, lists, quotes, images, paragraphs.
+    """Split CommonMark source into ATX headings, fenced code, lists, quotes, images, paragraphs.
 
-    Not a full CommonMark parser: GFM tables stay as body text. ``#`` → h1,
-    ``##`` and deeper → h2. Nested list markers (indented ``*`` / ``1.``) stay
-    list items. A new ``<ol>`` after a nested list keeps markdown numbering via
-    ``start=N``. Consecutive ``>`` lines are blockquotes (one leading ``>`` stripped).
+    Not a full CommonMark parser: fenced code (``` and ~~~) is supported;
+    GFM tables stay as body text. ``#`` → h1, ``##`` and deeper → h2.
+    Nested list markers (indented ``*`` / ``1.``) stay list items. A new
+    ``<ol>`` after a nested list keeps markdown numbering via ``start=N``.
+    Consecutive ``>`` lines are blockquotes (one leading ``>`` stripped).
     """
     blocks: list[tuple[str, Any]] = []
     para: list[str] = []
     list_items: list[tuple[int, str, int | None, str]] = []
     quote: list[str] = []
+    fence: tuple[str, int] | None = None
+    fence_lines: list[str] = []
+    opener_indent = 0
 
     def flush_para() -> None:
         if para:
@@ -833,6 +874,38 @@ def _iter_markdown_blocks(source: str) -> list[tuple[str, Any]]:
 
     for raw_line in (source or "").splitlines():
         line = raw_line.rstrip()
+        if fence is not None:
+            fence_char, opener_len = fence
+            strip_count = 0
+            while strip_count < 3 and strip_count < len(line) and line[strip_count] == " ":
+                if strip_count >= opener_indent:
+                    break
+                strip_count += 1
+            rem = line[strip_count:].rstrip(" ")
+            if rem and all(c == fence_char for c in rem) and len(rem) >= opener_len:
+                body = "\n".join(fence_lines)
+                if body.strip():
+                    blocks.append(("pre", body))
+                fence = None
+                fence_lines.clear()
+                continue
+            content_strip = 0
+            while content_strip < opener_indent and content_strip < len(line) and line[content_strip] == " ":
+                content_strip += 1
+            fence_lines.append(line[content_strip:])
+            continue
+
+        fence_match = _FENCE_OPEN_RE.match(line)
+        if fence_match:
+            flush_para()
+            flush_list()
+            flush_quote()
+            opener = fence_match.group(1)
+            fence = (opener[0], len(opener))
+            fence_lines = []
+            opener_indent = fence_match.start(1)
+            continue
+
         match = _ATX_HEADING_RE.match(line)
         if match:
             flush_para()
@@ -849,6 +922,13 @@ def _iter_markdown_blocks(source: str) -> list[tuple[str, Any]]:
             flush_list()
             flush_quote()
             blocks.append(("img", (img_line.group(1) or "", img_line.group(2).strip())))
+            continue
+        linked_img = _MD_LINKED_IMAGE_LINE_RE.match(line.strip())
+        if linked_img:
+            flush_para()
+            flush_list()
+            flush_quote()
+            blocks.append(("img", (linked_img.group(1) or "", linked_img.group(2).strip())))
             continue
         ul_match = _MD_UL_RE.match(line)
         if ul_match:
@@ -885,6 +965,10 @@ def _iter_markdown_blocks(source: str) -> list[tuple[str, Any]]:
     flush_para()
     flush_list()
     flush_quote()
+    if fence is not None:
+        body = "\n".join(fence_lines)
+        if body.strip():
+            blocks.append(("pre", body))
     return blocks
 
 
@@ -935,7 +1019,7 @@ def _insert_html_at_body_end(doc: Any, html: str, *, lead_break: bool, exit_list
         return False
 
 
-def _append_markdown_cell(doc: Any, source: str, *, lead_break: bool, notebook_dir: str | None = None, ctx: Any | None = None) -> None:
+def _append_markdown_cell(doc: Any, source: str, *, lead_break: bool, notebook_dir: str | None = None, ctx: Any | None = None, budget: _RemoteImageBudget | None = None) -> None:
     """Markdown cell: ATX headings, lists, bold/italic, ``[text](url)``, images.
 
     HTML ``<img>`` / ``<a>`` become markdown first so mixed cells still render
@@ -960,6 +1044,11 @@ def _append_markdown_cell(doc: Any, source: str, *, lead_break: bool, notebook_d
             _append_body_paragraph(doc, str(payload), _STYLE_MD_H1, lead_break=block_lead)
         elif kind == "h2":
             _append_body_paragraph(doc, str(payload), _STYLE_MD_H2, lead_break=block_lead)
+        elif kind == "pre":
+            # Style must be Text Body, not Preformatted Text or HTML <pre>. _style_is_preformatted
+            # in notebook_runner treats preformatted styles as stdout, so clear_cell_output
+            # would delete the code block on cell re-run. Non-empty Text Body acts as a cell boundary.
+            _append_body_paragraph(doc, str(payload), _STYLE_BODY, lead_break=block_lead)
         elif kind in ("ul", "ol"):
             items = payload if isinstance(payload, list) else [payload]
             html = _list_block_to_html(items)
@@ -989,15 +1078,45 @@ def _append_markdown_cell(doc: Any, source: str, *, lead_break: bool, notebook_d
                     _append_body_paragraph(doc, p_text, _STYLE_BODY, lead_break=block_lead if p_idx == 0 else True)
         elif kind == "img":
             alt, src = payload if isinstance(payload, tuple) else ("", str(payload))
-            if not _embed_markdown_image(doc, str(src), notebook_dir, ctx=ctx):
+            if not _embed_markdown_image(doc, str(src), notebook_dir, ctx=ctx, budget=budget):
                 fallback = alt or src
                 _append_body_paragraph(doc, str(fallback), _STYLE_BODY, lead_break=block_lead)
-        elif _paragraph_needs_html(str(payload)):
-            html = f"<p>{_inline_markdown_to_html(str(payload))}</p>"
-            if not _insert_html_at_body_end(doc, html, lead_break=block_lead):
-                _append_body_paragraph(doc, str(payload), _STYLE_BODY, lead_break=False)
         else:
-            _append_body_paragraph(doc, str(payload), _STYLE_BODY, lead_break=block_lead)
+            p_str = str(payload)
+            if _MD_IMAGE_RE.search(p_str):
+                last_idx = 0
+                lead = block_lead
+                for match in _MD_IMAGE_RE.finditer(p_str):
+                    text_piece = p_str[last_idx : match.start()]
+                    if text_piece.strip():
+                        if _paragraph_needs_html(text_piece):
+                            html = f"<p>{_inline_markdown_to_html(text_piece)}</p>"
+                            if not _insert_html_at_body_end(doc, html, lead_break=lead):
+                                _append_body_paragraph(doc, text_piece, _STYLE_BODY, lead_break=False)
+                        else:
+                            _append_body_paragraph(doc, text_piece, _STYLE_BODY, lead_break=lead)
+                        lead = True
+                    alt = match.group(1) or ""
+                    dest = match.group(2)
+                    if not _embed_markdown_image(doc, dest, notebook_dir, ctx=ctx, budget=budget):
+                        fallback = alt or dest
+                        _append_body_paragraph(doc, str(fallback), _STYLE_BODY, lead_break=lead)
+                    lead = True
+                    last_idx = match.end()
+                tail_piece = p_str[last_idx:]
+                if tail_piece.strip():
+                    if _paragraph_needs_html(tail_piece):
+                        html = f"<p>{_inline_markdown_to_html(tail_piece)}</p>"
+                        if not _insert_html_at_body_end(doc, html, lead_break=lead):
+                            _append_body_paragraph(doc, tail_piece, _STYLE_BODY, lead_break=False)
+                    else:
+                        _append_body_paragraph(doc, tail_piece, _STYLE_BODY, lead_break=lead)
+            elif _paragraph_needs_html(p_str):
+                html = f"<p>{_inline_markdown_to_html(p_str)}</p>"
+                if not _insert_html_at_body_end(doc, html, lead_break=block_lead):
+                    _append_body_paragraph(doc, p_str, _STYLE_BODY, lead_break=False)
+            else:
+                _append_body_paragraph(doc, p_str, _STYLE_BODY, lead_break=block_lead)
 
 
 # ---------------------------------------------------------------------------
@@ -1038,7 +1157,7 @@ def _jpeg_pixel_size(raw: bytes) -> tuple[int, int] | None:
 def _svg_pixel_size(raw: bytes) -> tuple[int, int] | None:
     """Read width/height or viewBox so SVG badges are not stretched to the page cap."""
     text = raw.decode("utf-8", errors="ignore")[:4000]
-    vb = re.search(r"viewBox\s*=\s*[\"']?\s*[-0-9.]+\s+[-0-9.]+\s+([0-9.]+)\s+([0-9.]+)", text, flags=re.IGNORECASE)
+    vb = re.search(r"viewBox\s*=\s*[\"']?\s*[-0-9.]+\s*[, \t]\s*[-0-9.]+\s*[, \t]\s*([0-9.]+)\s*[, \t]\s*([0-9.]+)", text, flags=re.IGNORECASE)
     if vb:
         w, h = float(vb.group(1)), float(vb.group(2))
         if w >= 1 and h >= 1:
@@ -1177,7 +1296,7 @@ def _notebook_image_payload(data: dict[str, Any]) -> tuple[str, str] | None:
 
 def _decode_notebook_image(b64_data: str) -> bytes | None:
     b64_data = _coerce_notebook_text(b64_data)
-    if len(b64_data) > _MAX_IMAGE_DECODE_BYTES:
+    if (len(b64_data) * 3) // 4 > _MAX_IMAGE_DECODE_BYTES:
         log.warning("notebook import skip image decode size=%d max=%d", len(b64_data), _MAX_IMAGE_DECODE_BYTES)
         return None
     try:
@@ -1251,21 +1370,68 @@ def _split_markdown_image_src(raw: str) -> str:
     src = (raw or "").strip()
     if not src:
         return ""
-    if src[0] in "\"'":
-        return src
-    return src.split()[0].strip("<>")
+    if src.startswith("<"):
+        end_idx = src.find(">")
+        if end_idx != -1:
+            return src[1:end_idx]
+    if src[0] in ('"', "'"):
+        closer = src[0]
+        end_idx = src.find(closer, 1)
+        if end_idx != -1:
+            return src[1:end_idx]
+        token = src.split()[0].strip("\"'")
+        if token.startswith("<") and token.endswith(">"):
+            token = token[1:-1]
+        return token
+    token = src.split()[0]
+    if token.startswith("<") and token.endswith(">"):
+        token = token[1:-1]
+    return token.strip("\"'")
 
 
-def _fetch_remote_image(url: str) -> str | None:
-    """Download a reachable http(s) image to a temp file; None when not reachable."""
+def _file_url_to_local_path(src: str) -> str:
+    """Convert a file: URL to a local filesystem path with percent-decoding."""
+    from urllib.parse import unquote, urlparse
+    from urllib.request import url2pathname
+    from plugin.doc.text_helpers import normalize_file_url
+
+    norm = normalize_file_url(src)
     try:
-        from urllib.request import Request, urlopen
+        import uno
 
+        return str(uno.fileUrlToSystemPath(norm))
+    except Exception:
+        log.debug("uno.fileUrlToSystemPath failed for %s", norm, exc_info=True)
+        return url2pathname(unquote(urlparse(norm).path))
+
+
+def _fetch_remote_image(url: str, *, timeout: float) -> str | None:
+    """Download a reachable http(s) image to a temp file; None when not reachable or budget exceeded."""
+    import socket
+    from urllib.request import Request, urlopen
+
+    t0 = time.monotonic()
+    sock_timeout = min(1.0, timeout)
+    try:
         req = Request(url, headers={"User-Agent": "WriterAgent-notebook-import"})
-        with urlopen(req, timeout=_HTTP_IMAGE_TIMEOUT_SEC) as resp:
-            data = resp.read(_MAX_IMAGE_DECODE_BYTES + 1)
-        if not data or len(data) > _MAX_IMAGE_DECODE_BYTES:
+        chunks: list[bytes] = []
+        total_bytes = 0
+        with urlopen(req, timeout=sock_timeout) as resp:
+            while True:
+                if time.monotonic() - t0 > timeout:
+                    return None
+                chunk = resp.read(64 * 1024)
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total_bytes += len(chunk)
+                if total_bytes > _MAX_IMAGE_DECODE_BYTES:
+                    return None
+                if time.monotonic() - t0 > timeout:
+                    return None
+        if not chunks or total_bytes == 0:
             return None
+        data = b"".join(chunks)
         suffix = ".png"
         lower = url.lower().split("?", 1)[0]
         for ext in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"):
@@ -1278,92 +1444,71 @@ def _fetch_remote_image(url: str) -> str | None:
         finally:
             tmp.close()
         return tmp.name
+    except (TimeoutError, socket.timeout):
+        log.debug("notebook markdown image timeout: %s", url)
+        return None
     except Exception:
         log.debug("notebook markdown image URL not reachable: %s", url, exc_info=True)
         return None
 
 
-def _resolve_markdown_image_path(src: str, notebook_dir: str | None) -> str | None:
-    """Return a local filesystem path when *src* is a reachable image."""
-    src = _split_markdown_image_src(src)
-    if not src:
-        return None
-    if src.startswith("file:"):
-        try:
-            import uno
+def _resolve_markdown_image_path(src: str, notebook_dir: str | None, *, budget: _RemoteImageBudget | None = None) -> tuple[str, bool] | None:
+    """Return (path, is_temp) when *src* is a reachable image; None on miss."""
+    from urllib.parse import unquote
 
-            src = str(uno.fileUrlToSystemPath(src))
-        except Exception:
-            src = src.replace("file://", "", 1)
-    if src.startswith("http://") or src.startswith("https://"):
-        return _fetch_remote_image(src)
-    if os.path.isfile(src):
-        return src
+    cleaned = _split_markdown_image_src(src)
+    if not cleaned:
+        return None
+    if cleaned.startswith("file:"):
+        path = _file_url_to_local_path(cleaned)
+        if os.path.isfile(path):
+            return (path, False)
+        return None
+    if cleaned.startswith("http://") or cleaned.startswith("https://"):
+        if budget is not None:
+            timeout = budget.allow()
+            if timeout is None:
+                return None
+        else:
+            timeout = float(_HTTP_IMAGE_TIMEOUT_SEC)
+        tmp = _fetch_remote_image(cleaned, timeout=timeout)
+        if tmp is not None:
+            return (tmp, True)
+        return None
+    unquoted = unquote(cleaned)
+    if os.path.isfile(unquoted):
+        return (unquoted, False)
     if notebook_dir:
-        joined = os.path.normpath(os.path.join(notebook_dir, src))
+        joined = os.path.normpath(os.path.join(notebook_dir, unquoted))
         if os.path.isfile(joined):
-            return joined
+            return (joined, False)
     return None
 
 
-def _embed_markdown_image(doc: Any, src: str, notebook_dir: str | None, *, ctx: Any | None = None) -> bool:
-    path = _resolve_markdown_image_path(src, notebook_dir)
-    if not path:
+def _embed_markdown_image(doc: Any, src: str, notebook_dir: str | None, *, ctx: Any | None = None, budget: _RemoteImageBudget | None = None) -> bool:
+    resolved = _resolve_markdown_image_path(src, notebook_dir, budget=budget)
+    if resolved is None:
         return False
+    path, is_temp = resolved
     try:
         with open(path, "rb") as fh:
             raw = fh.read(_MAX_IMAGE_DECODE_BYTES + 1)
         if not raw or len(raw) > _MAX_IMAGE_DECODE_BYTES:
             return False
         mime = _image_mime_from_bytes(raw, path)
-        _append_paragraph_break_at_end(doc) if _doc_body_nonempty(doc) else None
+        if _doc_body_nonempty(doc):
+            _append_paragraph_break_at_end(doc)
         return _insert_image_in_flow(doc, raw=raw, mime=mime, images_before=0, ctx=ctx)
     except Exception:
         log.debug("notebook markdown image embed failed path=%s", path, exc_info=True)
         return False
     finally:
-        if src.startswith("http://") or src.startswith("https://"):
+        if is_temp:
             try:
-                if path and path.startswith(tempfile.gettempdir()) and os.path.exists(path):
+                if os.path.exists(path):
                     os.unlink(path)
             except OSError:
                 pass
-
-
-def _outputs_contain_image(outputs: list[Any]) -> bool:
-    for output in outputs or []:
-        output_type = getattr(output, "output_type", None) or output.get("output_type", "")
-        if output_type not in ("display_data", "execute_result"):
-            continue
-        data = getattr(output, "data", None) or output.get("data", {})
-        if isinstance(data, dict) and _notebook_image_payload(data) is not None:
-            return True
-    return False
-
-
-def _import_image_outputs_in_flow(doc: Any, outputs: list[Any], cell_index: int, *, images_before: int, ctx: Any | None = None) -> int:
-    """Insert image/png, jpeg, webp, or gif outputs in the document body. Returns number of images added."""
-    added = 0
-    out_list = outputs or []
-    if len(out_list) > _MAX_OUTPUTS_PER_CELL:
-        out_list = out_list[:_MAX_OUTPUTS_PER_CELL]
-    for output in out_list:
-        output_type = getattr(output, "output_type", None) or output.get("output_type", "")
-        if output_type not in ("display_data", "execute_result"):
-            continue
-        data = getattr(output, "data", None) or output.get("data", {})
-        if not isinstance(data, dict):
-            continue
-        payload = _notebook_image_payload(data)
-        if payload is None:
-            continue
-        mime, b64 = payload
-        raw = _decode_notebook_image(b64)
-        if raw and _insert_image_in_flow(doc, raw=raw, mime=mime, images_before=images_before + added, ctx=ctx):
-            added += 1
-        else:
-            log.debug("notebook import cell=%d skip image mime=%s", cell_index, mime)
-    return added
 
 
 # ---------------------------------------------------------------------------
@@ -1372,7 +1517,12 @@ def _import_image_outputs_in_flow(doc: Any, outputs: list[Any], cell_index: int,
 
 
 def _strip_ansi(text: str) -> str:
-    return re.sub(r"\x1b\[[0-9;]*m", "", text)
+    return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text)
+
+
+def _collapse_cr(text: str) -> str:
+    """Split on \\n, keep segment.split('\\r')[-1] for each line, join with \\n."""
+    return "\n".join(line.split("\r")[-1] for line in text.split("\n"))
 
 
 def _mime_plain(data: Any) -> str:
@@ -1381,8 +1531,11 @@ def _mime_plain(data: Any) -> str:
     if "text/plain" in data:
         plain = data["text/plain"]
         return plain if isinstance(plain, str) else "".join(plain)
+    if "text/markdown" in data:
+        md = data["text/markdown"]
+        return md if isinstance(md, str) else "".join(md)
     for key in sorted(data.keys()):
-        if key.startswith("text/"):
+        if key.startswith("text/") and key not in ("text/html", "text/latex"):
             val = data[key]
             return val if isinstance(val, str) else "".join(val)
     return ""
@@ -1397,12 +1550,18 @@ def format_output_text(output: Any, execution_count: Any | None = None) -> str:
     output_type = getattr(output, "output_type", None) or output.get("output_type", "")
     if output_type == "stream":
         text = _coerce_notebook_text(getattr(output, "text", None) or output.get("text", ""))
-        return text
+        return _collapse_cr(_strip_ansi(text))
     if output_type == "error":
         tb = getattr(output, "traceback", None) or output.get("traceback", "")
         if isinstance(tb, list):
             tb = "\n".join(tb)
-        return _strip_ansi(str(tb))
+        tb_str = str(tb)
+        if not tb_str.strip():
+            ename = str(getattr(output, "ename", None) or output.get("ename", "") or "").strip()
+            evalue = str(getattr(output, "evalue", None) or output.get("evalue", "") or "").strip()
+            parts = [p for p in (ename, evalue) if p]
+            tb_str = ": ".join(parts)
+        return _collapse_cr(_strip_ansi(tb_str))
     if output_type in ("execute_result", "display_data"):
         data = getattr(output, "data", None) or output.get("data", {})
         if isinstance(data, dict):
@@ -1410,9 +1569,10 @@ def format_output_text(output: Any, execution_count: Any | None = None) -> str:
                 return ""
             plain = _mime_plain(data)
             if plain:
+                plain_clean = _collapse_cr(_strip_ansi(plain))
                 if output_type == "execute_result" and execution_count is not None:
-                    return f"Out [{execution_count}]: {plain}"
-                return plain
+                    return f"Out [{execution_count}]: {plain_clean}"
+                return plain_clean
             mime_types = ", ".join(sorted(data.keys()))
             return f"[non-text output: {mime_types}]"
     return str(output)
@@ -1421,6 +1581,16 @@ def format_output_text(output: Any, execution_count: Any | None = None) -> str:
 def format_all_outputs(outputs: list[Any]) -> str:
     parts = [format_output_text(o) for o in (outputs or [])]
     return "\n\n".join(p for p in parts if p.strip())
+
+
+def _output_image_payload(output: Any) -> tuple[str, str] | None:
+    output_type = getattr(output, "output_type", None) or output.get("output_type", "")
+    if output_type not in ("display_data", "execute_result"):
+        return None
+    data = getattr(output, "data", None) or output.get("data", {})
+    if isinstance(data, dict):
+        return _notebook_image_payload(data)
+    return None
 
 
 def _format_outputs_for_body(outputs: list[Any], cell_index: int, execution_count: Any | None = None) -> tuple[list[tuple[str, Any]], int]:
@@ -1432,7 +1602,7 @@ def _format_outputs_for_body(outputs: list[Any], cell_index: int, execution_coun
     ``_MAX_OUTPUTS_PER_CELL``.
 
     Returns ``(segments, text_output_count)``. Each segment is
-    ``("text", joined_str)`` or ``("image", output)``. ``text_output_count`` is
+    ``("text", joined_str)`` or ``("image", (mime, b64))``. ``text_output_count`` is
     the number of outputs that produced non-empty text (same meaning as the
     old ``stats["outputs"]`` increment, without a second ``format_output_text``).
     """
@@ -1450,13 +1620,15 @@ def _format_outputs_for_body(outputs: list[Any], cell_index: int, execution_coun
             text_parts.clear()
 
     for output in out_list:
-        text = format_output_text(output, execution_count)
-        if text.strip():
-            text_parts.append(text)
-            text_count += 1
-        if _outputs_contain_image([output]):
+        payload = _output_image_payload(output)
+        if payload is not None:
             flush_text()
-            segments.append(("image", output))
+            segments.append(("image", payload))
+        else:
+            text = format_output_text(output, execution_count)
+            if text.strip():
+                text_parts.append(text)
+                text_count += 1
     flush_text()
     return segments, text_count
 
@@ -1497,9 +1669,21 @@ def import_ipynb_to_writer(doc: Any, path: str, ctx: Any | None = None) -> dict[
     notebook_in = _ensure_notebook_import_styles(doc)
     # Re-import replaces the whole registry (merge UX is Phase 3).
     registry_state = NotebookDocState(source_path=path)
+    budget = _RemoteImageBudget()
     cells_t0 = time.monotonic()
     with _batch_document_updates(doc):
-        _import_cells(doc, nb, stats, cell_count, run_t0, ctx=ctx, notebook_in=notebook_in, registry_state=registry_state, notebook_dir=os.path.dirname(os.path.abspath(path)) if path else None)
+        _import_cells(
+            doc,
+            nb,
+            stats,
+            cell_count,
+            run_t0,
+            ctx=ctx,
+            notebook_in=notebook_in,
+            registry_state=registry_state,
+            notebook_dir=os.path.dirname(os.path.abspath(path)) if path else None,
+            budget=budget,
+        )
         _scroll_view_to_start(doc)
     log.info("notebook import cells_done elapsed_ms=%d cells=%d", _mono_ms(cells_t0), stats["cells"])
     if registry_state.code_cells:
@@ -1523,7 +1707,20 @@ def import_ipynb_to_writer(doc: Any, path: str, ctx: Any | None = None) -> dict[
     return stats
 
 
-def _import_cells(doc: Any, nb: Any, stats: dict[str, int], cell_count: int, run_t0: float, ctx: Any | None = None, *, notebook_in: str | None = None, registry_state: NotebookDocState | None = None, notebook_dir: str | None = None) -> None:
+def _import_cells(
+    doc: Any,
+    nb: Any,
+    stats: dict[str, int],
+    cell_count: int,
+    run_t0: float,
+    ctx: Any | None = None,
+    *,
+    notebook_in: str | None = None,
+    registry_state: NotebookDocState | None = None,
+    notebook_dir: str | None = None,
+    budget: _RemoteImageBudget | None = None,
+) -> None:
+    output_style = output_para_style(doc)
     first_cell = True
     for idx, cell in enumerate(nb.cells):
         cell_t0 = time.monotonic()
@@ -1540,13 +1737,13 @@ def _import_cells(doc: Any, nb: Any, stats: dict[str, int], cell_count: int, run
 
         if cell_type == "markdown":
             stats["markdown"] += 1
-            _append_markdown_cell(doc, source, lead_break=lead, notebook_dir=notebook_dir, ctx=ctx)
+            _append_markdown_cell(doc, source, lead_break=lead, notebook_dir=notebook_dir, ctx=ctx, budget=budget)
         elif cell_type == "code":
             # Previous markdown (Heading 2 keep-with-next, HTML lists) must not
             # glue onto this cell's unsplittable field.
             _unglue_last_paragraph(doc)
             title = _cell_heading(idx, cell_type, ec)
-            _append_body_paragraph(doc, title, notebook_in, lead_break=lead, keep_with_next=False)
+            _append_body_paragraph(doc, title, notebook_in, lead_break=lead)
             # Style-level KeepWithNext is missing on some LO builds; pin the
             # gutter paragraph so In+field is not one unsplittable brick.
             try:
@@ -1588,11 +1785,15 @@ def _import_cells(doc: Any, nb: Any, stats: dict[str, int], cell_count: int, run
             for kind, payload in segments:
                 if kind == "text":
                     if str(payload).strip():
-                        _append_body_text_block(doc, str(payload), output_para_style(doc), lead_break=True)
+                        _append_body_text_block(doc, str(payload), output_style, lead_break=True)
                 else:
                     _append_paragraph_break_at_end(doc)
-                    images_added = _import_image_outputs_in_flow(doc, [payload], idx, images_before=stats["images"], ctx=ctx)
-                    stats["images"] += images_added
+                    mime, b64 = payload
+                    raw = _decode_notebook_image(b64)
+                    if raw and _insert_image_in_flow(doc, raw=raw, mime=mime, images_before=stats["images"], ctx=ctx):
+                        stats["images"] += 1
+                    else:
+                        log.debug("notebook import cell=%d skip image mime=%s", idx, mime)
         else:
             stats["raw"] += 1
             _append_body_text_block(doc, source, _STYLE_BODY, lead_break=lead)

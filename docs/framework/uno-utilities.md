@@ -203,12 +203,14 @@ Shared across Writer / Calc / Draw / Impress image and shape tools. **Not** inse
 | `safe_try_method` | Call a method if present; log and continue. |
 | `parse_color_to_uno_int` | Hex / name / `rgb()` / int / tuple → 24-bit UNO RGB. |
 | `apply_character_properties` | Batch Char* on a shape/cell/style. Italic sets `CharPosture` to `FontSlant.ITALIC` (IDL value 2). Integer 1 is `OBLIQUE`. |
-| `mm_to_units` / `px_to_units` / `units_to_px` / `mm_to_px` | 1/100 mm ↔ 96-DPI px. |
+| `mm_to_unit` / `mm_to_units` / `px_to_units` / `units_to_px` / `mm_to_px` | 1/100 mm ↔ 96-DPI px. |
 | `px_to_display_units` / `GENERATED_IMAGE_MAX_DISPLAY_MM` | Px → 1/100 mm, then cap longer edge at 135mm (generate resolution ≠ page size). |
 | `is_graphic_object` / `selected_graphic_object` / `graphic_objects_in_selection` | Graphic detection and selection. |
 | `list_graphic_objects` / `get_graphic_object_by_name` / `graphic_from_object` | Name lookup across Writer text + Draw pages. |
 | `get_active_draw_page` / `remove_graphic_from_draw_pages` | Draw/Impress page helpers. |
 | `SHAPE_TOOL_UNO_SERVICES` | Union of Writer/Calc/Draw/Impress services for shared tool names. |
+
+`mm_to_unit` / `mm_to_units` round to the nearest 1/100 mm (`int(round(mm * 100))`). They used to truncate with `int(mm) * 100`, so 12.7 mm became 12 mm.
 
 `image_tools.get_type_doc`, `_has_uno_property`, `_safe_set_property`, `_mm_to_units`, `_selection_graphic_object` are **already** one-line delegates into this module.
 
@@ -469,7 +471,7 @@ Unifying `detect_doc_type` onto `doc_type_label_for_enum` would change unknown �
 
 **Notebook markdown images**
 
-`writer_importer._resolve_markdown_image_path`: `uno.fileUrlToSystemPath` then naive `src.replace("file://", "", 1)` on failure. That fallback is not equivalent to `_system_path_from_url` (no `file:/` repair, no unquote).
+`writer_importer._resolve_markdown_image_path` resolves `file:` URLs via `_file_url_to_local_path`: `normalize_file_url` (`text_helpers`), then `uno.fileUrlToSystemPath`, falling back on `urllib.request.url2pathname(urllib.parse.unquote(urlparse(src).path))`.
 
 ### 3.5 `uno_context.py` scope creep
 
