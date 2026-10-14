@@ -83,7 +83,7 @@ sequenceDiagram
     C->>C: ensure_last_user_in_tail (Hermes issue 10896) and re-check keep
     C->>C: if snap None and not stubbed, pressure-stub, re-walk, and re-snap
     C->>C: serialize_for_summary (tool stubs over 200 chars + assistant tool_calls)
-    C->>LLM: request_with_tools(summarizer, stream=False, stop_checker)
+    C->>LLM: one or more request_with_tools calls, oldest chunk first, each sized to the window
     LLM-->>C: summary text
     C->>C: session.compaction = CompactionState
     W->>UI: STATUS "Thinking..."
@@ -109,7 +109,7 @@ sequenceDiagram
 3. **Calculate ceiling tail budget:** Determine maximum allowable tail tokens (`keep_recent_tokens`) by subtracting system/document tokens, tool tokens, summarizer budget, and `GEN_RESERVE` from `window`.
 4. **Locate boundary cut:** Perform a reverse ceiling walk to find `cut_index` where `tail_sum <= keep_tokens`. Snap forward to preserve tool-call/result integrity. Snap backward if necessary to guarantee the last real user turn is in the tail (`ensure_last_user_in_tail`).
 5. **Apply tail pressure if needed:** If the newest assistant+tools group exceeds budget on tight windows, stub those tool bodies in the view (`pressure_stub_newest_tool_group`) and re-walk.
-6. **Generate summary:** Serialize the uncompacted slice (`messages[prev_kept:new_cut]`), stubbing tool result bodies > 200 chars, and issue a single non-streaming LLM request with temporal anchoring.
+6. **Generate summary:** Serialize the uncompacted slice (`messages[prev_kept:new_cut]`), never `messages[0]` (originals, stubs are view-only), stubbing tool result bodies > 200 chars. The slice is summarized in a single request when it fits, otherwise oldest-first chunks whose request tokens plus `max_out` plus `gen_reserve` fit the window, with a single oversized turn truncated from the end of its serialized line.
 7. **Construct and verify model view:** Build the view with live system message, summary user/assistant pair, and verbatim tail. If `after > window - GEN_RESERVE`, revert and fail safely.
 8. **Cache state:** Store `CompactionState` on `session.compaction` so subsequent rounds and turns reuse the summary.
 
@@ -222,6 +222,8 @@ On small contexts (4k), exact fill of `n_ctx` causes generation overflow or Olla
 
 - **Summarizer Input:** `serialize_for_summary(messages)` stubs older `role=tool` responses > 200 chars into `[tool_name] (N chars)` and formats assistant tool calls as `name(args)` capped at 4000 characters.
 - **View-Only Tail Pressure:** `pressure_stub_newest_tool_group` stubs oversized tool responses in the newest assistant+tools group *only in the model view*. `session.messages` retains full output.
+
+When summarizing, the slice is processed in one request when it fits, otherwise oldest-first chunks whose request tokens plus `max_out` plus `gen_reserve` fit the window, rolling the summary forward. If a single turn is oversized, it is truncated from the end of its serialized line with `\n[turn truncated to fit summarizer]`. A restarted session still reloads raw SQLite rows and re-summarizes without persisting `CompactionState`; this bound is what keeps that first summarizer call from overflowing on a 4k/8k window.
 
 ### 10. Overflow Retry Loop vs. Process Death
 

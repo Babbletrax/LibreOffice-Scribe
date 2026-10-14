@@ -68,6 +68,7 @@ PRUNE_MIN_CHARS = 200
 MAX_TOOL_CALL_ARGS_CHARS = 4000  # serialize_for_summary assistant tool_calls cap
 DOCUMENT_MARKERS = ("[DOCUMENT CONTENT]", "[END DOCUMENT]")
 _SUMMARY_TRUNCATION_MARKER = "\n\n[Compaction summary truncated to fit budget]"
+_SUMMARIZER_TURN_TRUNCATION_MARKER = "\n[turn truncated to fit summarizer]"
 
 # Process death is display-only (issue #570). Compact-and-retry on a dead
 # llama-server is worse than today's overflow sentence.
@@ -583,14 +584,7 @@ def _strip_document_span(text: str) -> str:
     return text[:start].strip()
 
 
-def serialize_for_summary(messages: list[dict[str, Any]]) -> str:
-    """ROLE: text lines. Stub role=tool bodies > PRUNE_MIN_CHARS. Session unchanged.
-
-    Prune idea from Hermes ``_PRUNE_MIN_CHARS`` / old-tool stub
-    (``context_compressor.py:661``). Not ``_prune_old_tool_results`` or
-    SessionDB archive.
-    https://github.com/NousResearch/hermes-agent/blob/v2026.9.7/agent/context_compressor.py#L661
-    """
+def _summary_lines(messages: list[dict[str, Any]]) -> list[str]:
     lines = []
     for i, msg in enumerate(messages):
         role = msg.get("role") or ""
@@ -607,7 +601,18 @@ def serialize_for_summary(messages: list[dict[str, Any]]) -> str:
         if n_aud:
             text = (text + " [audio omitted]").strip()
         lines.append("%s: %s" % (role.upper(), text))
-    return "\n".join(lines)
+    return lines
+
+
+def serialize_for_summary(messages: list[dict[str, Any]]) -> str:
+    """ROLE: text lines. Stub role=tool bodies > PRUNE_MIN_CHARS. Session unchanged.
+
+    Prune idea from Hermes ``_PRUNE_MIN_CHARS`` / old-tool stub
+    (``context_compressor.py:661``). Not ``_prune_old_tool_results`` or
+    SessionDB archive.
+    https://github.com/NousResearch/hermes-agent/blob/v2026.9.7/agent/context_compressor.py#L661
+    """
+    return "\n".join(_summary_lines(messages))
 
 
 def summary_pair(summary: str, *, omit_ack: bool = False) -> list[dict[str, Any]]:
@@ -850,6 +855,202 @@ def _choose_cut(messages: list[dict[str, Any]], keep: int, prev_kept: int) -> tu
     return new_cut, stubbed_ids
 
 
+def _summarizer_user_body(conversation_text: str, previous_summary: str) -> str:
+    temporal = _temporal_anchoring_rule()
+    if previous_summary:
+        return (
+            "<previous-summary>\n" + previous_summary + "\n</previous-summary>\n\n"
+            + "<conversation>\n" + conversation_text + "\n</conversation>\n\n"
+            + UPDATE_SUMMARIZATION_PROMPT + temporal
+        )
+    return (
+        "<conversation>\n" + conversation_text + "\n</conversation>\n\n"
+        + SUMMARIZATION_PROMPT + temporal
+    )
+
+
+def _summarizer_request_tokens(user_body: str, max_out: int) -> int:
+    return (
+        estimate_message_tokens({"role": "system", "content": SUMMARIZATION_SYSTEM_PROMPT})
+        + estimate_tokens_rough(user_body)
+        + max_out
+    )
+
+
+def _summarizer_request_fits(user_body: str, *, window: int, max_out: int) -> bool:
+    return _summarizer_request_tokens(user_body, max_out) + gen_reserve(window) <= window
+
+
+def _truncate_summary_line(
+    line: str,
+    *,
+    window: int,
+    max_out: int,
+    previous_summary: str,
+) -> str | None:
+    if not _summarizer_request_fits(
+        _summarizer_user_body("", previous_summary),
+        window=window,
+        max_out=max_out,
+    ):
+        return None
+    cur = line
+    while len(cur) > 32:
+        cur = cur[:max(32, len(cur) * 3 // 4)]
+        candidate = cur + _SUMMARIZER_TURN_TRUNCATION_MARKER
+        if _summarizer_request_fits(
+            _summarizer_user_body(candidate, previous_summary),
+            window=window,
+            max_out=max_out,
+        ):
+            return candidate
+    return None
+
+
+def _next_summary_chunk(
+    lines: list[str],
+    start: int,
+    *,
+    window: int,
+    max_out: int,
+    previous_summary: str,
+) -> tuple[str, int] | None:
+    if start >= len(lines):
+        return None
+    if not _summarizer_request_fits(
+        _summarizer_user_body("", previous_summary),
+        window=window,
+        max_out=max_out,
+    ):
+        return None
+
+    first_line = lines[start]
+    if not _summarizer_request_fits(
+        _summarizer_user_body(first_line, previous_summary),
+        window=window,
+        max_out=max_out,
+    ):
+        truncated = _truncate_summary_line(
+            first_line,
+            window=window,
+            max_out=max_out,
+            previous_summary=previous_summary,
+        )
+        if truncated is None:
+            return None
+        return truncated, start + 1
+
+    end = start + 1
+    while end < len(lines):
+        candidate_text = "\n".join(lines[start:end + 1])
+        if _summarizer_request_fits(
+            _summarizer_user_body(candidate_text, previous_summary),
+            window=window,
+            max_out=max_out,
+        ):
+            end += 1
+        else:
+            break
+
+    return "\n".join(lines[start:end]), end
+
+
+def _cap_running_summary(summary: str, window: int) -> str:
+    summary = cap_summary(summary, summary_char_cap(window))
+    budget = _summary_budget(window)
+    while estimate_tokens(summary_pair(summary)) > budget and len(summary) > 32:
+        summary = cap_summary(summary, max(32, len(summary) * 3 // 4))
+    return summary
+
+
+class _SummarizeResult(tuple[Any, ...]):
+    """(summary, reason) 2-tuple carrying chunks count."""
+
+    summary: str | None
+    reason: str
+    chunks: int
+
+    def __new__(cls, summary: str | None, reason: str, chunks: int = 0) -> _SummarizeResult:
+        obj = super().__new__(cls, (summary, reason))
+        obj.summary = summary
+        obj.reason = reason
+        obj.chunks = chunks
+        return obj
+
+
+def _summarize_bounded(
+    client: Any,
+    slice_messages: list[dict[str, Any]],
+    *,
+    window: int,
+    max_out: int,
+    previous_summary: str,
+    stop_checker: Callable[[], bool] | None,
+    session: Any,
+    messages: list[dict[str, Any]],
+) -> _SummarizeResult:
+    lines = _summary_lines(slice_messages)
+    if not lines:
+        return _SummarizeResult(None, "failed", 0)
+
+    running = previous_summary
+    idx = 0
+    chunks = 0
+    has_summary = False
+
+    while idx < len(lines):
+        if stop_checker and stop_checker():
+            return _SummarizeResult(None, "aborted", chunks)
+        if getattr(session, "messages", None) is not messages:
+            return _SummarizeResult(None, "aborted", chunks)
+
+        next_chunk = _next_summary_chunk(
+            lines,
+            idx,
+            window=window,
+            max_out=max_out,
+            previous_summary=running,
+        )
+        if next_chunk is None:
+            return _SummarizeResult(None, "failed", chunks)
+
+        chunk_text, next_idx = next_chunk
+        user_body = _summarizer_user_body(chunk_text, running)
+
+        try:
+            result = client.request_with_tools(
+                [
+                    {"role": "system", "content": SUMMARIZATION_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_body},
+                ],
+                max_tokens=max_out,
+                tools=None,
+                stream=False,
+                stop_checker=stop_checker,
+                prepend_dev_build_system_prefix=False,
+            )
+        except Exception:
+            log.exception("Compaction failed")
+            return _SummarizeResult(None, "failed", chunks)
+
+        chunks += 1
+
+        if stop_checker and stop_checker():
+            return _SummarizeResult(None, "aborted", chunks)
+
+        content = (result or {}).get("content") or ""
+        if not content.strip():
+            return _SummarizeResult(None, "failed", chunks)
+
+        running = _cap_running_summary(content, window)
+        has_summary = True
+        idx = next_idx
+
+    if not has_summary:
+        return _SummarizeResult(None, "failed", chunks)
+    return _SummarizeResult(running, "ok", chunks)
+
+
 def compact_session(
     session: Any,
     client: Any,
@@ -900,57 +1101,33 @@ def compact_session(
 
     # NEVER messages[0]; originals (stubs are view-only / serialize-only).
     slice_to_summarize = messages[prev_kept:new_cut]
-    text = serialize_for_summary(slice_to_summarize)
 
     if status_callback:
         status_callback("Compacting conversation...")
-
-    if stop_checker and stop_checker():
-        return CompactResult(False, "aborted", before, before)
-
-    temporal = _temporal_anchoring_rule()
-    if state is not None and state.summary:
-        user_body = (
-            "<previous-summary>\n" + state.summary + "\n</previous-summary>\n\n"
-            + "<conversation>\n" + text + "\n</conversation>\n\n"
-            + UPDATE_SUMMARIZATION_PROMPT + temporal
-        )
-    else:
-        user_body = (
-            "<conversation>\n" + text + "\n</conversation>\n\n"
-            + SUMMARIZATION_PROMPT + temporal
-        )
 
     budget = _summary_budget(window)
     max_out = budget
     if max_tokens is not None and max_tokens > 0:
         max_out = min(max_out, max_tokens)
-    try:
-        result = client.request_with_tools(
-            [
-                {"role": "system", "content": SUMMARIZATION_SYSTEM_PROMPT},
-                {"role": "user", "content": user_body},
-            ],
-            max_tokens=max_out,
-            tools=None,
-            stream=False,
-            stop_checker=stop_checker,
-            prepend_dev_build_system_prefix=False,
-        )
-    except Exception:
-        log.exception("Compaction failed")
-        return CompactResult(False, "failed", before, before)
 
-    if stop_checker and stop_checker():
-        return CompactResult(False, "aborted", before, before)
-
-    summary = (result or {}).get("content") or ""
-    if not summary.strip():
-        return CompactResult(False, "failed", before, before)
-    summary = cap_summary(summary, summary_char_cap(window))
-    # Pair (user summary + dummy ack) must itself fit in _summary_budget.
-    while estimate_tokens(summary_pair(summary)) > budget and len(summary) > 32:
-        summary = cap_summary(summary, max(32, len(summary) * 3 // 4))
+    previous = state.summary if state is not None and state.summary else ""
+    # Bugfix: The slice was sent in full with only max_tokens capped, so on force=True
+    # or a reloaded history the summarizer prompt itself overflowed, compact_session
+    # returned "failed", and should_retry_overflow stopped retrying. Chunks keep each
+    # request inside window - gen_reserve.
+    sum_res = _summarize_bounded(
+        client,
+        slice_to_summarize,
+        window=window,
+        max_out=max_out,
+        previous_summary=previous,
+        stop_checker=stop_checker,
+        session=session,
+        messages=messages,
+    )
+    summary, reason = sum_res
+    if summary is None:
+        return CompactResult(False, reason, before, before)
 
     # Clear replaces session.messages while this call is blocked in the
     # summarizer. Skip the assign when the list has changed, or the summary
@@ -973,12 +1150,13 @@ def compact_session(
         session.compaction = prev_state  # revert; do not ship a too-large view
         return CompactResult(False, "failed", before, after)
     log.info(
-        "Compaction ok window=%s tokens_before=%s tokens_after=%s cut=%s prev_kept=%s",
+        "Compaction ok window=%s tokens_before=%s tokens_after=%s cut=%s prev_kept=%s chunks=%s",
         window,
         before,
         after,
         new_cut,
         prev_kept,
+        sum_res.chunks,
     )
     if status_callback:
         status_callback("Thinking...")

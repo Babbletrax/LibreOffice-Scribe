@@ -262,6 +262,13 @@ def next_state(state: SendHandlerState, event: SendHandlerEvent) -> FsmTransitio
 
     match event:
         case StopRequestedEvent():
+            # Bugfix: A Stop that arrives after StreamDoneEvent rewrote a finished turn
+            # from Ready to Stopped (CompleteJobEffect("Stopped") assigns _terminal_status),
+            # and a second Stop re-emitted that pair. "error" was already absorbing.
+            # "done" and "stopped" were not, unlike chunks and errors after Stop (#1435).
+            if state.status in ("done", "stopped"):
+                return FsmTransition(state, [])
+
             # The stop line is a message the turn writes. Painting it here
             # by handler type made agent Stop a special case.
             effects.append(SendHandlerUIEffect("status", "Stopped"))
@@ -269,9 +276,10 @@ def next_state(state: SendHandlerState, event: SendHandlerEvent) -> FsmTransitio
             return FsmTransition(_replace_state(state, status="stopped"), effects)
 
         case ErrorEvent():
-            # Bugfix: If the handler is already stopped, late error events arriving from
-            # background threads must not transition status to "error" or append error lines.
-            if state.status == "stopped":
+            # Bugfix: If the handler is already stopped or done, late error events arriving from
+            # background threads (or a late error after Ready) must not transition status to
+            # "error" or append error lines. Same rule as the stopped guard above it.
+            if state.status in ("stopped", "done"):
                 return FsmTransition(state, [])
             return handle_error(state, event)
 
