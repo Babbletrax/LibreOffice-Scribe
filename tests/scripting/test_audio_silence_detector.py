@@ -265,13 +265,14 @@ def test_stop_recording_process_uses_fallback_when_child_already_exited(tmp_path
     from io import StringIO
     from unittest.mock import MagicMock
 
-    from plugin.scripting.audio_recorder_service import stop_recording_process
+    from plugin.scripting.audio_recorder_service import RecordingStopHandoff, stop_recording_process
 
     fallback_file = str(tmp_path / "fallback.wav")
     proc = MagicMock()
     proc.poll.return_value = 0
     proc.stdout = StringIO("")
-    assert stop_recording_process(proc, fallback_path=fallback_file) == fallback_file
+    handoff = RecordingStopHandoff()
+    assert stop_recording_process(proc, fallback_path=fallback_file, handoff=handoff) == fallback_file
 
 
 def test_room_noise_below_loud_onset_adapts_and_then_auto_stops():

@@ -344,7 +344,7 @@ Every test must satisfy:
 
 ### Packet G — Mocked Audio and STT
 
-- **Focus:** Dual state machines (`SendButtonState` vs `AudioRecorderState`), mock audio child process via IPC stub (`/tmp/writeragent_stub_recorder.json`), native `input_audio` chat completions, fallback to `/v1/audio/transcriptions` STT. Empty STT (G27) finishes via `SEND_COMPLETED`; STT HTTP error (G28) and chat 500 (G13) finish via `ERROR_OCCURRED`. Both events must clear `has_audio` — the WAV is already deleted, and leaving the flag True leaves a dead Send button.
+- **Focus:** Dual state machines (`SendButtonState` vs `AudioRecorderState`), mock audio child process via IPC stub (`/tmp/writeragent_stub_recorder.json`). The runner exports `WRITERAGENT_TESTING=1` into soffice (`make test-mock-sidebar`), and a process without that variable does not read the file (a normal session ignores `/tmp/writeragent_stub_recorder.json`). Native `input_audio` chat completions, fallback to `/v1/audio/transcriptions` STT. Empty STT (G27) finishes via `SEND_COMPLETED`; STT HTTP error (G28) and chat 500 (G13) finish via `ERROR_OCCURRED`. Both events must clear `has_audio` — the WAV is already deleted, and leaving the flag True leaves a dead Send button.
 - **Mode:** Automated (`make test-mock-sidebar FILTER=G`).
 - **Status Summary:**
   - **Landed:** G1–G17, G21, G27, G28, G29.
