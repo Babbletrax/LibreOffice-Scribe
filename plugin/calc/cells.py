@@ -26,9 +26,9 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Callable
 
-from plugin.framework.errors import ToolExecutionError
+from plugin.framework.errors import ToolExecutionError, is_disposed_exception
 from plugin.framework.tool import ToolBase
 
 if TYPE_CHECKING:
@@ -84,15 +84,124 @@ def _parse_color(color_str: Any) -> int | None:
     return parse_color_to_uno_int(color_str)
 
 
-def _format_sheet_address(range_name: str, local_addr: str) -> str:
-    """Keep the original sheet prefix (dot or bang, quoted or not) on a clipped address."""
+def _sheet_token(sheet_name: str) -> str:
+    """Bare when the name is a Python identifier; otherwise 'name' with quotes doubled."""
+    if sheet_name.isidentifier():
+        return sheet_name
+    return "'" + sheet_name.replace("'", "''") + "'"
+
+
+def _sheet_prefix_for_clip(range_name: str, resolved: Any) -> str:
+    """Prefix including the separator, or '' when the clip stays unqualified.
+
+    A prefix already on range_name wins. split_sheet_prefix turns 'O''Brien'
+    into O'Brien; quote and double again on the way out. Keep '!' when the
+    input used a bang, otherwise '.'. An unqualified name (a named range)
+    takes the sheet from resolved.getSpreadsheet().getName() and always
+    uses '.'.
+    """
+    # Bugfix: Clipped addresses for oversized reads lost sheet prefixes for named
+    # ranges or lost quote-escaping on sheet names with apostrophes/special chars.
+    # This happened because _format_sheet_address only looked at the input range_name
+    # string and dropped quotes without re-escaping. _sheet_prefix_for_clip preserves
+    # the original quotes and separator (or falls back to the resolved sheet) with
+    # doubled apostrophes so Calc resolves clipped ranges on the proper sheet.
     sheet, _unused_local = split_sheet_prefix(range_name)
-    if not sheet:
-        return local_addr
-    quoted = range_name.lstrip().startswith("'")
-    sep = "!" if "!" in range_name else "."
-    name = f"'{sheet}'" if quoted else sheet
-    return f"{name}{sep}{local_addr}"
+    if sheet:
+        sep = "!" if "!" in range_name else "."
+        if range_name.lstrip().startswith("'") or not sheet.isidentifier():
+            token = "'" + sheet.replace("'", "''") + "'"
+        else:
+            token = sheet
+        return f"{token}{sep}"
+
+    if hasattr(resolved, "getSpreadsheet"):
+        try:
+            sp = resolved.getSpreadsheet()
+            name = sp.getName() if hasattr(sp, "getName") else None
+            if isinstance(name, str) and name:
+                return _sheet_token(name) + "."
+            return ""
+        except Exception as e:
+            if is_disposed_exception(e):
+                raise
+            return ""
+    return ""
+
+
+def _range_args(raw: Any) -> list[Any]:
+    if not raw:
+        return []
+    if isinstance(raw, str):
+        return [raw]
+    return list(raw)
+
+
+def _compound_undo(doc: Any, title: str) -> Any:
+    from plugin.writer.edit_review import WriterCompoundUndo
+
+    return WriterCompoundUndo(doc, title)
+
+
+def _undo_titled_group(doc: Any, title: str) -> bool:
+    """Undo the group we just closed, only when its title is the newest one."""
+    try:
+        if not hasattr(doc, "getUndoManager"):
+            return False
+        um = doc.getUndoManager()
+        if um is None:
+            return False
+        titles = um.getAllUndoActionTitles() if hasattr(um, "getAllUndoActionTitles") else ()
+        if titles and titles[0] == title:
+            um.undo()
+            return True
+        return False
+    except Exception as e:
+        if is_disposed_exception(e):
+            raise
+        log.exception("Could not undo titled group %r", title)
+        return False
+
+
+def _mutate_ranges(
+    tool: ToolBase,
+    doc: Any,
+    ranges: list[Any],
+    undo_title: str,
+    apply_one: Callable[[Any], str],
+    done_message: str,
+) -> dict[str, Any]:
+    """Run apply_one on each range inside one compound undo. apply_one returns the single-range message."""
+    # Bugfix: Failures during multi-range mutations left previous ranges partially modified
+    # in separate or inconsistent undo states. This happened because loops lacked
+    # atomic compound undo rollback on failure. Wrapping operations in a titled compound
+    # undo and rolling back on failure ensures all-or-nothing mutations.
+    if len(ranges) == 0:
+        return tool._tool_error("range is required")
+
+    group = None
+    target = ranges[0]
+    applied = 0
+    single_result = ""
+    try:
+        group = _compound_undo(doc, undo_title)
+        with group:
+            for r in ranges:
+                target = r
+                single_result = apply_one(r)
+                applied += 1
+        if len(ranges) == 1:
+            return {"status": "ok", "message": single_result}
+        return {"status": "ok", "message": done_message}
+    except Exception as exc:
+        undone = False
+        if group is not None and getattr(group, "entered", False):
+            undone = _undo_titled_group(doc, undo_title)
+        if undone:
+            return tool._tool_error(f"Failed on range {target!r}: {exc}. Nothing was kept.")
+        if applied > 0:
+            return tool._tool_error(f"Failed on range {target!r}: {exc}. {applied} range(s) were already changed; one Ctrl+Z undoes them.")
+        return tool._tool_error(str(exc))
 
 
 def _preview_if_large(bridge: Any, range_name: str) -> dict[str, Any] | None:
@@ -113,23 +222,21 @@ def _preview_if_large(bridge: Any, range_name: str) -> dict[str, Any] | None:
         end_col = int(addr.StartColumn) + preview_cols - 1
         local = f"{index_to_column(int(addr.StartColumn))}{int(addr.StartRow) + 1}:{index_to_column(end_col)}{end_row + 1}"
 
-        if "." not in range_name and "!" not in range_name and hasattr(cell_range, "getSpreadsheet"):
-            try:
-                sheet_name = cell_range.getSpreadsheet().getName()
-                if isinstance(sheet_name, str):
-                    quoted = not sheet_name.isidentifier()
-                    escaped_name = sheet_name.replace("'", "''")
-                    name_str = f"'{escaped_name}'" if quoted else sheet_name
-                    preview_range = f"{name_str}.{local}"
-                else:
-                    preview_range = _format_sheet_address(range_name, local)
-            except Exception:
-                preview_range = _format_sheet_address(range_name, local)
-        else:
-            preview_range = _format_sheet_address(range_name, local)
+        prefix = _sheet_prefix_for_clip(range_name, cell_range)
+        preview_range = f"{prefix}{local}"
 
-        return {"rows": rows, "columns": cols, "cells": cells, "preview_range": preview_range, "start_column": int(addr.StartColumn), "start_row": int(addr.StartRow)}
-    except Exception:
+        return {
+            "rows": rows,
+            "columns": cols,
+            "cells": cells,
+            "preview_range": preview_range,
+            "sheet_prefix": prefix,
+            "start_column": int(addr.StartColumn),
+            "start_row": int(addr.StartRow),
+        }
+    except Exception as e:
+        if is_disposed_exception(e):
+            raise
         log.exception("Could not size range %s for read_cell_range cap; reading in full", range_name)
         return None
 
@@ -146,9 +253,14 @@ def _distinct_display(val: Any) -> str | None:
 def _column_distinct_peek(data_array: Any, *, start_column: int = 0) -> list[dict[str, Any]]:
     """Cardinality-capped distincts per column from a getDataArray grid.
 
-    First row is the header when it looks like text; high-unique columns
-    report a count only (no value list).
+    Columns whose first cell is text treat that cell as a header label and scan
+    subsequent rows; numeric or blank first cells are counted as data including row 0.
     """
+    # Bugfix: Numeric or empty top-row values were skipped from distinct counts
+    # when a column had no text header. This happened because the function sliced
+    # data_array[1:] globally across all columns. Checking each column's row 0 cell
+    # allows text headers to label columns while non-text cells are counted as data
+    # starting from row 0.
     if not isinstance(data_array, (list, tuple)) or not data_array:
         return []
     header_row = data_array[0]
@@ -157,17 +269,20 @@ def _column_distinct_peek(data_array: Any, *, start_column: int = 0) -> list[dic
     n_cols = min(len(header_row), _DISTINCT_PEEK_MAX_COLUMNS)
     if n_cols <= 0:
         return []
-    body = data_array[1:]
     out: list[dict[str, Any]] = []
     for col_i in range(n_cols):
-        raw_header = header_row[col_i]
-        header = raw_header.strip() if isinstance(raw_header, str) and raw_header.strip() else None
-        label = header or index_to_column(start_column + col_i)
+        raw_header = header_row[col_i] if col_i < len(header_row) else None
+        if isinstance(raw_header, str) and raw_header.strip():
+            label = raw_header.strip()
+            scan_rows = data_array[1:]
+        else:
+            label = index_to_column(start_column + col_i)
+            scan_rows = data_array
         # Track every distinct for the count; only the first LIST_CAP go in the payload.
         seen: set[str] = set()
         listed: list[str] = []
         overflow = False
-        for row in body:
+        for row in scan_rows:
             if not isinstance(row, (list, tuple)) or col_i >= len(row):
                 continue
             key = _distinct_display(row[col_i])
@@ -203,13 +318,20 @@ def _try_column_distinct_peek(bridge: Any, range_name: str, preview: dict[str, A
         end_col = start_col + min(cols, _DISTINCT_PEEK_MAX_COLUMNS) - 1
         end_row = start_row + min(rows, _DISTINCT_PEEK_MAX_ROWS) - 1
         local = f"{index_to_column(start_col)}{start_row + 1}:{index_to_column(end_col)}{end_row + 1}"
-        clipped = _format_sheet_address(range_name, local)
+        clipped = f"{preview.get('sheet_prefix') or ''}{local}"
         cell_range = bridge.resolve_range_or_address(clipped)
         if not hasattr(cell_range, "getDataArray"):
             return None
         peek = _column_distinct_peek(cell_range.getDataArray(), start_column=start_col)
-        return peek or None
-    except Exception:
+        if not peek:
+            return None
+        if rows > _DISTINCT_PEEK_MAX_ROWS:
+            for entry in peek:
+                entry["scanned_rows"] = _DISTINCT_PEEK_MAX_ROWS
+        return peek
+    except Exception as e:
+        if is_disposed_exception(e):
+            raise
         log.exception("Could not compute column distinct peek for %s", range_name)
         return None
 
@@ -321,14 +443,20 @@ class ReadCellRange(ToolBase):
     def execute(self, ctx: ToolContext, **kwargs: Any) -> dict[str, Any]:
         bridge = CalcBridge(ctx.doc)
         inspector = CellInspector(bridge)
-        rn = kwargs.get("range") or []
-        rn = [rn] if isinstance(rn, str) else (rn or [])
+        rn = _range_args(kwargs.get("range"))
 
         if len(rn) == 0:
             return self._tool_error("range is required")
         if len(rn) == 1:
             return self._read_one(bridge, inspector, rn[0])
         results = [self._read_one(bridge, inspector, r) for r in rn]
+        failed = [item["range"] for item in results if item.get("status") != "ok"]
+        if failed:
+            return {
+                "status": "error",
+                "message": f"Failed to read {len(failed)} of {len(rn)} ranges: {failed!r}",
+                "result": results,
+            }
         # Preserve the old list-of-grids shape when nothing was truncated.
         if all(item.get("status") == "ok" and not item.get("truncated") for item in results):
             return {"status": "ok", "result": [item["result"][0] for item in results]}
@@ -336,26 +464,32 @@ class ReadCellRange(ToolBase):
 
     def _read_one(self, bridge: Any, inspector: Any, range_name: str) -> dict[str, Any]:
         """Read one range; preview-only when the full grid would swamp chat context."""
-        preview = _preview_if_large(bridge, range_name)
-        if preview is None:
-            grid = inspector.read_range(range_name, include_format_info=True)
-            return {"status": "ok", "result": [grid]}
-        grid = inspector.read_range(preview["preview_range"], include_format_info=True)
-        payload: dict[str, Any] = {
-            "status": "ok",
-            "truncated": True,
-            "message": _READ_CELL_RANGE_TRUNCATED_MSG.format(rows=preview["rows"], columns=preview["columns"], cells=preview["cells"]),
-            "range": range_name,
-            "preview_range": preview["preview_range"],
-            "rows": preview["rows"],
-            "columns": preview["columns"],
-            "cells": preview["cells"],
-            "result": [grid],
-        }
-        distincts = _try_column_distinct_peek(bridge, range_name, preview)
-        if distincts:
-            payload["column_distincts"] = distincts
-        return payload
+        try:
+            preview = _preview_if_large(bridge, range_name)
+            if preview is None:
+                grid = inspector.read_range(range_name, include_format_info=True)
+                return {"status": "ok", "result": [grid], "range": range_name}
+            grid = inspector.read_range(preview["preview_range"], include_format_info=True)
+            payload: dict[str, Any] = {
+                "status": "ok",
+                "truncated": True,
+                "message": _READ_CELL_RANGE_TRUNCATED_MSG.format(rows=preview["rows"], columns=preview["columns"], cells=preview["cells"]),
+                "range": range_name,
+                "preview_range": preview["preview_range"],
+                "rows": preview["rows"],
+                "columns": preview["columns"],
+                "cells": preview["cells"],
+                "result": [grid],
+            }
+            distincts = _try_column_distinct_peek(bridge, range_name, preview)
+            if distincts:
+                payload["column_distincts"] = distincts
+            return payload
+        except Exception as exc:
+            if is_disposed_exception(exc):
+                raise
+            log.exception("Failed to read range %s", range_name)
+            return {"status": "error", "range": range_name, "message": str(exc) or type(exc).__name__}
 
 
 class WriteCellRange(ToolBase):
@@ -430,12 +564,9 @@ class WriteCellRange(ToolBase):
     is_mutation: bool | None = True
 
     def execute(self, ctx: ToolContext, **kwargs: Any) -> dict[str, Any]:
-        from plugin.writer.edit_review import WriterCompoundUndo
-
         bridge = CalcBridge(ctx.doc)
         manipulator = CellManipulator(bridge)
-        rn = kwargs.get("range") or []
-        rn = [rn] if isinstance(rn, str) else (rn or [])
+        rn = _range_args(kwargs.get("range"))
         source, source_err = _normalize_source_arg(kwargs.get("source"))
         if source_err:
             return self._tool_error(source_err)
@@ -447,11 +578,17 @@ class WriteCellRange(ToolBase):
         if source:
             if _values_conflict_with_source(kwargs):
                 return self._tool_error("Do not pass values when source is set. To copy a block, pass source and dest range only.")
+            group = None
+            target = rn[0]
+            applied = 0
             try:
-                with WriterCompoundUndo(ctx.doc, "WriterAgent: Copy range"):
+                group = _compound_undo(ctx.doc, "WriterAgent: Copy range")
+                with group:
                     copied: dict[str, Any] | None = None
                     for dest in rn:
+                        target = dest
                         copied = manipulator.copy_formula_range(source, dest)
+                        applied += 1
                     if copied is None:
                         return self._tool_error("range is required")
                     msg = copied["message"]
@@ -459,12 +596,24 @@ class WriteCellRange(ToolBase):
                         msg = f"Copied {copied['rows_copied']}×{copied['cols_copied']} from {source} onto {len(rn)} ranges."
                     return {"status": "ok", "message": msg, "rows_copied": copied["rows_copied"], "cols_copied": copied["cols_copied"]}
             except Exception as e:
+                undone = False
+                if group is not None and getattr(group, "entered", False):
+                    undone = _undo_titled_group(ctx.doc, "WriterAgent: Copy range")
+                if undone:
+                    return self._tool_error(f"Failed on range {target!r}: {e}. Nothing was kept.")
+                if applied > 0:
+                    return self._tool_error(f"Failed on range {target!r}: {e}. {applied} range(s) were already changed; one Ctrl+Z undoes them.")
                 return self._tool_error(str(e))
+
         fov = kwargs.get("values")
         # values is required when source is omitted (schema keeps it optional so
         # source-only calls pass validate). Missing must not fall through as clear.
         if fov is None:
             return self._tool_error("values is required when source is omitted")
+        # Bugfix: top-level bool in values was converted to string "True"/"False"
+        # instead of being rejected to match the tool parameter schema.
+        if isinstance(fov, bool):
+            return self._tool_error("values must be a string, number, or JSON array, not a boolean")
         # Normalize: schema is string for Gemini; accept number/list from other providers
         if isinstance(fov, (int, float)):
             fov = str(fov)
@@ -493,22 +642,53 @@ class WriteCellRange(ToolBase):
             else:
                 return self._tool_error("array must be a boolean")
 
+        group = None
+        target = rn[0]
+        applied = 0
         try:
             premeasured: list[tuple[int, int] | None] = []
             for r in rn:
                 sz = manipulator.prepare_array_formula_if_needed(r, fov, array=array_flag)
                 premeasured.append(sz)
 
-            with WriterCompoundUndo(ctx.doc, "WriterAgent: Write formulas"):
+            group = _compound_undo(ctx.doc, "WriterAgent: Write formulas")
+            with group:
                 if len(rn) == 1:
+                    target = rn[0]
                     result = manipulator.write_formula_range(rn[0], fov, array=array_flag, premeasured_array_size=premeasured[0])
+                    applied += 1
                     if isinstance(result, dict):
                         return {"status": "ok", **result}
                     return {"status": "ok", "message": result}
+
+                results_list: list[Any] = []
                 for i, r in enumerate(rn):
-                    manipulator.write_formula_range(r, fov, array=array_flag, premeasured_array_size=premeasured[i])
+                    target = r
+                    res = manipulator.write_formula_range(r, fov, array=array_flag, premeasured_array_size=premeasured[i])
+                    applied += 1
+                    results_list.append(res)
+
+                if any(isinstance(res, dict) for res in results_list):
+                    ranges_payload: list[dict[str, Any]] = []
+                    for r, res in zip(rn, results_list):
+                        if isinstance(res, dict):
+                            ranges_payload.append({"range": r, **res})
+                        else:
+                            ranges_payload.append({"range": r, "message": res})
+                    return {
+                        "status": "ok",
+                        "message": f"Wrote to {len(rn)} ranges",
+                        "ranges": ranges_payload,
+                    }
                 return {"status": "ok", "message": f"Wrote to {len(rn)} ranges"}
         except Exception as e:
+            undone = False
+            if group is not None and getattr(group, "entered", False):
+                undone = _undo_titled_group(ctx.doc, "WriterAgent: Write formulas")
+            if undone:
+                return self._tool_error(f"Failed on range {target!r}: {e}. Nothing was kept.")
+            if applied > 0:
+                return self._tool_error(f"Failed on range {target!r}: {e}. {applied} range(s) were already changed; one Ctrl+Z undoes them.")
             return self._tool_error(str(e))
 
 
@@ -578,20 +758,23 @@ class SetCellStyle(ToolBase):
     def execute(self, ctx: ToolContext, **kwargs: Any) -> dict[str, Any]:
         bridge = CalcBridge(ctx.doc)
         manipulator = CellManipulator(bridge)
-        rn = kwargs.get("range") or []
-        rn = [rn] if isinstance(rn, str) else (rn or [])
+        rn = _range_args(kwargs.get("range"))
 
         # Strict color validation: callers/tests expect invalid color strings
         # to produce a consistent `{status:"error"}` payload rather than
         # silently treating unparseable values as "no change".
         def _parse_or_error(color_key: str) -> int | dict[str, str] | None:
-            raw = kwargs.get(color_key)
+            if color_key not in kwargs:
+                return None
+            raw = kwargs[color_key]
             if raw is None:
                 return None
             if isinstance(raw, str) and raw.strip() == "":
                 return None
+            # Bugfix: Non-string color values were silently treated as "no change"
+            # (returning None). Rejecting non-strings surfaces invalid types as errors.
             if not isinstance(raw, str):
-                return None  # schema should be string, but don't hard-fail
+                return {"__error__": f"{color_key} must be a string, got {type(raw).__name__}"}
             parsed = _parse_color(raw)
             if parsed is None:
                 return {"__error__": f"Invalid {color_key}: '{raw}'"}
@@ -674,15 +857,24 @@ class SetCellStyle(ToolBase):
 
         if len(rn) == 0:
             return self._tool_error("range is required")
-        try:
-            if len(rn) == 1:
-                manipulator.set_cell_style(rn[0], **style_kwargs)
-                return {"status": "ok", "message": f"Style applied to {rn[0]}"}
-            for r in rn:
-                manipulator.set_cell_style(r, **style_kwargs)
-            return {"status": "ok", "message": f"Style applied to {len(rn)} ranges"}
-        except Exception as e:
-            return self._tool_error(str(e))
+
+        # Bugfix: Style calls with no properties performed empty mutations and opened
+        # useless undo steps. Checking if all style properties are None avoids this.
+        if all(v is None for v in style_kwargs.values()):
+            return self._tool_error("No style properties were provided.")
+
+        def _apply_style(r: Any) -> str:
+            manipulator.set_cell_style(r, **style_kwargs)
+            return f"Style applied to {r}"
+
+        return _mutate_ranges(
+            self,
+            ctx.doc,
+            rn,
+            "WriterAgent: Set style",
+            _apply_style,
+            f"Style applied to {len(rn)} ranges",
+        )
 
 
 class MergeCells(ToolBase):
@@ -702,21 +894,27 @@ class MergeCells(ToolBase):
     def execute(self, ctx: ToolContext, **kwargs: Any) -> dict[str, Any]:
         bridge = CalcBridge(ctx.doc)
         manipulator = CellManipulator(bridge)
-        rn = kwargs.get("range") or []
-        rn = [rn] if isinstance(rn, str) else (rn or [])
-        center = kwargs.get("center", True)
+        rn = _range_args(kwargs.get("range"))
+        raw_center = kwargs.get("center")
+        if raw_center is None:
+            center = True
+        elif not isinstance(raw_center, bool):
+            return self._tool_error(f"center must be a boolean (true or false), got {type(raw_center).__name__}")
+        else:
+            center = raw_center
 
-        if len(rn) == 0:
-            return self._tool_error("range is required")
-        try:
-            if len(rn) == 1:
-                manipulator.merge_cells(rn[0], center=center)
-                return {"status": "ok", "message": f"Merged cells {rn[0]}"}
-            for r in rn:
-                manipulator.merge_cells(r, center=center)
-            return {"status": "ok", "message": f"Merged cells in {len(rn)} ranges"}
-        except Exception as e:
-            return self._tool_error(str(e))
+        def _apply_merge(r: Any) -> str:
+            manipulator.merge_cells(r, center=center)
+            return f"Merged cells {r}"
+
+        return _mutate_ranges(
+            self,
+            ctx.doc,
+            rn,
+            "WriterAgent: Merge cells",
+            _apply_merge,
+            f"Merged cells in {len(rn)} ranges",
+        )
 
 
 class SortRange(ToolCalcRangeBase):
@@ -754,23 +952,45 @@ class SortRange(ToolCalcRangeBase):
     def execute(self, ctx: ToolContext, **kwargs: Any) -> dict[str, Any]:
         bridge = CalcBridge(ctx.doc)
         manipulator = CellManipulator(bridge)
-        rn = kwargs.get("range") or []
-        rn = [rn] if isinstance(rn, str) else (rn or [])
-        sort_column = kwargs.get("sort_column", 0)
-        ascending = kwargs.get("ascending", True)
-        has_header = kwargs.get("has_header", True)
+        rn = _range_args(kwargs.get("range"))
 
-        if len(rn) == 0:
-            return self._tool_error("range is required")
-        try:
-            if len(rn) == 1:
-                result = manipulator.sort_range(rn[0], sort_column=sort_column, ascending=ascending, has_header=has_header)
-                return {"status": "ok", "message": result}
-            for r in rn:
-                manipulator.sort_range(r, sort_column=sort_column, ascending=ascending, has_header=has_header)
-            return {"status": "ok", "message": f"Sorted {len(rn)} ranges"}
-        except Exception as e:
-            return self._tool_error(str(e))
+        raw_sc = kwargs.get("sort_column")
+        if raw_sc is None:
+            sort_column = 0
+        elif type(raw_sc) is not int:
+            return self._tool_error(f"sort_column must be an integer >= 0, got {type(raw_sc).__name__}")
+        elif raw_sc < 0:
+            return self._tool_error(f"sort_column must be an integer >= 0, got {raw_sc}")
+        else:
+            sort_column = raw_sc
+
+        raw_ascending = kwargs.get("ascending")
+        if raw_ascending is None:
+            ascending = True
+        elif not isinstance(raw_ascending, bool):
+            return self._tool_error(f"ascending must be a boolean (true or false), got {type(raw_ascending).__name__}")
+        else:
+            ascending = raw_ascending
+
+        raw_has_header = kwargs.get("has_header")
+        if raw_has_header is None:
+            has_header = True
+        elif not isinstance(raw_has_header, bool):
+            return self._tool_error(f"has_header must be a boolean (true or false), got {type(raw_has_header).__name__}")
+        else:
+            has_header = raw_has_header
+
+        def _apply_sort(r: Any) -> str:
+            return manipulator.sort_range(r, sort_column=sort_column, ascending=ascending, has_header=has_header)
+
+        return _mutate_ranges(
+            self,
+            ctx.doc,
+            rn,
+            "WriterAgent: Sort range",
+            _apply_sort,
+            f"Sorted {len(rn)} ranges",
+        )
 
 
 class DeleteStructure(ToolBase):
@@ -792,14 +1012,37 @@ class DeleteStructure(ToolBase):
     is_mutation: bool | None = True
 
     def execute(self, ctx: ToolContext, **kwargs: Any) -> dict[str, Any]:
+        # Bugfix: delete_structure accepted invalid start values (e.g. non-ASCII digits like '²',
+        # floats, or column '3' which produced negative indices) and invalid counts (bools, floats).
+        # This happened because start and count were passed directly without validating
+        # types and ranges. Validating start and count strictly returns tool errors before
+        # modifying document structures.
+        structure_type = kwargs.get("structure_type")
+        if structure_type not in ("rows", "columns"):
+            return self._tool_error('structure_type must be "rows" or "columns"')
+
+        count = kwargs.get("count", 1)
+        if type(count) is not int or count < 1:
+            return self._tool_error("count must be an integer >= 1")
+
+        start_raw = kwargs.get("start")
+        if structure_type == "rows":
+            if type(start_raw) is int:
+                row_val = start_raw
+            elif isinstance(start_raw, str) and start_raw.isascii() and start_raw.isdigit():
+                row_val = int(start_raw)
+            else:
+                return self._tool_error('start for rows must be a 1-based row number (for example 5 or "5")')
+            if row_val < 1:
+                return self._tool_error('start for rows must be a 1-based row number (for example 5 or "5")')
+            start: int | str = row_val
+        else:
+            if not (isinstance(start_raw, str) and start_raw.isascii() and start_raw.isalpha()):
+                return self._tool_error('start for columns must be a column letter (for example "C")')
+            start = start_raw.upper()
+
         bridge = CalcBridge(ctx.doc)
         manipulator = CellManipulator(bridge)
-        structure_type = kwargs["structure_type"]
-        start_raw = kwargs["start"]
-        count = kwargs.get("count", 1)
-        # Normalize: rows accept integer or string; columns accept letter(s).
-        start = int(start_raw) if structure_type == "rows" and str(start_raw).isdigit() else start_raw
-
         try:
             result = manipulator.delete_structure(structure_type, start, count=count)
             return {"status": "ok", "message": result}
