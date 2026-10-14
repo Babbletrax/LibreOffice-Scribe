@@ -249,7 +249,7 @@ while True:
         encoding="utf-8",
     )
     monkeypatch.setattr(venv_worker_module, "_HARNESS_PATH", str(child))
-    monkeypatch.setattr(venv_worker_module, "wrap_command_for_sandbox", lambda cmd: cmd)
+    monkeypatch.setattr(venv_worker_module, "wrap_command_for_sandbox", lambda cmd, **_kwargs: cmd)
 
     mgr = PythonWorkerManager(sys.executable, {"PATH": os.environ.get("PATH", "")})
     drain = None
@@ -313,7 +313,7 @@ while True:
         encoding="utf-8",
     )
     monkeypatch.setattr(venv_worker_module, "_HARNESS_PATH", str(child))
-    monkeypatch.setattr(venv_worker_module, "wrap_command_for_sandbox", lambda cmd: cmd)
+    monkeypatch.setattr(venv_worker_module, "wrap_command_for_sandbox", lambda cmd, **_kwargs: cmd)
 
     mgr = PythonWorkerManager(sys.executable, {"PATH": os.environ.get("PATH", "")})
     try:
@@ -387,7 +387,7 @@ time.sleep(120)
         encoding="utf-8",
     )
     monkeypatch.setattr(venv_worker_module, "_HARNESS_PATH", str(child))
-    monkeypatch.setattr(venv_worker_module, "wrap_command_for_sandbox", lambda cmd: cmd)
+    monkeypatch.setattr(venv_worker_module, "wrap_command_for_sandbox", lambda cmd, **_kwargs: cmd)
 
     mgr = PythonWorkerManager(sys.executable, {"PATH": os.environ.get("PATH", "")})
     gpid = None
@@ -427,7 +427,7 @@ def test_blocked_stdin_write_times_out_and_releases_lock(tmp_path, monkeypatch):
     child = tmp_path / "blocked_stdin_worker.py"
     child.write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
     monkeypatch.setattr(venv_worker_module, "_HARNESS_PATH", str(child))
-    monkeypatch.setattr(venv_worker_module, "wrap_command_for_sandbox", lambda cmd: cmd)
+    monkeypatch.setattr(venv_worker_module, "wrap_command_for_sandbox", lambda cmd, **_kwargs: cmd)
 
     mgr = PythonWorkerManager(sys.executable, {"PATH": os.environ.get("PATH", "")})
     try:
@@ -2092,7 +2092,7 @@ def test_ensure_running_starts_new_session_without_preexec(monkeypatch):
     proc.stderr = None
     popen.return_value = proc
     monkeypatch.setattr(venv_worker_module.subprocess, "Popen", popen)
-    monkeypatch.setattr(venv_worker_module, "wrap_command_for_sandbox", lambda cmd: cmd)
+    monkeypatch.setattr(venv_worker_module, "wrap_command_for_sandbox", lambda cmd, **_kwargs: cmd)
     monkeypatch.setattr(venv_worker_module, "optimize_popen_pipes", lambda _proc: None)
     monkeypatch.setattr(venv_worker_module, "start_stderr_drain", lambda *_args, **_kwargs: None)
     mgr = PythonWorkerManager(sys.executable, {})

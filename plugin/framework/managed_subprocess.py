@@ -42,7 +42,7 @@ class ManagedSubprocess:
     _cwd: str | None
     _env: dict[str, str] | None
     _base_env: dict[str, str] | None
-    _command_wrapper: Callable[[list[str]], list[str]] | None
+    _command_wrapper: Callable[..., list[str]] | None
     _thread_guard: Callable[[], None] | None
     _proc: subprocess.Popen[bytes] | None
     _stderr_drain: StderrTail | None
@@ -56,7 +56,7 @@ class ManagedSubprocess:
         env: dict[str, str] | None = None,
         base_env: dict[str, str] | None = None,
         cwd: str | None = None,
-        command_wrapper: Callable[[list[str]], list[str]] | None = None,
+        command_wrapper: Callable[..., list[str]] | None = None,
         thread_guard: Callable[[], None] | None = None,
     ) -> None:
         self._cmd_line = cmd_line
@@ -120,7 +120,7 @@ class ManagedSubprocess:
                 popen_kw["start_new_session"] = True
 
             cmd = (
-                self._command_wrapper(self._cmd_line)
+                self._command_wrapper(self._cmd_line, env=merged_env, cwd=self._cwd)
                 if self._command_wrapper is not None
                 else list(self._cmd_line)
             )

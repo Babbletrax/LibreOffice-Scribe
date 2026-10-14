@@ -1087,7 +1087,10 @@ class PythonWorkerManager:
                 raise _WorkerRetired(
                     "Python worker was replaced by a new venv path and will not be restarted"
                 )
-            proc = subprocess.Popen(wrap_command_for_sandbox([self.exe, _HARNESS_PATH]), **popen_kw)
+            proc = subprocess.Popen(
+                wrap_command_for_sandbox([self.exe, _HARNESS_PATH], env=self.env),
+                **popen_kw,
+            )
             optimize_popen_pipes(proc)
             # Live stderr drain: prevent 64KB pipe deadlock while parent blocks on stdin/stdout.
             # Publish the drain before _proc. The old order let a reader observe

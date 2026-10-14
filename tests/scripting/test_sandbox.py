@@ -309,6 +309,50 @@ def test_wrap_no_sandbox():
         _reset_cache()
 
 
+def test_wrap_flatpak_forwards_env_and_cwd():
+    cmd = ["/py", "a"]
+    _reset_cache()
+    try:
+        with patch("plugin.scripting.sandbox.os.path.exists", return_value=True):
+            with patch.dict("os.environ", {}, clear=True):
+                res = wrap_command_for_sandbox(cmd, env={"PATH": "/usr/bin", "A": "b=c"}, cwd="/work")
+                assert res == [
+                    "flatpak-spawn",
+                    "--host",
+                    "--clear-env",
+                    "--directory=/work",
+                    "--env=PATH=/usr/bin",
+                    "--env=A=b=c",
+                    "/py",
+                    "a",
+                ]
+
+                res_empty_env = wrap_command_for_sandbox(cmd, env={})
+                assert res_empty_env == [
+                    "flatpak-spawn",
+                    "--host",
+                    "--clear-env",
+                    "/py",
+                    "a",
+                ]
+
+        # Outside Flatpak
+        with patch("plugin.scripting.sandbox.os.path.exists", return_value=False):
+            with patch.dict("os.environ", {}, clear=True):
+                _reset_cache()
+                res_outside = wrap_command_for_sandbox(cmd, env={"PATH": "/usr/bin", "A": "b=c"}, cwd="/work")
+                assert res_outside == ["/py", "a"]
+
+        # Snap with env=
+        with patch("plugin.scripting.sandbox.os.path.exists", return_value=False):
+            with patch.dict("os.environ", {"SNAP_NAME": "libreoffice"}, clear=True):
+                _reset_cache()
+                res_snap = wrap_command_for_sandbox(cmd, env={"PATH": "/usr/bin", "A": "b=c"}, cwd="/work")
+                assert res_snap == ["/py", "a"]
+    finally:
+        _reset_cache()
+
+
 def test_wrap_does_not_mutate_original():
     _reset_cache()
     try:
@@ -478,12 +522,64 @@ def test_env_name_is_credential_matches_suffixes_and_dsn() -> None:
     assert _env_name_is_credential("DSN") is True
     assert _env_name_is_credential("KEY") is True
     assert _env_name_is_credential("MY_KEYS") is True
+    assert _env_name_is_credential("MYSQL_PWD") is True
+    assert _env_name_is_credential("GPG_PASSPHRASE") is True
+    assert _env_name_is_credential("PASSWD") is True
+    assert _env_name_is_credential("GITHUB_PAT") is True
+    assert _env_name_is_credential("SLACK_WEBHOOK_URL") is True
+    assert _env_name_is_credential("APIKEY") is True
+    assert _env_name_is_credential("KEYRING") is True
+    assert _env_name_is_credential("AUTHORIZATION") is True
 
-    # KEYBOARD device names and XAUTHORITY must not be blocked.
+    # Allowed tokens/names
+    assert _env_name_is_credential("PWD") is False
+    assert _env_name_is_credential("TOKENIZERS_PARALLELISM") is False
+    assert _env_name_is_credential("MONKEY") is False
+    assert _env_name_is_credential("TURKEY") is False
+    assert _env_name_is_credential("MONKEY_PATCH") is False
+    assert _env_name_is_credential("SECRETARY") is False
+    assert _env_name_is_credential("KEYWORD") is False
+    assert _env_name_is_credential("AUTHORITY") is False
+    assert _env_name_is_credential("PATH") is False
     assert _env_name_is_credential("KEYBOARD") is False
     assert _env_name_is_credential("KEYBOARD_LAYOUT") is False
     assert _env_name_is_credential("KEYBOARD_MODEL") is False
     assert _env_name_is_credential("XAUTHORITY") is False
+
+
+def test_scrub_drops_dyld_and_python_executable() -> None:
+    from plugin.scripting.sandbox import _BLOCKED_ENV_EXACT, scrub_subprocess_env
+
+    for var in (
+        "DYLD_LIBRARY_PATH",
+        "DYLD_FRAMEWORK_PATH",
+        "DYLD_FALLBACK_LIBRARY_PATH",
+        "DYLD_FALLBACK_FRAMEWORK_PATH",
+        "PYTHONEXECUTABLE",
+        "PYTHONNOUSERSITE",
+    ):
+        assert var in _BLOCKED_ENV_EXACT
+
+    base = {
+        "DYLD_LIBRARY_PATH": "/lib",
+        "DYLD_FRAMEWORK_PATH": "/frameworks",
+        "DYLD_FALLBACK_LIBRARY_PATH": "/fallback",
+        "DYLD_FALLBACK_FRAMEWORK_PATH": "/fallback_fw",
+        "PYTHONEXECUTABLE": "/usr/bin/python",
+        "PYTHONNOUSERSITE": "1",
+        "PATH": "/usr/bin:/bin",
+    }
+    scrubbed = scrub_subprocess_env(base)
+    for var in (
+        "DYLD_LIBRARY_PATH",
+        "DYLD_FRAMEWORK_PATH",
+        "DYLD_FALLBACK_LIBRARY_PATH",
+        "DYLD_FALLBACK_FRAMEWORK_PATH",
+        "PYTHONEXECUTABLE",
+        "PYTHONNOUSERSITE",
+    ):
+        assert var not in scrubbed
+    assert scrubbed["PATH"] == "/usr/bin:/bin"
 
 
 def test_scrub_subprocess_env_blocked_exact_and_empty_dict() -> None:
