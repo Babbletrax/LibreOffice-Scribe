@@ -56,7 +56,7 @@ Addons.xcu cannot gate on a user-defined document property, so there is no nativ
 |-------------------|----------|
 | **Vendored nbformat v4 read** — [`plugin/contrib/nbformat/`](../../plugin/contrib/nbformat/): `read_ipynb(path)`, `reads(json_string)` → `NotebookNode` with `rejoin_lines` | **nbformat v3** upgrade path |
 | **File → Open** — native `.ipynb` import filter ([`import_filter.py`](../../plugin/notebook/import_filter.py)); TypeDetection registry | Append-into-open-document menu (Phase 3) |
-| **Import engine** — [`writer_importer.py`](../../plugin/notebook/writer_importer.py): ATX `#`/`##` headings, `* `/`- ` lists (nested + `<ol start=N>`), `>` blockquotes, `**bold**` / `*italic*`, `[text](url)` hyperlinks, HTML `<img>`/`<a>`, in-flow code fields, output text + images; `zxx` spellcheck-off locale; leftover list `NumberingRules` cleared after HTML list insert | GFM tables, hover-only play, collapsible cells |
+| **Import engine** — [`writer_importer.py`](../../plugin/notebook/writer_importer.py): ATX `#`/`##` headings, fenced code (``` and ~~~, Text Body, line breaks inside one paragraph), `* `/`- ` lists (nested + `<ol start=N>`), `>` blockquotes, `**bold**` / `*italic*`, `[text](url)` hyperlinks, HTML `<img>`/`<a>`, in-flow code fields, output text + images; `zxx` spellcheck-off locale; leftover list `NumberingRules` cleared after HTML list insert | GFM tables, hover-only play, collapsible cells |
 | **Notebook registry (Phase 0)** — [`cell_registry.py`](../../plugin/notebook/cell_registry.py): `WriterAgentNotebookJson`, stable `cell_id` (UUID), output bookmarks `nb_out_*`, `WriterAgentNotebookSourcePath` | Export back to `.ipynb` (Phase 5 roadmap) |
 | **Run code cell (Phase 1)** — in-flow ▶ **push** button + [`notebook_controls.py`](../../plugin/notebook/notebook_controls.py) + [`notebook_runner.py`](../../plugin/notebook/notebook_runner.py); shared `notebook:…` kernel; re-run **replaces** output (`setString("")`); no VCL pump during execute (LayoutIdle livelock) | Cell CRUD, sidebar (Phases 3–4 roadmap) |
 | **Run All / Run From Here / Stop (Phase 2)** — sidebar hamburger only, and only when `load_registry(doc)` is set (not ordinary Writer / Calc / Draw; not menubar or review toolbar); registry-order sequence; drain **between** cells only; Stop skips the remainder (busy guard does not block Stop). ▶ is wired once per document. Chat **Stop** also skips the remainder when a chat drain owns that Run All | — |
@@ -177,9 +177,9 @@ flowchart TB
 |--------|-----------------|
 | Text per block (source/output) | 50,000 chars (truncated with warning) |
 | Max outputs per code cell | 200 outputs |
-| Max embedded image size | 8 MB base64 |
+| Max embedded image size | 8 MiB decoded (base64 is capped by decoded size, about 4/3 of the character length) |
 | Execution timeout | `scripting.python_exec_timeout` (default 10s) |
-| Markdown remote images | http(s) `![](url)` fetched at import (2s timeout, 8 MB). No kill-switch yet — see future-work note in [`writer_importer.py`](../../plugin/notebook/writer_importer.py). |
+| Markdown remote images | Up to 8 http(s) fetches per import and 4 seconds total, each fetch at most 2 seconds, chunked so a slow server cannot run past that fetch's slice of the budget; redirects still followed; no settings kill-switch yet (Phase 4, still noted in [`writer_importer.py`](../../plugin/notebook/writer_importer.py)). |
 
 ---
 

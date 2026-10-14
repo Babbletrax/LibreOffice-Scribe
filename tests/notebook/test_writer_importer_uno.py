@@ -92,7 +92,7 @@ def _is_leftover_list_numbering(numbering: str) -> bool:
     if not name:
         return False
     lowered = name.lower()
-    if lowered == "outline" or "outline" in lowered:
+    if "outline" in lowered:
         return False
     return True
 
@@ -997,4 +997,30 @@ def test_import_nested_lists_blockquotes_and_in_keep_style(ctx, doc):
         assert in_style.getPropertyValue("ParaKeepTogether") is False
     if info.hasPropertyByName("ParaKeepWithNext"):
         assert in_style.getPropertyValue("ParaKeepWithNext") is False
+
+
+@native_test
+@with_native_doc("writer")
+def test_doc_body_nonempty_sees_in_flow_image_uno(ctx, doc):
+    from plugin.notebook.writer_importer import (
+        _append_body_paragraph,
+        _doc_body_nonempty,
+        _insert_image_in_flow,
+    )
+
+    assert not _doc_body_nonempty(doc)
+    raw = (
+        b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01"
+        b"\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
+    )
+    ok = _insert_image_in_flow(doc, raw=raw, mime="image/png", images_before=0, ctx=ctx)
+    assert ok, "in-flow image insertion failed"
+    assert _doc_body_nonempty(doc)
+    _append_body_paragraph(doc, "after image", "Text Body", lead_break=True)
+    paras = _paragraphs(doc)
+    assert len(paras) >= 2, f"expected at least 2 paragraphs, got {len(paras)}: {paras!r}"
+    after_paras = [p for p in paras if "after image" in p[1]]
+    assert after_paras, f"'after image' paragraph missing: {paras!r}"
+    graphic_paras = [p for p in paras if p is not after_paras[0]]
+    assert all("after image" not in p[1] for p in graphic_paras)
 
