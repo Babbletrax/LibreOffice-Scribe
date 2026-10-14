@@ -17,12 +17,11 @@ must treat ``truncated`` / ``warning`` / ``flags`` as user-visible — a short
 
 from __future__ import annotations
 
-import contextlib
 import logging
 import os
 import re
 import threading
-from typing import Any, Iterator
+from typing import Any
 
 from plugin.scripting.venv.coerce import (
     ok_result as _ok_result,
@@ -66,14 +65,22 @@ def _require_duckdb(helper: str = "duckdb_sql") -> Any:
         raise SqlError("MISSING_PACKAGE", f"duckdb is required for {helper}.") from exc
 
 
-def _duckdb_version_tuple() -> tuple[int, ...]:
-    try:
-        import duckdb  # type: ignore[import-not-found]
+_DUCKDB_VERSION: tuple[int, ...] | None = None
 
-        ver = str(getattr(duckdb, "__version__", ""))
-        return tuple(int(p) for p in ver.split(".")[:2] if p.isdigit())
-    except Exception:
-        return (0, 0)
+
+def _duckdb_version_tuple() -> tuple[int, ...]:
+    global _DUCKDB_VERSION
+    if _DUCKDB_VERSION is not None:
+        return _DUCKDB_VERSION
+    duckdb = _require_duckdb()
+    raw_ver = str(getattr(duckdb, "__version__", ""))
+    parts = raw_ver.split(".")[:2]
+    if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+        _DUCKDB_VERSION = (int(parts[0]), int(parts[1]))
+    else:
+        log.warning("Unparsable DuckDB version: %r", raw_ver)
+        _DUCKDB_VERSION = (0, 0)
+    return _DUCKDB_VERSION
 
 
 def _is_duckdb_error(exc: BaseException) -> bool:
@@ -191,6 +198,14 @@ def _sandbox_session_id() -> str | None:
     except ImportError:
         return None
     return current_sandbox_session_id()
+
+
+def _sandbox_scoped_dir() -> str | None:
+    try:
+        from plugin.scripting.venv.venv_sandbox import current_sandbox_scoped_dir
+    except ImportError:
+        return None
+    return current_sandbox_scoped_dir()
 
 
 def _cell_sandbox_active() -> bool:
@@ -312,14 +327,14 @@ def _acquire_duckdb(session_id: str | None) -> tuple[Any, bool]:
     key = resolve_duckdb_session_id(session_id)
     if key is None:
         # Isolated / writeragent:sql trusted action: per-request catalog.
-        return GuardedDuckDBConnection(duckdb.connect()), False
+        return GuardedDuckDBConnection(duckdb.connect(), persist=False), False
     with _SESSION_LOCK:
         con = _SESSION_CONNECTIONS.get(key)
         if con is not None and _connection_alive(con):
             return con, True
         if con is not None:
             _close_connection(con)
-        con = GuardedDuckDBConnection(duckdb.connect())
+        con = GuardedDuckDBConnection(duckdb.connect(), persist=True)
         _SESSION_CONNECTIONS[key] = con
         return con, True
 
@@ -340,6 +355,10 @@ def _register_relation(con: Any, name: str, rel: Any) -> None:
 # Match only at a statement boundary ((?:^|;)\s*). A bare identifier
 # anywhere would flag 'SELECT load, copy FROM t'. SET, PRAGMA, CALL,
 # CREATE SECRET, and DETACH are statements too.
+# FORCE INSTALL does not start with INSTALL, so the old alternative missed it
+# and DuckDB installed httpfs. UPDATE EXTENSIONS fetches extension updates; a
+# table UPDATE does not say EXTENSIONS. RESET clears settings on a connection
+# that is not lock_configuration'd; SET was already denied.
 _BLOCKED_STMT_RE = re.compile(
     r"""(?isx)
     (?:^|;)\s*(?:\(\s*)*
@@ -349,10 +368,13 @@ _BLOCKED_STMT_RE = re.compile(
         | ATTACH\b
         | DETACH\b
         | INSTALL\b
+        | FORCE\s+INSTALL\b
         | LOAD\b
         | SET\b
+        | RESET\b
         | PRAGMA\b
         | CALL\b
+        | UPDATE\s+EXTENSIONS\b
         | CREATE\s+(?:OR\s+REPLACE\s+)?(?:(?:TEMPORARY|PERSISTENT)\s+)?SECRET\b
     )
     """
@@ -401,15 +423,59 @@ class GuardedDuckDBConnection:
     unguarded; ``session_duckdb()`` returns this wrapper as an advisory guard.
     """
 
-    def __init__(self, con: Any) -> None:
+    def __init__(self, con: Any, *, persist: bool) -> None:
         self.__con = con
+        self.__persist = persist
+        self.__confined = False
+        self.__jailed_folder: str | None = None
+
+    def _raw_connection(self) -> Any:
+        return self.__con
+
+    def confine_persist_folder(self, folder: str | None) -> None:
+        if not self.__persist or self.__confined:
+            return
+        chosen = folder if (isinstance(folder, str) and folder.strip()) else _sandbox_scoped_dir()
+        if not (chosen and chosen.strip()):
+            return
+        if _duckdb_version_tuple() < (1, 3):
+            return
+        base = os.path.realpath(os.path.abspath(chosen))
+        if self.__jailed_folder is not None and self.__jailed_folder != base:
+            log.warning("Cannot widen jailed DuckDB folder from %r to %r", self.__jailed_folder, base)
+            return
+        # Setting allowed_directories alone does not restrict reads; it is only an
+        # allowlist after external access is off, and DuckDB then refuses to change
+        # it. Absolute paths under base still read. Relative paths fail the literal check.
+        # That is why flat files are registered with resolve_flat_file_path's absolute
+        # path and why this runs once.
+        escaped_base = base.replace("'", "''")
+        self.__con.execute(f"SET allowed_directories=['{escaped_base}']")
+        self.__con.execute("SET enable_external_access=false")
+        self.__jailed_folder = base
+        self.__confined = True
+
+    def _confine_ephemeral(self) -> None:
+        if self.__persist or self.__confined:
+            return
+        self.__con.execute("SET enable_external_access=false")
+        self.__con.execute("SET lock_configuration=true")
+        self.__confined = True
 
     def execute(self, sql: str, *args: Any, **kwargs: Any) -> Any:
         _raise_if_write_or_escape(sql)
+        if self.__persist:
+            self.confine_persist_folder(None)
+        else:
+            self._confine_ephemeral()
         return self.__con.execute(sql, *args, **kwargs)
 
     def sql(self, sql: str, *args: Any, **kwargs: Any) -> Any:
         _raise_if_write_or_escape(sql)
+        if self.__persist:
+            self.confine_persist_folder(None)
+        else:
+            self._confine_ephemeral()
         return self.__con.sql(sql, *args, **kwargs)
 
     def close(self) -> None:
@@ -424,7 +490,7 @@ class GuardedDuckDBConnection:
 def _raw_duckdb(con: Any) -> Any:
     """The connection inside a guard. Module code only — not ``session_duckdb()._con``."""
     if isinstance(con, GuardedDuckDBConnection):
-        return con._GuardedDuckDBConnection__con
+        return con._raw_connection()
     return con
 
 
@@ -462,6 +528,10 @@ def _strip_sql_comments_and_strings(sql: str) -> tuple[str, list[str]]:
     return remainder, strings
 
 
+# Every literal is checked, including double quotes, because DuckDB accepts
+# read_csv("/etc/passwd") outside FROM. Limiting the check to FROM / JOIN would
+# miss that. A relative path with a slash is not a regex hit; the external-access
+# jail covers it once a folder is known.
 # A lone '/' or '\' is a delimiter, not an escape. startswith("/") would
 # reject split_part(x, '/', 1) and replace(p, '/', '_').
 def _string_looks_like_escape(literal: str) -> bool:
@@ -545,17 +615,6 @@ def _ok_sql_result(
         # ``message`` is a priority key in generic RPS HTML insert — bold, not a footnote.
         payload["message"] = warning
     return _ok_result(helper, **payload)
-
-
-@contextlib.contextmanager
-def _scoped_cwd(path: str) -> Iterator[None]:
-    """Temporarily chdir so relative filenames in user SQL resolve safely under scoped_dir."""
-    old = os.getcwd()
-    os.chdir(path)
-    try:
-        yield
-    finally:
-        os.chdir(old)
 
 
 def _validate_files(scoped_dir: str, files: list[str] | None) -> list[str]:
@@ -676,9 +735,10 @@ def _execute(
     flat_files: dict[str, str] | None = None,
     *,
     session_id: str | None = None,
+    helper: str = "query_folder_sql",
 ) -> tuple[Any, list[str]]:
     """Execute SQL against preloaded tables and scoped folder files, returning (df, used_files)."""
-    _require_duckdb("query_folder_sql")
+    _require_duckdb(helper)
 
     if not sql or not str(sql).strip():
         raise SqlError("INVALID_SQL", "sql is required")
@@ -712,12 +772,10 @@ def _execute(
 
     base = os.path.realpath(os.path.abspath(scoped_dir)) if scoped_dir else None
 
-    legacy_files: list[str] | None = None
     validated: list[str] = []
     resolved_flat = dict(flat_files) if flat_files else {}
 
     if isinstance(normalized_files, list):
-        legacy_files = normalized_files
         validated = _validate_files(scoped_dir, normalized_files) if scoped_dir else []
         for p in validated:
             bn = os.path.basename(p)
@@ -734,26 +792,16 @@ def _execute(
                 resolved_flat[k] = resolve_flat_file_path(scoped_dir, v)
 
     con, persist = _acquire_duckdb(session_id)
-    raw = _raw_duckdb(con)
     try:
+        if persist:
+            con.confine_persist_folder(base)
         _register_preloaded(con, preloaded)
         if resolved_flat and base:
             _register_flat_files(con, resolved_flat, scoped_dir=base)
 
-        # Lock configuration and turn off external access on a connection
-        # that is not kept. The tables are already in memory.
-        if not persist:
-            raw.execute("SET enable_external_access=false")
-            raw.execute("SET lock_configuration=true")
-        elif base and _duckdb_version_tuple() >= (1, 3):
-            escaped_base = base.replace("'", "''")
-            raw.execute(f"SET allowed_directories=['{escaped_base}']")
-
-        if base and legacy_files:
-            with _scoped_cwd(base):
-                df = con.execute(sql).df()
-        else:
-            df = con.execute(sql).df()
+        # os.chdir raced other cells; FROM 'name.csv' reads the table created
+        # under that name, including with external access off.
+        df = con.execute(sql).df()
     except SqlError:
         raise
     except Exception as exc:
@@ -767,13 +815,21 @@ def _execute(
         if not persist:
             _close_connection(con)
 
-    used = [os.path.basename(p) for p in validated]
+    used: list[str] = []
     if preloaded:
-        used = list(preloaded.keys()) + used
+        used.extend(preloaded.keys())
+    used.extend(os.path.basename(p) for p in validated)
     if resolved_flat:
-        used = list(resolved_flat.keys()) + used
+        used.extend(resolved_flat.keys())
 
-    return df, used
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in used:
+        if item in seen:
+            continue
+        seen.add(item)
+        deduped.append(item)
+    return df, deduped
 
 
 def run_sql(
@@ -790,12 +846,15 @@ def run_sql(
     Prefer this from ``=PY()`` / shared-kernel cells instead of raw
     ``import duckdb``.
 
-    * Execute: ``run_sql(sql)`` or ``run_sql(sql, con)`` returns the same
-      honesty dict as ``query_folder_sql``. No ``con`` uses ``_acquire_duckdb``
-      so a persistable sandbox session reuses the catalog.
-    * Folder join: a mapping as the second arg (or ``preloaded=`` / ``files`` /
-      ``scoped_dir``) runs ``_execute`` and returns the full DataFrame for
-      spill without the 200 row cap.
+    * Execute: ``run_sql(sql)`` and ``run_sql(sql, con)`` return the honesty
+      dict (``truncated`` / ``warning`` / ``flags``, 200-row cap) and turn
+      ``SqlError`` into an error dict. No ``con`` uses ``_acquire_duckdb``.
+      A ``scoped_dir`` by itself does not change this, including the folder
+      ``=PY()`` always passes in.
+    * Folder join: folder mode is a dict second argument, or ``preloaded=``,
+      or ``files=`` (including an empty list). That path returns the full
+      DataFrame and raises ``SqlError``. It acquires the session connection
+      and does not use ``con``.
     """
     helper = "run_sql"
     folder_preloaded = preloaded
@@ -803,15 +862,18 @@ def run_sql(
         folder_preloaded = con
         con = None
 
-    if folder_preloaded is not None or files is not None or scoped_dir is not None:
-        # _execute returns the full frame. The row cap would truncate a folder
-        # join, and wrapping SqlError would drop its code.
+    if folder_preloaded is not None or files is not None:
+        # A saved-doc cell always has scoped_dir set by run_sql_bound, so keying
+        # off scoped_dir is not None returned a DataFrame and dropped con. Folder
+        # reads are files / preloaded. The host folder is only the directory
+        # those reads resolve under.
         df, _used = _execute(
             scoped_dir,
             sql,
             files=files,
             preloaded=folder_preloaded,
             session_id=session_id,
+            helper=helper,
         )
         return df
 
@@ -826,10 +888,6 @@ def run_sql(
         if con is None:
             acquired, persist = _acquire_duckdb(session_id)
             target_con = acquired
-            if not persist:
-                raw = _raw_duckdb(acquired)
-                raw.execute("SET enable_external_access=false")
-                raw.execute("SET lock_configuration=true")
         else:
             target_con = con
 
@@ -884,6 +942,7 @@ def query_folder_sql(
             preloaded=preloaded,
             flat_files=flat_files,
             session_id=session_id,
+            helper=helper,
         )
         return _ok_sql_result(helper, df, files_used=used)
     except SqlError as exc:
