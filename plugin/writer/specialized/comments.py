@@ -681,9 +681,9 @@ def _read_annotation(field: Any, para_ranges: Any, text_obj: Any, doc_svc: Any) 
             preview = ""
         if not preview:
             try:
-                from plugin.writer.search import _enclosing_paragraph_text
+                from plugin.writer.search import enclosing_paragraph_text
 
-                ptxt = (_enclosing_paragraph_text(anchor) or "").strip()
+                ptxt = (enclosing_paragraph_text(anchor) or "").strip()
                 if ptxt:
                     preview = ptxt[:120]
                     entry["anchor_is_paragraph_context"] = True

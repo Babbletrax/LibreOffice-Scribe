@@ -230,6 +230,28 @@ def test_location_reports_table_cell():
     assert describe_match_location(found) == "table 'Table1' cell B2"
 
 
+def test_cell_name_ignores_non_string():
+    table = MagicMock()
+    table.getName.return_value = "Table1"
+    cur = MagicMock()
+
+    def _get_prop(name):
+        if name == "TextTable":
+            return table
+        if name == "CellName":
+            return MagicMock()
+        return None
+
+    cur.getPropertyValue.side_effect = _get_prop
+    cur.Cell = None
+    text = MagicMock()
+    text.getPropertyValue.side_effect = lambda name: None
+    found = MagicMock()
+    found.getText.return_value = text
+    found.getText.return_value.createTextCursorByRange.return_value = cur
+    assert describe_match_location(found) == "table 'Table1'"
+
+
 # ---- comment_matches --------------------------------------------------------
 
 def test_comment_match_yields_hit_author_content():
