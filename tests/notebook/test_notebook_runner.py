@@ -55,6 +55,14 @@ def test_format_run_output_text_error_traceback():
     assert "\x1b" not in text
 
 
+def test_format_run_output_text_strips_stream_ansi_and_cr():
+    result = {"status": "ok", "stdout": "\x1b[32mgo\x1b[0m\rdone\n"}
+    formatted = format_run_output_text(result)
+    assert "done" in formatted
+    assert "\x1b" not in formatted
+    assert "go" not in formatted
+
+
 def test_format_run_output_text_skips_image_result():
     wire = {"__wa_payload__": "image", "data": b"x", "format": "png"}
     with patch("plugin.notebook.notebook_runner.is_image_payload", return_value=True):

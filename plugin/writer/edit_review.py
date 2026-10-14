@@ -91,6 +91,17 @@ def review_recording_enabled(ctx: Any) -> bool:
     return get_agent_edit_review_mode(ctx) in ("record", "wait")
 
 
+def flag_style_unreviewed(ctx: Any, result: dict[str, Any]) -> None:
+    """Flag style and page-layout mutations for the user when review recording is active.
+
+    Page-style and text-style edits do not create redlines; the flag tells the agent to say so.
+    """
+    if result.get("status") != "ok":
+        return
+    if review_recording_enabled(ctx):
+        result["style_unreviewed"] = True
+
+
 def edit_review_wait_seconds(ctx: Any) -> int:
     """Max seconds ``apply_document_content`` may block waiting for review; 0 = don't wait."""
     from plugin.framework.config import get_config_int_safe
@@ -1204,11 +1215,13 @@ class WriterCompoundUndo:
     _title: str
     _undo_manager: Any | None
     _open: bool
+    entered: bool
 
     def __init__(self, doc: Any, title: str) -> None:
         self._title = title
         self._undo_manager = None
         self._open = False
+        self.entered = False
         try:
             if not hasattr(doc, "getUndoManager"):
                 log.warning("WriterCompoundUndo: doc has no getUndoManager, undo grouping skipped (title=%r)", title)
@@ -1227,6 +1240,7 @@ class WriterCompoundUndo:
             um.enterUndoContext(title)
             self._undo_manager = um
             self._open = True
+            self.entered = True
             # Log after success so we always see this when the context is live.
             log.info("WriterCompoundUndo: context entered %r", title)
         except Exception as e:

@@ -41,6 +41,18 @@ def test_get_selected_image_bytes_raises_when_no_selection():
     assert exc.value.code == "NO_IMAGE_SELECTED"
 
 
+def test_get_selected_image_bytes_raises_when_export_fails():
+    ctx = MagicMock()
+    ctx.stop_checker = None
+    doc = MagicMock()
+    with patch("plugin.vision.vision_runner.get_selected_image_base64", side_effect=RuntimeError("export failed")):
+        with pytest.raises(ToolExecutionError) as exc:
+            get_selected_image_bytes(ctx, doc)
+    assert exc.value.code == "IMAGE_EXPORT_FAILED"
+    assert "Could not export the selected image" in str(exc.value)
+
+
+
 @patch("plugin.vision.vision_runner.merge_vision_params", side_effect=lambda _ctx, params: dict(params or {}))
 @patch("plugin.vision.vision_runner.run_vision")
 @patch("plugin.vision.vision_runner.get_selected_image_bytes")
@@ -128,6 +140,34 @@ def test_resolve_vision_image_bytes_raises_when_name_missing(mock_get_obj):
     with pytest.raises(ToolExecutionError) as exc:
         resolve_vision_image_bytes(ctx, doc, image_name="Missing")
     assert exc.value.code == "IMAGE_NOT_FOUND"
+
+
+@patch("plugin.vision.vision_runner.export_graphic_object_to_bytes", side_effect=RuntimeError("export crash"))
+@patch("plugin.vision.vision_runner._get_graphic_object")
+def test_resolve_vision_image_bytes_raises_when_export_fails(mock_get_obj, mock_export):
+    ctx = MagicMock()
+    ctx.stop_checker = None
+    doc = MagicMock()
+    graphic = MagicMock()
+    mock_get_obj.return_value = graphic
+    with pytest.raises(ToolExecutionError) as exc:
+        resolve_vision_image_bytes(ctx, doc, image_name="Photo1")
+    assert exc.value.code == "IMAGE_EXPORT_FAILED"
+    assert "export crash" in str(exc.value)
+
+
+@patch("plugin.vision.vision_runner.export_graphic_object_to_bytes", return_value=None)
+@patch("plugin.vision.vision_runner._get_graphic_object")
+def test_resolve_vision_image_bytes_raises_when_export_returns_none(mock_get_obj, mock_export):
+    ctx = MagicMock()
+    ctx.stop_checker = None
+    doc = MagicMock()
+    graphic = MagicMock()
+    mock_get_obj.return_value = graphic
+    with pytest.raises(ToolExecutionError) as exc:
+        resolve_vision_image_bytes(ctx, doc, image_name="Photo1")
+    assert exc.value.code == "IMAGE_NOT_FOUND"
+
 
 
 @patch("plugin.vision.vision_runner.merge_vision_params", side_effect=lambda _ctx, params: dict(params or {}))
@@ -324,6 +364,20 @@ def test_resolve_locale_reraises_disposed_selection():
     doc.CurrentController.Selection = selection
     with pytest.raises(DocumentDisposedError):
         _resolve_locale_language(MagicMock(), doc, None)
+
+
+def test_resolve_locale_runtime_exception_is_not_document_disposed():
+    class RuntimeException(Exception):
+        pass
+
+    doc = MagicMock()
+    selection = MagicMock()
+    selection.getCount.return_value = 0
+    selection.getPropertyValue.side_effect = RuntimeException("unexpected error")
+    doc.CurrentController.Selection = selection
+    with patch("plugin.framework.i18n.get_lo_locale", return_value="en_US"):
+        res = _resolve_locale_language(MagicMock(), doc, None)
+    assert res == "en"
 
 
 def test_run_trusted_vision_rejects_oversized_image_before_rpc():

@@ -48,7 +48,7 @@ When enumerating the collection returned by `getRedlines()`, each element repres
 - `RedlineAuthor` (string): The name of the user who made the change.
 - `RedlineDateTime` (`com.sun.star.util.DateTime`): The timestamp when the change was made (contains Year, Month, Day, Hours, Minutes, etc.).
 - `RedlineComment` (string): An optional comment attached to the tracked change.
-- `RedlineIdentifier` (string): An internal identifier for the redline.
+- `RedlineIdentifier` (string): An internal identifier for the redline. It is not a stable identity by itself. `manage_tracked_changes` treats a resolve as successful only when `redline_identity_key` for that index drops by one and every other key stays. A stacked Delete reuses the identifier (`review_scan.py`).
 
 ## Comments / Annotations
 
@@ -73,17 +73,11 @@ Because the standard UNO `XRedline` objects in Python don't consistently expose 
 To use these, obtain a `com.sun.star.frame.DispatchHelper` and execute the command against the document's current frame (`doc.getCurrentController().getFrame()`).
 
 ### Available Commands
-- `.uno:AcceptAllTrackedChanges`: Accepts all tracked changes in the document at once.
-- `.uno:RejectAllTrackedChanges`: Rejects all tracked changes in the document at once.
+- `.uno:AcceptAllTrackedChanges`: Accepts all tracked changes in the document at once. On a document with `getRedlines`, success is `getCount() == 0` (or the count was already 0). The dispatch `any` is ignored. On a document without `getRedlines`, a `None` dispatch is still `UNSUPPORTED`.
+- `.uno:RejectAllTrackedChanges`: Rejects all tracked changes in the document at once. On a document with `getRedlines`, success is `getCount() == 0` (or the count was already 0). The dispatch `any` is ignored. On a document without `getRedlines`, a `None` dispatch is still `UNSUPPORTED`.
 - `.uno:AcceptTrackedChange`: Accepts the currently selected tracked change (requires navigating the view cursor to the change first).
 - `.uno:RejectTrackedChange`: Rejects the currently selected tracked change (requires navigating the view cursor to the change first).
 - `.uno:ShowTrackedChanges`: On this build (LO 26.8.1.1) the dispatch returns a `DispatchResultEvent` and does not change `ShowChanges` or `RedlineDisplayType`. The tool sets `RedlineDisplayType` directly instead of dispatching this command.
-
-### Single and bulk resolve
-- **Cross-text redlines:** Calling `compareRegionStarts` on ranges from different text components (e.g. table cells, frames, footnotes) raises `com.sun.star.lang.IllegalArgumentException`. This is treated as no overlap rather than a failure to read bounds.
-- **View selection restoration:** Before selecting a single tracked change to dispatch accept or reject, the current view selection is recorded; after the dispatch completes (or fails), the previous view selection is restored in a `finally` block.
-- **Bulk resolve count checking:** Bulk accept and reject inspect the document redline count (`getRedlines().getCount()`). If the count is 0, the dispatch is skipped and a no-op message is returned. If after dispatch the integer count has not changed, an error is returned.
-
 
 
 ## Example Usage (Python-UNO)
@@ -129,6 +123,10 @@ cursor.gotoRange(redline.getPropertyValue("RedlineEnd"), True)
 # then dispatch .uno:AcceptTrackedChange / .uno:RejectTrackedChange
 ```
 
+Note that `compareRegionStarts` throws `IllegalArgumentException` across `XText`s (a table cell, footnote, header, or frame). The tool skips those redlines during overlap checking. Same-text comparison errors still refuse.
+
+Before `select`, the tool saves `controller.getSelection()`. After the dispatch and the identity-key check, a `finally` restores that selection, including when the tool returns an error. If the saved selection is missing, nothing is restored. A failure to read it is logged at debug and a failure to restore it is logged with `log.exception`; neither changes the tool result. If `select` of the change itself throws, the previous selection is not restored.
+
 ### What the shipped tool returns
 
-`track_changes_list` reports, per change, the author and type plus the change **text** (for a deletion, the removed text via `RedlineText`) and its **location** (body, table cell, header/footer, and so on), along with the document's current review mode. That is enough for a model to decide what to accept or reject without a second lookup.
+`track_changes_list` reports, per change, the author and type plus the change **text** (for a deletion, the removed text via `RedlineText`) and its **location** (body, table cell, header/footer, and so on), along with the document's current review mode. That is enough for a model to decide what to accept or reject without a second lookup. After a single accept or reject the tool tells the caller to run `track_changes_list` again because indexes shift. `track_changes_show` takes the Writer `RedlineDisplayType` path only when the document has `getRedlines`. Calc gets the stub.

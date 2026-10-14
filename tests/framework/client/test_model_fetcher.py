@@ -41,11 +41,42 @@ class TestFetchAvailableModelsCache:
 
     def teardown_method(self):
         import plugin.framework.client.model_fetcher as cfg
-        keys_to_del = [k for k in cfg._model_fetch_cache if (('127.0.0.1:5890' in k))]
+        keys_to_del = [k for k in cfg._model_fetch_cache if any(sub in k for sub in (('127.0.0.1:5890'), 'openwebui.example', 'notopenwebui.example', '127.0.0.1:3000'))]
         for k in keys_to_del:
             del cfg._model_fetch_cache[k]
             cfg._model_fetch_image_cache.pop(k, None)
             cfg._model_context_cache.pop(k, None)
+
+    def test_openwebui_host_catalog_url_strips_pasted_api(self):
+        from plugin.framework.client.model_fetcher import fetch_available_models
+
+        payload = {'data': [{'id': 'm1'}]}
+        with patch('plugin.framework.client.requests.sync_request', return_value=payload) as mock_sync, \
+             patch('plugin.framework.client.model_fetcher.get_config_bool_safe', return_value=False):
+            r1 = fetch_available_models('https://chat.openwebui.example/api', api_key_override='sk-test')
+            assert r1 == ['m1']
+            assert mock_sync.call_count == 1
+            assert mock_sync.call_args[0][0] == 'https://chat.openwebui.example/api/models'
+
+            r2 = fetch_available_models('https://chat.openwebui.example', api_key_override='sk-test')
+            assert r2 == ['m1']
+            assert mock_sync.call_count == 1
+
+            r3 = fetch_available_models('https://notopenwebui.example/api', api_key_override='sk-test')
+            assert r3 == ['m1']
+            assert mock_sync.call_count == 2
+            assert mock_sync.call_args[0][0] == 'https://notopenwebui.example/api/v1/models'
+
+    def test_openwebui_checkbox_does_not_double_api(self):
+        from plugin.framework.client.model_fetcher import fetch_available_models
+
+        payload = {'data': [{'id': 'm1'}]}
+        with patch('plugin.framework.client.requests.sync_request', return_value=payload) as mock_sync, \
+             patch('plugin.framework.client.model_fetcher.get_config_bool_safe', return_value=True):
+            r = fetch_available_models('http://127.0.0.1:3000/api', api_key_override='sk')
+            assert r == ['m1']
+            assert mock_sync.call_count == 1
+            assert mock_sync.call_args[0][0] == 'http://127.0.0.1:3000/api/models'
 
     def test_second_call_does_not_http(self):
         from plugin.framework.client import model_fetcher as cfg
@@ -297,6 +328,7 @@ class TestFetchAvailableImageModels:
             {'id': 'no', 'architecture': {'input_modalities': ['text']}},
             {'id': 'empty', 'architecture': {'input_modalities': []}},
             {'id': 'top', 'input_modalities': ['image']},
+            {'id': 'bad-top', 'input_modalities': 'image', 'architecture': {'input_modalities': ['image']}},
             {'id': 'omit'},
             {'id': 'omit-arch', 'architecture': {'output_modalities': ['text']}},
         ]
@@ -642,6 +674,42 @@ class TestHasNativeVision:
         dumped = cfg.to_dict()
         assert (dumped['vision_support_map']['https://openrouter.ai/api@google/gemini-3.8-flash']) is False
 
+    def test_vision_memo_honors_api_key_override(self):
+        from plugin.framework.client.model_fetcher import fetch_available_models, has_native_vision
+
+        endpoint = 'https://openrouter.ai/api'
+        payload = {
+            'data': [
+                {
+                    'id': 'google/gemini-3.8-flash',
+                    'architecture': {'input_modalities': ['text', 'image']},
+                },
+            ]
+        }
+        saved = {}
+
+        def mock_get_config(key):
+            if key == 'vision_support_map':
+                return dict(saved)
+            return {}
+
+        def mock_update_config_mapping(key, mutator, event_key=None):
+            if key == 'vision_support_map':
+                mutator(saved)
+
+        with patch('plugin.framework.client.requests.sync_request', return_value=payload) as mock_sync, \
+             patch('plugin.framework.client.model_fetcher.get_api_key_for_endpoint', return_value=''), \
+             patch('plugin.framework.client.model_fetcher.get_config', side_effect=mock_get_config), \
+             patch('plugin.framework.client.model_fetcher.update_config_mapping', side_effect=mock_update_config_mapping):
+            fetch_available_models(endpoint, api_key_override='sk-dialog')
+            assert mock_sync.call_count == 1
+
+            assert not has_native_vision('google/gemini-3.8-flash', endpoint, allow_fetch=False)
+            assert mock_sync.call_count == 1
+
+            assert has_native_vision('google/gemini-3.8-flash', endpoint, allow_fetch=False, api_key_override=' sk-dialog ')
+            assert mock_sync.call_count == 1
+
 
 class TestParseOllamaRuntimeNumCtx:
     """Issue #570: live PARAMETER num_ctx wins over trained context_length."""
@@ -737,8 +805,19 @@ class TestV1ContextHarvest:
         import plugin.framework.client.model_fetcher as mf
 
         for store in (mf._model_fetch_cache, mf._model_fetch_image_cache, mf._model_context_cache):
-            for key in [k for k in store if "58923" in k]:
+            for key in [k for k in store if "58923" in k or "openwebui.example" in k]:
                 store.pop(key, None)
+
+    def test_cached_v1_context_tokens_uses_override_across_openwebui_forms(self):
+        from plugin.framework.client.model_fetcher import cached_v1_context_tokens, fetch_available_models
+
+        payload = {"data": [{"id": "m", "context_length": 4096}]}
+        with patch("plugin.framework.client.requests.sync_request", return_value=payload), \
+             patch("plugin.framework.client.model_fetcher.get_api_key_for_endpoint", return_value=""):
+            fetch_available_models("https://chat.openwebui.example/api", api_key_override="sk-owu")
+
+            assert cached_v1_context_tokens("https://chat.openwebui.example", "m", api_key_override="sk-owu") == 4096
+            assert cached_v1_context_tokens("https://chat.openwebui.example", "m", api_key_override=None) is None
 
     def test_groq_context_window_harvested(self):
         from plugin.framework.client import model_fetcher as mf
@@ -1077,6 +1156,38 @@ class TestFetchAvailableSpeechModels:
         with patch("plugin.framework.client.requests.sync_request") as mock_sync:
             assert cfg.fetch_together_tts_voices("https://openrouter.ai/api", model_id="hexgrad/Kokoro-82M") is None
             mock_sync.assert_not_called()
+
+    def test_modality_and_together_voice_results_are_copies(self):
+        from plugin.framework.client.model_fetcher import fetch_available_tts_models, fetch_together_tts_voices
+
+        speech_payload = {
+            'data': [
+                {
+                    'id': 'speech-1',
+                    'architecture': {'output_modalities': ['speech']},
+                }
+            ]
+        }
+        voices_payload = {
+            'data': [
+                {'model': 'm1', 'voices': [{'name': 'v1'}]}
+            ]
+        }
+        with patch('plugin.framework.client.requests.sync_request', return_value=speech_payload):
+            tts1 = fetch_available_tts_models('https://openrouter.ai/api', api_key_override='sk-or')
+            assert tts1 == ['speech-1']
+            tts1.append('extra-token')
+            tts2 = fetch_available_tts_models('https://openrouter.ai/api', api_key_override='sk-or')
+            assert tts2 == ['speech-1']
+            assert 'extra-token' not in tts2
+
+        with patch('plugin.framework.client.requests.sync_request', return_value=voices_payload):
+            voices1 = fetch_together_tts_voices('https://api.together.xyz', api_key_override='sk-tog')
+            assert voices1 == {'m1': ['v1']}
+            voices1['m1'].append('extra-voice')
+            voices2 = fetch_together_tts_voices('https://api.together.xyz', api_key_override='sk-tog')
+            assert voices2 == {'m1': ['v1']}
+            assert 'extra-voice' not in voices2['m1']
 
 
 def test_catalog_error_does_not_include_secret(caplog):

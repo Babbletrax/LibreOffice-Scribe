@@ -233,6 +233,7 @@ def test_resolve_clear_direct_defaults():
     assert ApplyStyle._resolve_clear_direct("ParagraphStyles", "") == "style_props"
     assert ApplyStyle._resolve_clear_direct("ParagraphStyles", "none") == "none"
     assert ApplyStyle._resolve_clear_direct("CharacterStyles", None) == "none"
+    assert ApplyStyle._resolve_clear_direct("CharacterStyles", "style_props") == "none"
     assert ApplyStyle._resolve_clear_direct("CharacterStyles", "all") == "all"
 
 
@@ -578,9 +579,10 @@ def test_create_style_conditional(mock_nv):
     assert nv_instance.Value == "Heading 1"
 
 
+@patch("os.path.isfile", return_value=True)
 @patch("plugin.writer.styles.uno")
 @patch("plugin.writer.styles.PropertyValue")
-def test_import_styles(mock_pv, mock_uno, mock_ctx):
+def test_import_styles(mock_pv, mock_uno, mock_isfile, mock_ctx):
     mock_uno.systemPathToFileUrl.return_value = "file:///path/to/doc.ott"
 
     pv_instance = MagicMock()
@@ -918,6 +920,10 @@ def test_apply_style_all_matches_does_not_stop_early() -> None:
     assert tool.is_async() is False
 
     doc = WriterDocStub()
+    undo_mgr = MagicMock()
+    undo_mgr.isLocked.return_value = False
+    doc.getUndoManager = MagicMock(return_value=undo_mgr)
+
     ctx = ToolContext(doc, MagicMock(), "writer", MagicMock(), "test")
     ctx.services.get = MagicMock(return_value=None)
 
@@ -953,3 +959,265 @@ def test_apply_style_all_matches_does_not_stop_early() -> None:
             assert res["status"] == "ok"
             assert res["applied_count"] == 4
             assert "Tool stopped early" not in res["message"]
+
+
+def test_style_color_par_back_and_automatic():
+    style = MagicMock()
+    fam = _style_family({"MyStyle": style})
+    ctx = _ctx_with_families(ParagraphStyles=fam)
+
+    res = StyleUpdate().execute(ctx, style="MyStyle", property_updates={"ParaBackColor": "#00FF00"})
+    assert res["status"] == "ok"
+    style.setPropertyValue.assert_any_call("ParaBackColor", 0x00FF00)
+
+    res = StyleUpdate().execute(ctx, style="MyStyle", property_updates={"ParaBackColor": -1})
+    assert res["status"] == "ok"
+    style.setPropertyValue.assert_any_call("ParaBackColor", -1)
+
+    res = StyleUpdate().execute(ctx, style="MyStyle", property_updates={"ParaBackColor": "transparent"})
+    assert res["status"] == "ok"
+    style.setPropertyValue.assert_any_call("ParaBackColor", -1)
+
+    style.reset_mock()
+    res = StyleUpdate().execute(ctx, style="MyStyle", property_updates={"ParaBackColor": "not-a-color"})
+    assert "ParaBackColor" in res.get("failed_properties", {})
+    style.setPropertyValue.assert_not_called()
+
+
+def test_style_update_char_posture_range():
+    style = MagicMock()
+    fam = _style_family({"MyStyle": style})
+    ctx = _ctx_with_families(ParagraphStyles=fam)
+
+    res = StyleUpdate().execute(ctx, style="MyStyle", property_updates={"CharPosture": 2})
+    assert res["status"] == "ok"
+    style.setPropertyValue.assert_any_call("CharPosture", 2)
+
+    res = StyleUpdate().execute(ctx, style="MyStyle", property_updates={"CharPosture": 1})
+    assert res["status"] == "ok"
+    style.setPropertyValue.assert_any_call("CharPosture", 1)
+
+    style.reset_mock()
+    res = StyleUpdate().execute(ctx, style="MyStyle", property_updates={"CharPosture": "italic"})
+    assert "CharPosture" in res.get("failed_properties", {})
+
+    res = StyleUpdate().execute(ctx, style="MyStyle", property_updates={"CharPosture": True})
+    assert "CharPosture" in res.get("failed_properties", {})
+    style.setPropertyValue.assert_not_called()
+
+
+def test_style_get_info_char_posture_and_line_spacing():
+    from types import SimpleNamespace
+    style = MagicMock()
+    enum_slant = SimpleNamespace(value="ITALIC", __module__="uno")
+    spacing_struct = _FakeLineSpacing()
+    spacing_struct.Mode = 0
+    spacing_struct.Height = 150
+
+    def get_prop(p):
+        if p == "CharPosture":
+            return enum_slant
+        if p == "ParaLineSpacing":
+            return spacing_struct
+        return None
+
+    style.getPropertyValue.side_effect = get_prop
+    fam = _style_family({"MyStyle": style})
+    ctx = _ctx_with_families(ParagraphStyles=fam)
+
+    res = StyleGetInfo().execute(ctx, style="MyStyle", family="ParagraphStyles")
+    assert res["status"] == "ok"
+    assert res["CharPosture"] == 2
+    assert res["ParaLineSpacing"] == {"Mode": "prop", "Height": 150}
+
+    # Also assert int path for CharPosture
+    style.getPropertyValue.side_effect = lambda p: 1 if p == "CharPosture" else None
+    res2 = StyleGetInfo().execute(ctx, style="MyStyle", family="ParagraphStyles")
+    assert res2["CharPosture"] == 1
+
+
+def test_schema_lists_struct_keys():
+    props = StyleUpdate.parameters["properties"]["property_updates"]["properties"]
+    assert "ParaLineSpacing" in props
+    assert "ParaTabStops" in props
+    char_posture_desc = props["CharPosture"]["description"]
+    assert "1=Oblique" in char_posture_desc
+    assert "2=Italic" in char_posture_desc
+
+
+def test_create_style_does_not_insert_when_a_property_fails():
+    fam = _style_family({})
+    ctx = _ctx_with_families(ParagraphStyles=fam)
+    style_instance = MagicMock()
+    def fail_prop(k, v):
+        if k == "CharWeight":
+            raise RuntimeError("UNO error setting CharWeight")
+    style_instance.setPropertyValue.side_effect = fail_prop
+    ctx.doc.createInstance = MagicMock(return_value=style_instance)
+
+    res = StyleCreate().execute(ctx, style="NewStyle", family="ParagraphStyles", property_updates={"CharWeight": 150})
+    assert res["status"] == "error"
+    assert "CharWeight" in res.get("failed_properties", {})
+    fam.insertByName.assert_not_called()
+
+
+def test_create_style_bad_conditional_rule_inserts_nothing():
+    fam = _style_family({})
+    ctx = _ctx_with_families(ParagraphStyles=fam)
+    style_instance = MagicMock()
+    ctx.doc.createInstance = MagicMock(return_value=style_instance)
+
+    # Missing target_style
+    res1 = StyleCreate().execute(ctx, style="CondStyle", family="ParagraphStyles", conditional_rules=[{"context": "Table"}])
+    assert res1["status"] == "error"
+    fam.insertByName.assert_not_called()
+
+    # target_style does not exist in family
+    res2 = StyleCreate().execute(ctx, style="CondStyle", family="ParagraphStyles", conditional_rules=[{"context": "Table", "target_style": "Missing"}])
+    assert res2["status"] == "error"
+    fam.insertByName.assert_not_called()
+
+
+def test_create_style_character_conditional_rules_error():
+    fam = _style_family({})
+    ctx = _ctx_with_families(CharacterStyles=fam)
+
+    res = StyleCreate().execute(ctx, style="CharCond", family="CharacterStyles", conditional_rules=[{"context": "Table", "target_style": "Standard"}])
+    assert res["status"] == "error"
+    assert "ParagraphStyles" in res["message"]
+    fam.insertByName.assert_not_called()
+
+
+def test_style_update_rejects_nondict_and_empty():
+    ctx = _ctx_with_families(ParagraphStyles=_style_family({"MyStyle": MagicMock()}))
+
+    res1 = StyleUpdate().execute(ctx, style="MyStyle", property_updates=["CharWeight"])
+    assert res1["status"] == "error"
+    assert "property_updates must be an object." in res1["message"]
+
+    res2 = StyleUpdate().execute(ctx, style="MyStyle")
+    assert res2["status"] == "error"
+    assert "Nothing to update" in res2["message"]
+
+
+def test_no_character_style_token_is_not_a_style_object():
+    char_fam = _style_family({"Default Style": MagicMock()})
+    ctx = _ctx_with_families(CharacterStyles=char_fam)
+
+    res_get = StyleGetInfo().execute(ctx, style="No Character Style", family="CharacterStyles")
+    assert res_get["status"] == "error"
+    assert "No Character Style is the apply_style token" in res_get["message"]
+
+    res_up = StyleUpdate().execute(ctx, style="No Character Style", family="CharacterStyles", property_updates={"CharWeight": 150})
+    assert res_up["status"] == "error"
+    assert "No Character Style is the apply_style token" in res_up["message"]
+
+    res_cl = StyleClone().execute(ctx, style="No Character Style", new_style="Clone", family="CharacterStyles")
+    assert res_cl["status"] == "error"
+    assert "No Character Style is the apply_style token" in res_cl["message"]
+
+    char_fam.hasByName.assert_not_called()
+
+
+def test_apply_style_character_ignores_schema_default_clear_direct():
+    fam = _style_family({"Source Text": MagicMock()})
+    cursor = MagicMock()
+    ctx = _ctx_with_families(CharacterStyles=fam)
+
+    with patch("plugin.writer.styles.resolve_target_cursor", return_value=cursor):
+        res = ApplyStyle().execute(ctx, style="Source Text", family="CharacterStyles", clear_direct="style_props")
+        assert res["status"] == "ok"
+        cursor.setPropertyValue.assert_called_with("CharStyleName", "Source Text")
+
+
+def test_apply_style_existence_check_reraises_disposed():
+    DisposedEx = type("DisposedException", (Exception,), {})
+    ctx = MagicMock()
+    ctx.doc.getStyleFamilies.side_effect = DisposedEx("gone")
+
+    with pytest.raises(Exception) as exc_info:
+        ApplyStyle().execute(ctx, style="Standard", family="ParagraphStyles")
+    assert "DisposedException" in type(exc_info.value).__name__
+
+
+def test_apply_style_all_matches_rolls_back():
+    r1, r2 = MagicMock(), MagicMock()
+    for r in (r1, r2):
+        t = MagicMock()
+        t.createTextCursorByRange.return_value = MagicMock()
+        r.getText.return_value = t
+        r.getStart.return_value = "s"
+        r.getEnd.return_value = "e"
+
+    tool = ApplyStyle()
+    doc = MagicMock()
+    mgr = MagicMock()
+    mgr.isLocked.return_value = False
+    doc.getUndoManager.return_value = mgr
+    mgr.getAllUndoActionTitles.return_value = ["Agent Edit"]
+    ctx = TestingFactory.create_context(doc=doc, doc_type="writer")
+
+    call_count = 0
+    def mock_apply_one(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        if call_count == 2:
+            raise RuntimeError("apply failure")
+        return {"applied_direct": 1}
+
+    tool._apply_one = mock_apply_one
+    with patch("plugin.writer.search.find_all_ranges", return_value=[r1, r2]), \
+         patch("plugin.writer.edit_review.next_agent_edit_undo_title", return_value="Agent Edit"):
+        res = tool.execute(ctx, style="Heading 1", target="search", old_content="foo", all_matches=True)
+        assert res["status"] == "error"
+        assert "Nothing was changed" in res["message"]
+        mgr.undo.assert_called_once()
+
+
+def test_apply_style_all_matches_refuses_without_undo_manager():
+    tool = ApplyStyle()
+    doc = MagicMock()
+    doc.getUndoManager.side_effect = RuntimeError("no undo manager")
+    ctx = TestingFactory.create_context(doc=doc, doc_type="writer")
+
+    r1, r2 = MagicMock(), MagicMock()
+    mock_apply_one = MagicMock()
+    tool._apply_one = mock_apply_one
+
+    with patch("plugin.writer.search.find_all_ranges", return_value=[r1, r2]):
+        res = tool.execute(ctx, style="Heading 1", target="search", old_content="foo", all_matches=True)
+        assert res["status"] == "error"
+        assert "Nothing was changed" in res["message"]
+        mock_apply_one.assert_not_called()
+
+
+def test_import_styles_rejects_relative_and_missing(mock_ctx):
+    tool = StyleImport()
+    # Relative path
+    res1 = tool.execute(mock_ctx, path="template.ott")
+    assert res1["status"] == "error"
+    assert "path must be an absolute filesystem path" in res1["message"]
+    assert len(mock_ctx.doc._load_styles_calls) == 0
+
+    # Absolute but non-existent
+    with patch("os.path.isfile", return_value=False):
+        res2 = tool.execute(mock_ctx, path="/nonexistent/template.ott")
+        assert res2["status"] == "error"
+        assert "path does not exist" in res2["message"]
+        assert len(mock_ctx.doc._load_styles_calls) == 0
+
+
+def test_style_list_family_description():
+    desc = StyleList.parameters["properties"]["family"]["description"]
+    assert "Default: ParagraphStyles" not in desc
+    tool = StyleList()
+    ctx = _ctx_with_families(
+        ParagraphStyles=_style_family({}),
+        CharacterStyles=_style_family({}),
+        PageStyles=_style_family({}),
+    )
+    res1 = tool.execute(ctx, family="")
+    assert "families" in res1
+    res2 = tool.execute(ctx, family="ParagraphStyles")
+    assert res2["status"] == "ok"
+

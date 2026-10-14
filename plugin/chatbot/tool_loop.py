@@ -455,14 +455,15 @@ class ToolCallingMixin:
             b64_image = None
             from plugin.framework.client.model_fetcher import has_native_vision
             text_model_id = str(api_config.get("model") or "")
-            if has_native_vision(text_model_id, client._endpoint(), allow_fetch=False):
+            typed_key = str(api_config.get("api_key") or "").strip()
+            if has_native_vision(text_model_id, client._endpoint(), allow_fetch=False, api_key_override=typed_key if typed_key else None):
                 doc = self._get_document_model() if hasattr(self, "_get_document_model") else None
                 if doc:
                     try:
                         from plugin.writer.images.image_tools import get_selected_image_base64
                         b64_image = get_selected_image_base64(doc, self.ctx)
-                    except Exception as e:
-                        log.debug("Failed to get selected image base64: %s", e)
+                    except Exception:
+                        log.exception("Failed to get selected image base64")
 
         if skip_append_user:
             pass

@@ -111,6 +111,7 @@ class AudioRecorder:
     channels: int = 1
     ctx: Any
     _auto_stop_lock: threading.Lock
+    _auto_stop_notified: bool
     _wav_lock: threading.Lock
     state: AudioRecorderState
     _test_skip_spawn: bool
@@ -125,6 +126,7 @@ class AudioRecorder:
         self._stdout_monitor: threading.Thread | Any = None
         self._stop_handoff: RecordingStopHandoff | None = None
         self._auto_stopped_path: str | None = None
+        self._auto_stop_notified = False
         self._auto_stop_lock = threading.Lock()
         # Held across host writeframes so Stop can close the WAV only after
         # that callback has dropped the file.
@@ -157,7 +159,15 @@ class AudioRecorder:
         self._on_recording_error = on_error
 
     def _notify_auto_stop(self, path: str | None = None) -> None:
+        # Bugfix: the host callback runs on every silent chunk once
+        # should_stop is true, and each call posted STOP_REC_CLICKED while
+        # the UI thread was inside stop. The venv child sets auto_stopped and
+        # returns. This flag is the host latch. Do not call the callback or
+        # rewrite the path when it is already set.
         with self._auto_stop_lock:
+            if self._auto_stop_notified:
+                return
+            self._auto_stop_notified = True
             if path:
                 self._auto_stopped_path = path
             if self._on_auto_stop is None:
@@ -290,7 +300,15 @@ class AudioRecorder:
         import wave
 
         if isinstance(effect, InitializeDeviceEffect):
-            ctrl = read_stub_recorder_control()
+            self._auto_stop_notified = False
+            # Bugfix: the control file lives at a predictable path under /tmp.
+            # Another local user can create it before this one does.
+            # {"skip": true, "wav": "..."} turned the microphone off and
+            # copied that file into the take that is sent to the model. Only
+            # a test soffice sets WRITERAGENT_TESTING.
+            ctrl: dict[str, Any] = {}
+            if os.environ.get("WRITERAGENT_TESTING") == "1":
+                ctrl = read_stub_recorder_control()
             if ctrl.get("skip"):
                 self._test_skip_spawn = True
                 # Always apply JSON (including null/false) so G12 fail_start / G14
@@ -405,7 +423,7 @@ class AudioRecorder:
                         detector = self._silence_detector
                         if detector is None or not silence_config.enabled:
                             return
-                        result = detector.process_chunk(pcm, frame_count=frames)
+                        result = detector.process_chunk(pcm)
                         if detector.should_emit_silence_progress(result):
                             self._notify_silence_progress(result.silence_ms)
                         if result.should_stop:
@@ -480,8 +498,15 @@ class AudioRecorder:
                         terminate_recording_process(proc)
                         self.temp_filename = auto_path
                     elif proc.poll() is None:
-                        path = stop_recording_process(proc, fallback_path=auto_path, handoff=handoff)
-                        self.temp_filename = path
+                        if handoff is None:
+                            # The monitor is the only writer of the handoff.
+                            # Building a new one here waits out the stop timeout
+                            # and then reaps. No monitor means there is nothing to
+                            # wait for.
+                            terminate_recording_process(proc)
+                        else:
+                            path = stop_recording_process(proc, fallback_path=auto_path, handoff=handoff)
+                            self.temp_filename = path
                     else:
                         terminate_recording_process(proc)
                         self.temp_filename = auto_path or self.temp_filename

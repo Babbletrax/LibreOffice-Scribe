@@ -1243,16 +1243,16 @@ class _ImagesProxy:
         """
         return _rpc_call("image_get_info", name=name)
 
-    def insert(self, path: str, *, locator: str | None = None, paragraph: int | None = None, page: int | None = None, x_mm: float | None = None, y_mm: float | None = None, width_mm: int | None = None, height_mm: int | None = None, target: str | None = None, style: str | None = None, auto_height: bool | None = None) -> dict[str, Any]:
-        """Insert an image from local path or URL into the document. URLs are auto-downloaded first. For Writer letterheads, pass target='header' or 'footer' (optionally style) to insert into the page header/footer with auto-height so the logo does not overlap the body. A different-first-page letterhead logo needs first_is_shared=false on the page style (page_set_style_properties) so HeaderTextFirst is its own text object, then target='header_first' (or footer_first) — otherwise the image lands in the shared header and repeats on every page. On Draw/Impress, optional page (0-based) and x_mm/y_mm place the image; omitted x/y centers it. Sizes and positions are millimetres (not 1/100 mm).
+    def insert(self, path: str, *, locator: str | None = None, paragraph: int | None = None, page: int | None = None, x_mm: float | None = None, y_mm: float | None = None, width_mm: float | None = None, height_mm: float | None = None, target: str | None = None, style: str | None = None, auto_height: bool | None = None) -> dict[str, Any]:
+        """Insert an image from local path or URL into the document. URLs are auto-downloaded first. For Writer letterheads, pass target='header' or 'footer' (optionally style) to insert into the page header/footer with auto-height so the logo does not overlap the body. A different-first-page letterhead logo needs first_is_shared=false on the page style (page_set_style_properties) so HeaderTextFirst is its own text object, then target='header_first' (or footer_first) — otherwise the image lands in the shared header and repeats on every page. On Draw/Impress, optional page (0-based) and x_mm/y_mm place the image; omitted x/y centers it. On Calc, page is a 0-based sheet index; x_mm and y_mm are ignored. Sizes and positions are millimetres (not 1/100 mm).
 
         Args:
             path (required): Local file path or URL of the image to insert.
             locator (optional): Unified locator for insertion point (e.g. 'bookmark:NAME', 'heading_text:Title').
             paragraph (optional): Paragraph index for insertion point.
-            page (optional): Draw/Impress: 0-based page index (active page if omitted).
-            x_mm (optional): Draw/Impress: X position in millimetres (default: centered).
-            y_mm (optional): Draw/Impress: Y position in millimetres (default: centered).
+            page (optional): Draw/Impress: 0-based page index. Calc: 0-based sheet index. Active page or sheet if omitted.
+            x_mm (optional): Draw/Impress: X position in millimetres (default: centered). Ignored on Calc.
+            y_mm (optional): Draw/Impress: Y position in millimetres (default: centered). Ignored on Calc.
             width_mm (optional): Width in millimetres (default: 80).
             height_mm (optional): Height in millimetres (default: 80).
             target (optional): Writer insertion target (default: body). header/footer write the shared page-style region. header_first/footer_first write the first-page letterhead (set first_is_shared=false first, or the first page still shares HeaderText). One of: body, header, footer, header_first, footer_first.
@@ -1274,13 +1274,13 @@ class _ImagesProxy:
         return _rpc_call("image_list_nearby_files", filter=filter)
 
     def replace(self, name: str, path: str, *, width_mm: float | None = None, height_mm: float | None = None) -> dict[str, Any]:
-        """Replace an image's source file keeping position and frame.
+        """Replace an image's source file, keeping the same object, position, and frame. The new file is embedded. If only width_mm or only height_mm is set, the other side scales to keep the current aspect ratio. Setting both uses both sizes.
 
         Args:
             name (required): Name of the image to replace (from image_list).
             path (required): Local file path or URL of the replacement image.
-            width_mm (optional): Optionally update width in millimetres.
-            height_mm (optional): Optionally update height in millimetres.
+            width_mm (optional): New width in millimetres. If height_mm is omitted, height scales to keep the current aspect ratio.
+            height_mm (optional): New height in millimetres. If width_mm is omitted, width scales to keep the current aspect ratio.
         """
         return _rpc_call("image_replace", name=name, path=path, width_mm=width_mm, height_mm=height_mm)
 
@@ -1486,7 +1486,7 @@ class _PageProxy:
     """Proxy for page tools."""
 
     def get_columns(self, *, style: str | None = None) -> dict[str, Any]:
-        """Get the column layout for a page style.
+        """Get the column layout for a page style. Column widths are relative weights, not millimetres. Margins are millimetres.
 
         Args:
             style (optional): The name of the page style. Defaults to 'Standard'.
@@ -1547,7 +1547,7 @@ class _PageProxy:
         return _rpc_call("page_set_columns", style=style, column_count=column_count, spacing_mm=spacing_mm)
 
     def set_header_footer_text(self, region: str, content: str, *, style: str | None = None, auto_height: bool | None = None) -> dict[str, Any]:
-        """Replace this page-style header or footer with HTML so logos, tables, and page-number fields survive — the same StarWriter import as apply_document_content, pointed at the region's XText. Call page_get_header_footer_text first and edit that HTML. Enables the region if it is off. Pass auto_height=true so a taller letterhead grows instead of overlapping the body. Plain text is wrapped as a paragraph and still goes through import. To change one substring and leave fields and floating graphics alone, use page_replace_header_footer_text.
+        """Replace this page-style header or footer with HTML so logos, tables, and page-number fields survive — the same StarWriter import as apply_document_content, pointed at the region's XText. Call page_get_header_footer_text first and edit that HTML. Enables the region if it is off. Pass auto_height=true so a taller letterhead grows instead of overlapping the body. Plain text is wrapped as a paragraph and still goes through import. A _first or _left region that only mirrors the shared header or footer is skipped; edit header/footer or turn sharing off. To change one substring and leave fields and floating graphics alone, use page_replace_header_footer_text.
 
         Args:
             region (required): Which region to set. 'header'/'footer' are the shared ones; '_first' targets a 'different first page' letterhead and '_left' the left-hand pages. One of: header, footer, header_first, footer_first, header_left, footer_left.
@@ -1564,7 +1564,7 @@ class _PageProxy:
             style (optional): The name of the page style (e.g., 'Standard' or 'Default Style'). Defaults to 'Standard'.
             width_mm (optional): New width in mm.
             height_mm (optional): New height in mm.
-            is_landscape (optional): Set orientation to landscape.
+            is_landscape (optional): Sets the IsLandscape flag only. Does not change Width or Height unless width_mm and height_mm are also passed. Landscape A4 is width_mm 297 and height_mm 210.
             left_margin_mm (optional): Left margin in mm.
             right_margin_mm (optional): Right margin in mm.
             top_margin_mm (optional): Top margin in mm.
@@ -1581,7 +1581,7 @@ class _PageProxy:
             footer_body_distance_mm (optional): Spacing from footer to body in mm.
             back_color (optional): Background color (RGB long).
             back_transparent (optional): Make background transparent.
-            numbering_type (optional): Numbering type enum (4=Arabic, 0=Roman).
+            numbering_type (optional): com.sun.star.style.NumberingType short (0=CHARS_UPPER_LETTER, 1=CHARS_LOWER_LETTER, 2=ROMAN_UPPER, 3=ROMAN_LOWER, 4=ARABIC).
             footnote_height_mm (optional): Max footnote area height in mm.
             register_paragraph_style (optional): Register true reference style.
             page_style_layout (optional): 0=ALL, 1=LEFT, 2=RIGHT, 3=MIRRORED.
@@ -2174,7 +2174,7 @@ class _StylesProxy:
         """List available styles in the document. Omit family to list all style family names; set family to list styles in that family.
 
         Args:
-            family (optional): Style family. Default: ParagraphStyles. Use PageStyles to find the page-style name the page tools need. One of: ParagraphStyles, CharacterStyles, PageStyles.
+            family (optional): Omit to list family names. Otherwise ParagraphStyles, CharacterStyles, or PageStyles. One of: ParagraphStyles, CharacterStyles, PageStyles.
         """
         return _rpc_call("style_list", family=family)
 
@@ -2425,13 +2425,13 @@ class _WriterProxy:
         return _rpc_call("get_page_objects", page=page, locator=locator, paragraph=paragraph)
 
     def search_in_document(self, pattern: str, *, regex: bool | None = None, case_sensitive: bool | None = None, max_results: int | None = None, return_offsets: bool | None = None) -> dict[str, Any]:
-        """Search for text ANYWHERE in the document using LibreOffice native search — body paragraphs and headings, table cells, text boxes / frames, floating drawing shapes, page headers/footers, AND comments (annotations) are all covered. Each match reports WHERE it was found (location, e.g. "body", "table 'Table1' cell B2", "text box 'Frame1'", "shape 'Shape 1'", "header (page style 'Standard')", "comment by 'Ana'") plus the surrounding paragraph (or shape/comment text) for context. When pointing the user to a match, quote the first few words of its text and its location rather than any internal index. With regex=true, body/table/frame hits use LibreOffice/ICU regex; shape and comment sweeps use Python re (same INVALID_REGEX check). return_offsets is body-only literal search.
+        """Search for text ANYWHERE in the document using LibreOffice native search — body paragraphs and headings, table cells, text boxes / frames, floating drawing shapes, page headers/footers, AND comments (annotations) are all covered. Each match reports WHERE it was found (location, e.g. "body", "table 'Table1' cell B2", "text box 'Frame1'", "shape 'Shape 1'", "header (page style 'Standard')", "comment by 'Ana'") plus the surrounding paragraph (or shape/comment text) for context. When pointing the user to a match, quote the first few words of its text and its location rather than any internal index. With regex=true, body/table/frame hits use LibreOffice/ICU regex; shape and comment sweeps use Python re (same INVALID_REGEX check). return_offsets is body-only literal search. A zero-width match stops the text-model walk, sets truncated, and does not count the empty hit.
 
         Args:
             pattern (required): Search string or regex pattern.
             regex (optional): Use regular expression (default: false).
             case_sensitive (optional): Case-sensitive search (default: false).
-            max_results (optional): Maximum results to return (default: 20).
+            max_results (optional): Maximum results to return (default: 20). Must be a positive integer.
             return_offsets (optional): If true, returns {start, end, text} character offsets for body text only (no regex, no shapes/comments). Default: false.
         """
         return _rpc_call("search_in_document", pattern=pattern, regex=regex, case_sensitive=case_sensitive, max_results=max_results, return_offsets=return_offsets)

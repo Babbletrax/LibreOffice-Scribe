@@ -817,7 +817,7 @@ class ApplyDocumentContent(ToolBase):
 
         # occurrence indexes replaceable body/table/frame ranges only — not the
         # mixed matches[] list, which also appends shape/comment previews.
-        for idx, found in enumerate(ranges[:20]):
+        for idx, found in enumerate(ranges[:search_mod.DEFAULT_SEARCH_RESULTS]):
             try:
                 loc = search_mod.describe_match_location(found, ctx.doc, label_cache=label_cache)
             except Exception:
@@ -838,10 +838,10 @@ class ApplyDocumentContent(ToolBase):
             matches.append(row)
         opts_cs = bool(case_opt) if case_opt is not None else False
         pattern = old_stripped if use_regex else s
-        shape_hits = search_mod.sweep_draw_shape_preview_matches(ctx.doc, pattern, use_regex, opts_cs, limit=10000)
-        comment_hits = search_mod.sweep_comment_preview_matches(ctx.doc, pattern, use_regex, opts_cs, limit=10000)
+        shape_hits = search_mod.sweep_draw_shape_preview_matches(ctx.doc, pattern, use_regex, opts_cs, limit=search_mod.MAX_SEARCH_HITS)
+        comment_hits = search_mod.sweep_comment_preview_matches(ctx.doc, pattern, use_regex, opts_cs, limit=search_mod.MAX_SEARCH_HITS)
         for item in shape_hits + comment_hits:
-            if len(matches) < 20:
+            if len(matches) < search_mod.DEFAULT_SEARCH_RESULTS:
                 matches.append({"location": item["location"], "text": item["text"][:160]})
         total = len(ranges) + len(shape_hits) + len(comment_hits)
         if occurrence is not None and ranges and occurrence >= len(ranges):

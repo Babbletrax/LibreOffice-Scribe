@@ -312,3 +312,25 @@ def test_prepare_vision_writer_insert_ordinary_anchor_error_stays_vision_error()
         with pytest.raises(ToolExecutionError) as exc:
             prepare_vision_writer_insert(doc, MagicMock())
     assert exc.value.code == "VISION_ERROR"
+
+
+def test_prepare_vision_writer_insert_runtime_exception_is_not_document_disposed():
+    from plugin.vision.vision_egress import prepare_vision_writer_insert
+
+    class RuntimeException(Exception):
+        pass
+
+    graphic = MagicMock()
+    graphic.getName.return_value = "Image1"
+    graphic.getAnchor.side_effect = RuntimeException("no anchor")
+    controller = MagicMock()
+    controller.getFrame.return_value = None
+    doc = MagicMock()
+    doc.getCurrentController.return_value = controller
+    with patch("plugin.doc.visual_helpers.selected_graphic_object", return_value=graphic), patch(
+        "plugin.doc.visual_helpers.list_graphic_objects", return_value=[("Image1", graphic)]
+    ):
+        with pytest.raises(ToolExecutionError) as exc:
+            prepare_vision_writer_insert(doc, MagicMock())
+    assert exc.value.code == "VISION_ERROR"
+

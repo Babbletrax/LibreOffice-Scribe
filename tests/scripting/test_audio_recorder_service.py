@@ -27,7 +27,7 @@ def test_reap_kills_the_group_before_dropping_stderr(monkeypatch):
     proc.terminate.side_effect = lambda: order.append("terminate")
     drain = MagicMock()
     drain.join.side_effect = lambda timeout=None: order.append("join")
-    _recording_stderr_drains[id(proc)] = drain
+    _recording_stderr_drains[proc] = drain
 
     def _kill(target):
         order.append("kill")
@@ -37,7 +37,7 @@ def test_reap_kills_the_group_before_dropping_stderr(monkeypatch):
     try:
         _reap_recording_process(proc, 0.01)
     finally:
-        _recording_stderr_drains.pop(id(proc), None)
+        _recording_stderr_drains.pop(proc, None)
     assert order == ["terminate", "kill", "join"]
 
 
@@ -114,23 +114,27 @@ def test_monitor_recording_stdout_skips_non_json_lines_before_ok():
 
 def test_stop_recording_via_handoff_reaps_on_timeout():
     """Handoff timeout must reap the child process via try/finally."""
-    from plugin.scripting.audio_recorder_service import RecordingStopHandoff, _recording_stderr_drains
+    from plugin.scripting.audio_recorder_service import (
+        RecordingStopHandoff,
+        _RECORDING_REAP_TIMEOUT_SEC,
+        _recording_stderr_drains,
+    )
 
     proc = MagicMock()
     proc.poll.return_value = None
     # StringIO.write returns a length, so the stop line is sent and wait_for_path can time out.
     proc.stdin = StringIO()
     drain = MagicMock()
-    _recording_stderr_drains[id(proc)] = drain
+    _recording_stderr_drains[proc] = drain
 
     handoff = RecordingStopHandoff()
     # Note nothing so wait_for_path times out
     with pytest.raises(RuntimeError, match="timed out"):
         stop_recording_process(proc, handoff=handoff, timeout_sec=0.01)
 
-    proc.wait.assert_called()
+    proc.wait.assert_called_with(timeout=_RECORDING_REAP_TIMEOUT_SEC)
     drain.join.assert_called()
-    assert id(proc) not in _recording_stderr_drains
+    assert proc not in _recording_stderr_drains
 
 
 def test_wait_for_recording_ready_eof_raises_runtime_error():
@@ -320,4 +324,101 @@ def test_native_audio_stt_fallback_uses_turn_model_on_mid_turn_change():
 
     assert recovered is True
     mock_set_support.assert_called_once_with("turn-captured-model", "https://captured-endpoint", supported=False)
+
+
+def test_stop_recording_process_requires_handoff():
+    proc = MagicMock()
+    with pytest.raises(TypeError):
+        stop_recording_process(proc)  # type: ignore[call-arg]
+
+
+def test_error_line_wakes_handoff_without_callback():
+    from plugin.scripting.audio_recorder_service import RecordingStopHandoff, monitor_recording_stdout
+
+    proc = MagicMock()
+    proc.poll.return_value = 0
+    proc.stdout = StringIO(json.dumps({"status": "error", "message": "mic gone"}) + "\n")
+    handoff = RecordingStopHandoff()
+
+    handle = monitor_recording_stdout(proc, on_auto_stopped=lambda _p: None, on_error=None, handoff=handoff)
+    handle.join(timeout=2.0)
+    assert handoff.has_error() is True
+    with pytest.raises(RuntimeError, match="mic gone"):
+        handoff.wait_for_path(0.01)
+
+    # Error line with no message defaults to "Audio recording failed."
+    proc2 = MagicMock()
+    proc2.poll.return_value = 0
+    proc2.stdout = StringIO(json.dumps({"status": "error"}) + "\n")
+    handoff2 = RecordingStopHandoff()
+
+    handle2 = monitor_recording_stdout(proc2, on_auto_stopped=lambda _p: None, on_error=None, handoff=handoff2)
+    handle2.join(timeout=2.0)
+    assert handoff2.has_error() is True
+    with pytest.raises(RuntimeError, match="Audio recording failed."):
+        handoff2.wait_for_path(0.01)
+
+
+def test_callback_exception_still_reads_ok():
+    from plugin.scripting.audio_recorder_service import RecordingStopHandoff, monitor_recording_stdout
+
+    proc = MagicMock()
+    proc.poll.side_effect = [None, None, 0]
+    proc.stdout = StringIO(
+        json.dumps({"status": "auto_stopped", "path": "/tmp/a.wav"}) + "\n"
+        + json.dumps({"status": "silence_progress", "ms": 100}) + "\n"
+        + json.dumps({"status": "ok", "path": "/tmp/b.wav"}) + "\n"
+    )
+    handoff = RecordingStopHandoff()
+    auto_paths: list[str] = []
+    progress: list[int] = []
+
+    def _failing_auto_stop(p: str) -> None:
+        auto_paths.append(p)
+        raise RuntimeError("callback exploded")
+
+    handle = monitor_recording_stdout(
+        proc,
+        on_auto_stopped=_failing_auto_stop,
+        on_silence_progress=progress.append,
+        handoff=handoff,
+    )
+    handle.join(timeout=2.0)
+
+    assert auto_paths == ["/tmp/a.wav"]
+    assert progress == [100]
+    assert handoff.snapshot_path() == "/tmp/a.wav"
+    assert not handle.is_alive()
+
+
+def test_is_400_input_validation_uses_status():
+    from plugin.scripting.audio_recorder_service import _is_400_input_validation
+
+    assert _is_400_input_validation({
+        "code": "HTTP_ERROR",
+        "message": "HTTP Error 400 from AI Provider: Bad Request",
+        "details": {"status": 400},
+    }) is True
+
+    assert _is_400_input_validation({
+        "code": "HTTP_ERROR",
+        "message": "HTTP Error 400 from AI Provider: Bad Request input validation",
+        "details": {"status": 500},
+    }) is False
+
+    assert _is_400_input_validation("HTTP Error 400 bad request input validation") is False
+
+    assert _is_400_input_validation({
+        "code": "HTTP_ERROR",
+        "message": "HTTP Error 400 from AI Provider: Bad Request",
+        "details": {"status": True},
+    }) is False
+
+
+def test_append_wav_missing_file_returns_false():
+    from plugin.scripting.audio_recorder_service import append_wav_as_input_audio
+
+    content_list = []
+    assert append_wav_as_input_audio(content_list, "/no/such.wav") is False
+    assert content_list == []
 

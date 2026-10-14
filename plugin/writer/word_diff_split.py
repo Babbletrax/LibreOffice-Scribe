@@ -61,12 +61,15 @@ fraction strictly ABOVE the threshold flips to a whole-block replacement. Ration
 "60% or less changed" is still worth surgically redlining; only past 60% is it noisy
 enough to be a single clean block edit.
 
-Two trivial fast-paths: identical strings -> surgical mode with zero sub-edits;
-``total_words == 0`` (both blank) -> surgical mode with zero sub-edits.
+Fast-paths: identical strings return surgical mode with zero sub-edits immediately,
+before the word cap; ``total_words == 0`` (both blank) returns surgical mode with
+zero sub-edits. The word cap (_MAX_DIFF_WORDS) applies only after the identical-string
+fast path, and only to the unmatched middle once the full word count exceeds the cap.
+A middle that is still over the cap reports the upper-bound fraction (changed middle words
+divided by total affix and middle words) and is always mode="block".
 """
 
 import difflib
-import math
 from typing import Any, ClassVar
 
 from plugin.framework.deal_shim import DEAL_MAX_SOURCE, UNDER_CROSSHAIR, str_bounded, deal
@@ -79,6 +82,7 @@ __all__ = [
     "SplitResult",
     "tokenize",
     "split_change",
+    "apply_sub_edits",
 ]
 
 
@@ -233,9 +237,55 @@ def tokenize(s: str) -> list[Token]:
     return tokens
 
 
-def _word_tokens(tokens: list[Token]) -> list[Token]:
-    """Return only the word tokens (those that take part in the diff)."""
-    return [t for t in tokens if t.is_word]
+def _classify_block_op(old: str, new: str) -> str:
+    if not old:
+        return "insert"
+    if not new:
+        return "delete"
+    return "replace"
+
+
+def _whole_block(old: str, new: str, fraction: float) -> SplitResult:
+    op = _classify_block_op(old, new)
+    return SplitResult("block", fraction, [SubEdit(op, 0, len(old), old, new)])
+
+
+def _common_word_affix(old_words: list[Token], new_words: list[Token]) -> tuple[int, int]:
+    # crosshair: off
+    n = min(len(old_words), len(new_words))
+    prefix = 0
+    while prefix < n and old_words[prefix].text == new_words[prefix].text:
+        prefix += 1
+    suffix = 0
+    while suffix < n - prefix and old_words[-1 - suffix].text == new_words[-1 - suffix].text:
+        suffix += 1
+    return prefix, suffix
+
+
+def _opcodes_with_affix(
+    old_words: list[Token],
+    new_words: list[Token],
+    prefix: int,
+    suffix: int,
+) -> list[Any]:
+    # crosshair: off
+    old_len = len(old_words)
+    new_len = len(new_words)
+    mid_old = old_words[prefix : old_len - suffix]
+    mid_new = new_words[prefix : new_len - suffix]
+    sm = difflib.SequenceMatcher(
+        a=[t.text for t in mid_old],
+        b=[t.text for t in mid_new],
+        autojunk=False,
+    )
+    opcodes: list[Any] = []
+    if prefix > 0:
+        opcodes.append(("equal", 0, prefix, 0, prefix))
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        opcodes.append((tag, i1 + prefix, i2 + prefix, j1 + prefix, j2 + prefix))
+    if suffix > 0:
+        opcodes.append(("equal", old_len - suffix, old_len, new_len - suffix, new_len))
+    return opcodes
 
 
 def _deal_split_change_ok_pytest(old: object, new: object, threshold: object = 0.6) -> bool:
@@ -277,35 +327,40 @@ def split_change(old: str, new: str, threshold: float = 0.6) -> SplitResult:
         threshold = float(threshold)
     except (TypeError, ValueError):
         threshold = 0.6
-    if not math.isfinite(threshold):
-        threshold = 0.6
+
+    # What was wrong: identical strings over the word cap fell back to a whole-block redline.
+    # How it happened: _MAX_DIFF_WORDS cap was evaluated before checking if old == new.
+    # Why this change fixes it: return early with zero sub-edits when old == new before word capping.
+    if old == new:
+        return SplitResult("surgical", 0.0, [])
 
     old_tokens = tokenize(old)
     new_tokens = tokenize(new)
-    old_words = _word_tokens(old_tokens)
-    new_words = _word_tokens(new_tokens)
+    old_words = [t for t in old_tokens if t.is_word]
+    new_words = [t for t in new_tokens if t.is_word]
 
     if len(old_words) + len(new_words) > _MAX_DIFF_WORDS:
-        # SequenceMatcher(autojunk=False) is quadratic, and record_preserve_replace
-        # runs split_change on the UI thread.
-        if not old:
-            block_op = "insert"
-        elif not new:
-            block_op = "delete"
-        else:
-            block_op = "replace"
-        block = SubEdit(block_op, 0, len(old), old, new)
-        return SplitResult("block", 1.0, [block])
-
-    # difflib anchors on equal words. When a word repeats, it may match a different occurrence
-    # than a human would, which can make a surgical redline WIDER than strictly minimal -- but never
-    # wrong: apply_sub_edits() always reconstructs *new* exactly (lossless not minimal).
-    sm = difflib.SequenceMatcher(
-        a=[t.text for t in old_words],
-        b=[t.text for t in new_words],
-        autojunk=False,
-    )
-    opcodes = sm.get_opcodes()
+        prefix, suffix = _common_word_affix(old_words, new_words)
+        mid_old_len = len(old_words) - prefix - suffix
+        mid_new_len = len(new_words) - prefix - suffix
+        if mid_old_len + mid_new_len > _MAX_DIFF_WORDS:
+            # What was wrong: inputs over the cap reported 1.0 even when a long affix was unchanged.
+            # How it happened: cap bail-out hardcoded fraction=1.0 on the entire string without stripping matching prefix/suffix words.
+            # Why this change fixes it: strip matching affixes and compute upper-bound fraction on the middle words.
+            denom = prefix + suffix + mid_old_len + mid_new_len
+            fraction = (mid_old_len + mid_new_len) / denom if denom else 0.0
+            return _whole_block(old, new, fraction)
+        opcodes = _opcodes_with_affix(old_words, new_words, prefix, suffix)
+    else:
+        # difflib anchors on equal words. When a word repeats, it may match a different occurrence
+        # than a human would, which can make a surgical redline WIDER than strictly minimal -- but never
+        # wrong: apply_sub_edits() always reconstructs *new* exactly (lossless not minimal).
+        sm = difflib.SequenceMatcher(
+            a=[t.text for t in old_words],
+            b=[t.text for t in new_words],
+            autojunk=False,
+        )
+        opcodes = sm.get_opcodes()
 
     # --- change fraction (by word count) ---------------------------------------
     unchanged = 0
@@ -328,18 +383,7 @@ def split_change(old: str, new: str, threshold: float = 0.6) -> SplitResult:
     # a no-op (handled by the surgical path returning zero sub-edits below).
     force_block = threshold <= 0.0 and old != new
     if force_block or fraction > threshold:
-        # Classify the single whole-range edit with the SAME op semantics the surgical
-        # path uses, so a downstream consumer (record_preserve_replace) can branch on
-        # ``op`` uniformly: empty old -> insert, empty new -> delete, else replace. (When
-        # both are empty we never get here: fraction is 0.0, which is never > threshold.)
-        if not old:
-            block_op = "insert"
-        elif not new:
-            block_op = "delete"
-        else:
-            block_op = "replace"
-        block = SubEdit(block_op, 0, len(old), old, new)
-        return SplitResult("block", fraction, [block])
+        return _whole_block(old, new, fraction)
 
     # --- surgical path ---------------------------------------------------------
     sub_edits = _build_surgical_edits(old, new, old_words, new_words, opcodes)
@@ -434,12 +478,7 @@ def _emit_segment(out: list[SubEdit], old: str, new: str, old_lo: int, old_hi: i
 
     if not old_seg and not new_seg:
         return
-    if not old_seg:
-        op = "insert"
-    elif not new_seg:
-        op = "delete"
-    else:
-        op = "replace"
+    op = _classify_block_op(old_seg, new_seg)
     out.append(SubEdit(op, old_lo, old_hi, old_seg, new_seg))
 
 

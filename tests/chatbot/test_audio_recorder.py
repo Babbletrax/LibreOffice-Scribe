@@ -78,7 +78,8 @@ def test_audio_recorder_multiple_sessions(ctx, recording_mocks):
         assert first != second
 
 
-def test_audio_recorder_skip_spawn_from_control_file(ctx, tmp_path):
+def test_audio_recorder_skip_spawn_from_control_file(ctx, tmp_path, monkeypatch):
+    monkeypatch.setenv("WRITERAGENT_TESTING", "1")
     fixture = tmp_path / "inject.wav"
     fixture.write_bytes(b"RIFF....WAVEfmt ")
     write_stub_recorder_control(wav=str(fixture), skip=True)
@@ -94,7 +95,7 @@ def test_audio_recorder_skip_spawn_from_control_file(ctx, tmp_path):
             os.remove(recorder.temp_filename)
 
 
-def test_audio_recorder_stub_auto_stop_fires_after_start_returns(ctx, tmp_path):
+def test_audio_recorder_stub_auto_stop_fires_after_start_returns(ctx, tmp_path, monkeypatch):
     """G4 stub auto-stop is reported from a tagged worker, like the stdout monitor.
 
     Firing it inline on the caller re-entered Record's transition
@@ -102,6 +103,7 @@ def test_audio_recorder_stub_auto_stop_fires_after_start_returns(ctx, tmp_path):
     wedged soffice in CI. From a tagged worker the panel's post() enqueues
     instead of running inline, so STOP_REC lands on a later VCL tick.
     """
+    monkeypatch.setenv("WRITERAGENT_TESTING", "1")
     fixture = tmp_path / "inject.wav"
     fixture.write_bytes(b"RIFF....WAVEfmt ")
     write_stub_recorder_control(wav=str(fixture), skip=True, auto_stop=True)
@@ -152,7 +154,8 @@ def test_audio_recorder_skip_spawn_injects_wav(ctx, tmp_path):
     os.remove(path)
 
 
-def test_audio_recorder_skip_spawn_hang_ready(ctx):
+def test_audio_recorder_skip_spawn_hang_ready(ctx, monkeypatch):
+    monkeypatch.setenv("WRITERAGENT_TESTING", "1")
     recorder = AudioRecorder(ctx)
     recorder._test_skip_spawn = True
     write_stub_recorder_control(skip=True, hang_ready=True)
@@ -164,8 +167,9 @@ def test_audio_recorder_skip_spawn_hang_ready(ctx):
         clear_stub_recorder_control()
 
 
-def test_audio_recorder_control_file_clears_hang_ready(ctx, tmp_path):
+def test_audio_recorder_control_file_clears_hang_ready(ctx, tmp_path, monkeypatch):
     """G21 hang_ready must not stick on the live recorder for later Packet G cases."""
+    monkeypatch.setenv("WRITERAGENT_TESTING", "1")
     fixture = tmp_path / "inject.wav"
     fixture.write_bytes(b"RIFF....WAVEfmt ")
     recorder = AudioRecorder(ctx)
@@ -194,8 +198,9 @@ def test_audio_recorder_skip_spawn_fail_start(ctx):
     assert recorder.state.status == "error"
 
 
-def test_audio_recorder_control_file_clears_fail_start(ctx, tmp_path):
+def test_audio_recorder_control_file_clears_fail_start(ctx, tmp_path, monkeypatch):
     """Same live recorder: JSON fail_start=null must not keep G12's crash flag."""
+    monkeypatch.setenv("WRITERAGENT_TESTING", "1")
     fixture = tmp_path / "inject.wav"
     fixture.write_bytes(b"RIFF....WAVEfmt ")
     recorder = AudioRecorder(ctx)
@@ -389,6 +394,55 @@ def test_venv_record_to_wav_writes_file(tmp_path):
         assert wf.getframerate() == var.SAMPLE_RATE
 
 
+def test_venv_record_write_error_stops_instead_of_waiting(tmp_path):
+    import plugin.scripting.venv.audio_recorder as var
+
+    stop_event = threading.Event()
+    output_path = str(tmp_path / "out.wav")
+
+    mock_sd = MagicMock()
+    mock_stream = MagicMock()
+
+    def fake_raw_input_stream(*args, **kwargs):
+        callback = kwargs.get("callback")
+
+        def start():
+            if callback is not None:
+                callback(b"\x00\x01", 1, None, None)
+
+        mock_stream.start.side_effect = start
+        return mock_stream
+
+    mock_sd.RawInputStream.side_effect = fake_raw_input_stream
+
+    mock_wave_file = MagicMock()
+    mock_wave_file.writeframes.side_effect = OSError("disk full")
+
+    def fake_wave_open(*args, **kwargs):
+        del args, kwargs
+        return mock_wave_file
+
+    wait_called = False
+
+    def fake_wait(timeout=None):
+        del timeout
+        nonlocal wait_called
+        wait_called = True
+        if not stop_event.is_set():
+            raise AssertionError("stop_event was not set before wait completed")
+
+    with (
+        patch.object(var, "_import_sounddevice", return_value=mock_sd),
+        patch("wave.open", side_effect=fake_wave_open),
+        patch.object(stop_event, "wait", side_effect=fake_wait),
+    ):
+        with pytest.raises(RuntimeError, match=r"Failed to write audio WAV file.*disk full"):
+            var.record_to_wav(output_path, stop_event)
+
+    assert wait_called is True
+    mock_wave_file.close.assert_called_once()
+
+
 def test_audio_record_main_protocol(tmp_path, monkeypatch):
     from plugin.scripting.venv import audio_record_main as main_mod
 
@@ -525,3 +579,43 @@ def test_wav_file_has_bytes_treats_header_only_as_empty(tmp_path):
     with_audio.write_bytes(_WAV_WITH_AUDIO)
     assert _wav_file_has_bytes(str(header_only)) is False
     assert _wav_file_has_bytes(str(with_audio)) is True
+
+
+def test_stub_control_file_ignored_without_testing_env(ctx, recording_mocks, monkeypatch, tmp_path):
+    monkeypatch.delenv("WRITERAGENT_TESTING", raising=False)
+    fixture = tmp_path / "inject.wav"
+    fixture.write_bytes(b"RIFF....WAVEfmt ")
+    write_stub_recorder_control(wav=str(fixture), skip=True)
+    recorder = AudioRecorder(ctx)
+    try:
+        recorder.start_recording()
+        assert recorder._test_skip_spawn is False
+        recording_mocks["spawn"].assert_called_once()
+        recorder.stop_recording()
+    finally:
+        clear_stub_recorder_control()
+
+
+def test_notify_auto_stop_once_per_take(ctx, monkeypatch):
+    monkeypatch.delenv("WRITERAGENT_TESTING", raising=False)
+    recorder = AudioRecorder(ctx)
+    counts = 0
+
+    def _on_auto_stop() -> None:
+        nonlocal counts
+        counts += 1
+
+    recorder.set_auto_stop_callbacks(on_auto_stop=_on_auto_stop)
+    recorder._notify_auto_stop("/tmp/a.wav")
+    recorder._notify_auto_stop("/tmp/a.wav")
+    assert counts == 1
+    assert recorder._auto_stopped_path == "/tmp/a.wav"
+
+    recorder._test_skip_spawn = True
+    recorder.start_recording()
+    assert recorder._auto_stop_notified is False
+
+    recorder._notify_auto_stop("/tmp/b.wav")
+    assert counts == 2
+    assert recorder._auto_stopped_path == "/tmp/b.wav"
+    recorder.stop_recording()

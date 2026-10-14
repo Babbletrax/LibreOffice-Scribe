@@ -384,7 +384,7 @@ TOOL_USAGE_PATTERNS = """TOOL USAGE PATTERNS:
 - Successful apply_document_content returns edited_context (touched paragraphs plus neighbors; in record/wait including the pending change).
   Use it to confirm placement instead of an immediate re-read; full_document rewrites have no echo.
 - apply_style is not a tracked change.
-  If style_unreviewed=true, briefly tell the user you changed a style — they cannot accept/reject it like text edits.
+  If style_unreviewed=true, briefly tell the user you changed a style or page layout — they cannot accept/reject it like a text edit.
 - search_in_document is inspection/navigation (return_offsets if needed); replacements use apply_document_content with old_content.
 - Failed tool call: check content and target (use target='beginning' / 'end' / 'selection' for insert-only).
 - Review/feedback/suggestions: add_comment on specific passages (positive and negative).

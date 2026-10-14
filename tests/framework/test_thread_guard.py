@@ -70,7 +70,8 @@ def test_assert_raises_when_guard_on_from_bg(monkeypatch):
     was = tg.GUARD_ON
     tg.GUARD_ON = True
     tg.set_background_task("run_search")
-    tg._violation_ui_threads.clear()
+    with tg._violation_ui_lock:
+        tg._violation_dialog_open = False
     try:
         with patch.object(tg, "_notify_thread_violation") as notify:
             with pytest.raises(RuntimeError) as exc_info:
@@ -82,7 +83,8 @@ def test_assert_raises_when_guard_on_from_bg(monkeypatch):
     finally:
         tg.GUARD_ON = was
         tg.set_background_task(None)
-        tg._violation_ui_threads.clear()
+        with tg._violation_ui_lock:
+            tg._violation_dialog_open = False
 
 
 def test_assert_logs_warning_when_guard_off_from_bg(monkeypatch):
@@ -248,17 +250,16 @@ def test_proxy_str_repr_raise_off_thread(monkeypatch):
         tg.GUARD_ON = was
 
 
-def test_set_background_task_none_clears_violation_ui_thread():
-    tid = threading.get_ident()
+def test_set_background_task_none_does_not_clear_violation_dialog():
     with tg._violation_ui_lock:
-        tg._violation_ui_threads.add(tid)
+        tg._violation_dialog_open = True
     try:
         tg.set_background_task(None)
         with tg._violation_ui_lock:
-            assert tid not in tg._violation_ui_threads
+            assert tg._violation_dialog_open is True
     finally:
         with tg._violation_ui_lock:
-            tg._violation_ui_threads.discard(tid)
+            tg._violation_dialog_open = False
 
 
 def test_unwrap_roundtrip():
@@ -386,7 +387,8 @@ def test_bypass_thread_guard_still_works_via_registry(monkeypatch):
 
 def test_notify_skipped_under_writeragent_testing(monkeypatch):
     monkeypatch.setenv("WRITERAGENT_TESTING", "1")
-    tg._violation_ui_threads.clear()
+    with tg._violation_ui_lock:
+        tg._violation_dialog_open = False
     posts = []
 
     def fake_post(fn, *args, **kwargs):
@@ -395,7 +397,8 @@ def test_notify_skipped_under_writeragent_testing(monkeypatch):
     with patch("plugin.framework.queue_executor.execute_on_main_thread", fake_post):
         tg._notify_thread_violation("test violation")
     assert posts == []
-    tg._violation_ui_threads.clear()
+    with tg._violation_ui_lock:
+        tg._violation_dialog_open = False
 
 
 def test_notify_skips_when_async_callback_not_ready(monkeypatch):
@@ -403,7 +406,8 @@ def test_notify_skips_when_async_callback_not_ready(monkeypatch):
     from plugin.framework.queue_executor import default_executor
 
     monkeypatch.delenv("WRITERAGENT_TESTING", raising=False)
-    tg._violation_ui_threads.clear()
+    with tg._violation_ui_lock:
+        tg._violation_dialog_open = False
     was_init = default_executor._initialized
     default_executor._initialized = False
     posts = []
@@ -415,17 +419,20 @@ def test_notify_skips_when_async_callback_not_ready(monkeypatch):
         with patch("plugin.framework.queue_executor.execute_on_main_thread", fake_execute):
             tg._notify_thread_violation("during async callback init")
         assert posts == []
-        assert threading.get_ident() not in tg._violation_ui_threads
+        with tg._violation_ui_lock:
+            assert tg._violation_dialog_open is False
     finally:
         default_executor._initialized = was_init
-        tg._violation_ui_threads.clear()
+        with tg._violation_ui_lock:
+            tg._violation_dialog_open = False
 
 
 def test_notify_dedupes_per_thread(monkeypatch):
     from plugin.framework.queue_executor import default_executor
 
     monkeypatch.delenv("WRITERAGENT_TESTING", raising=False)
-    tg._violation_ui_threads.clear()
+    with tg._violation_ui_lock:
+        tg._violation_dialog_open = False
     default_executor._initialized = True
     default_executor._async_callback_service = MagicMock()
     posts = []
@@ -437,7 +444,41 @@ def test_notify_dedupes_per_thread(monkeypatch):
         tg._notify_thread_violation("first")
         tg._notify_thread_violation("second")
     assert len(posts) == 1
-    tg._violation_ui_threads.clear()
+    with tg._violation_ui_lock:
+        tg._violation_dialog_open = False
+
+
+def test_notify_one_dialog_across_threads(monkeypatch):
+    from plugin.framework.queue_executor import default_executor
+
+    monkeypatch.delenv("WRITERAGENT_TESTING", raising=False)
+    with tg._violation_ui_lock:
+        tg._violation_dialog_open = False
+    default_executor._initialized = True
+    default_executor._async_callback_service = MagicMock()
+    posts = []
+
+    def fake_post(fn, *args, **kwargs):
+        posts.append(fn)
+
+    cur_ident = 11
+    monkeypatch.setattr(threading, "get_ident", lambda: cur_ident)
+
+    try:
+        with patch("plugin.framework.queue_executor.post_to_main_thread", fake_post):
+            with patch("plugin.chatbot.dialogs.msgbox_with_report"):
+                with patch("plugin.framework.uno_context.get_ctx"):
+                    tg._notify_thread_violation("thread 11")
+                    cur_ident = 22
+                    tg._notify_thread_violation("thread 22")
+                    assert len(posts) == 1
+                    posts[0]()
+                    cur_ident = 33
+                    tg._notify_thread_violation("thread 33")
+                    assert len(posts) == 2
+    finally:
+        with tg._violation_ui_lock:
+            tg._violation_dialog_open = False
 
 
 def test_assert_logs_and_notifies_when_guard_on(monkeypatch):
@@ -448,7 +489,8 @@ def test_assert_logs_and_notifies_when_guard_on(monkeypatch):
     monkeypatch.delenv("WRITERAGENT_TESTING", raising=False)
     was = tg.GUARD_ON
     tg.GUARD_ON = True
-    tg._violation_ui_threads.clear()
+    with tg._violation_ui_lock:
+        tg._violation_dialog_open = False
     from plugin.framework.queue_executor import default_executor
 
     default_executor._initialized = True
@@ -469,7 +511,8 @@ def test_assert_logs_and_notifies_when_guard_on(monkeypatch):
         assert len(posts) == 1
     finally:
         tg.GUARD_ON = was
-        tg._violation_ui_threads.clear()
+        with tg._violation_ui_lock:
+            tg._violation_dialog_open = False
 
 
 def test_proxy_bool():

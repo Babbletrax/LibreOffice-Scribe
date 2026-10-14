@@ -35,7 +35,7 @@ What is implemented today (not every Writer mutation tool):
 | Extend / edit selection (menu + sidebar) | Yes | No | No |
 | Vision / `python_runner` Writer insert | Yes | No | No |
 | `table_delete` | Yes (one agent change; the table stays struck through until accepted) | No | No |
-| Style tools | No (`style_unreviewed: true`) | No | No |
+| Style tools and page layout (`page_set_style_properties`, `page_set_header_footer_text`, `page_replace_header_footer_text`, `page_set_columns`) | No (`style_unreviewed: true`; `page_insert_break` is not in this set) | No | No |
 | Other Writer tools (comments, images, …) | No | No | No |
 
 Extend / Edit Selection stop when the selection already contains a tracked insertion or deletion.
@@ -89,6 +89,7 @@ Small edits in long paragraphs use **surgical** tracked changes instead of one w
 
 * A word-level diff splits the replace into several tight Delete+Insert pairs — one reviewable
   change per sub-edit — when the changed-word fraction is below a threshold (default **0.6**).
+  Identical `old` and `new` produce no sub-edits and no redline, including when the selection is longer than the 4000-word cap. That cap applies to the whole word list only when it fits; when it does not, the common word prefix and suffix are removed first, and only a middle that is still over 4000 words becomes one whole-block edit.
 * Pre-flight offset checks and right-to-left apply avoid UNO position drift; grouped undo context
   rolls back on failure.
 * HTML/import paths use atomic delete-then-import so review mode never leaves a bare deletion
@@ -207,9 +208,11 @@ resolve-all returns user-facing messages when verification fails.
 
 ### Limitations
 
-* **Style changes are not reviewable.** `apply_style`, `style_update`, `style_create` and
-  `style_import` apply directly and return `style_unreviewed: true`; the agent is prompted to tell
-  the user it changed a style (styles don't produce redlines).
+* **Style and page layout changes are not reviewable.** `apply_style`, `style_update`, `style_create`,
+  `style_import`, `page_set_style_properties`, `page_set_header_footer_text`,
+  `page_replace_header_footer_text`, and `page_set_columns` apply directly and return
+  `style_unreviewed: true`; the agent is prompted to tell the user it changed a style or page layout
+  (they don't produce redlines). `page_insert_break` is not in that set.
 * **Extend selection** records only the appended continuation as a single tracked **insertion**
   (the original is never struck); it streams live with tracking off, then collapses to one redline
   at the end. Streamed collapse may show both marks under the INSERT author instead of split

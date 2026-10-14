@@ -27,6 +27,7 @@ if _ext_root not in sys.path:
     sys.path.insert(0, _ext_root)
 
 import logging
+import threading
 
 from plugin.framework.uno_bootstrap import ensure_plugin_on_path
 
@@ -41,12 +42,16 @@ ensure_plugin_on_path(
     also_add_vendor=True,           # root-level vendor/ when present (optional dev wheels)
 )
 
-# Inject downloaded binaries path (audio + serialization)
-try:
-    from plugin.scripting.native_binaries import ensure_native_binaries_on_path
-    ensure_native_binaries_on_path()
-except Exception:
-    pass
+def _install_native_binaries() -> None:
+    try:
+        from plugin.scripting.native_binaries import ensure_native_binaries_on_path
+
+        ensure_native_binaries_on_path()
+    except Exception:
+        logging.getLogger(__name__).debug("ensure_native_binaries_on_path failed", exc_info=True)
+
+
+_install_native_binaries()
 
 import unohelper
 from typing import TYPE_CHECKING, Any, Callable, ClassVar, cast
@@ -78,6 +83,7 @@ from plugin.framework.uno_context import (
     get_active_document,
     get_extension_url,
     get_ctx,
+    get_service_manager,
     menu_icon_asset_url,
     set_fallback_ctx,
     set_package_extension_id,
@@ -91,8 +97,6 @@ _DISPATCH_PROTOCOL = EXTENSION_ID + ":"
 # ---------------------------------------------------------------------------
 # Bootstrapping (Dynamic discovery from loaded manifest)
 # ---------------------------------------------------------------------------
-
-import threading
 
 _services = None
 log = logging.getLogger(__name__)
@@ -115,6 +119,7 @@ _init_lock = threading.Lock()
 # during module imports, but unhandled exceptions after that point never cleared it.
 # Why this change: retry only when _modules is still empty; otherwise a second
 # pass would construct another registry and start background services again.
+_bootstrapping = False
 _initialized = False
 _bootstrap_error: BaseException | None = None
 _terminate_listener: Any | None = None
@@ -132,7 +137,6 @@ def _install_terminate_listener(ctx: Any) -> None:
         if desktop is None:
             return
 
-        import unohelper
         from com.sun.star.frame import XTerminateListener
 
         class _TerminateListener(unohelper.Base, XTerminateListener):
@@ -205,7 +209,7 @@ def bootstrap(ctx: Any | None = None) -> None:
     MCP server starts automatically in headless mode. We could make this lazy
     again in the future if startup performance becomes a concern.
     """
-    global _services, _tools, _modules, _initialized, _bootstrap_error
+    global _services, _tools, _modules, _initialized, _bootstrap_error, _bootstrapping
 
     if _initialized:
         return
@@ -220,9 +224,14 @@ def bootstrap(ctx: Any | None = None) -> None:
             code="BOOTSTRAP_OFF_THREAD",
         )
 
-    with _init_lock:
-        if _initialized:
-            return
+    if _bootstrapping:
+        return
+
+    _bootstrapping = True
+    try:
+        with _init_lock:
+            if _initialized:
+                return
 
         # 1. Basic UNO context
         if ctx is None:
@@ -251,8 +260,10 @@ def bootstrap(ctx: Any | None = None) -> None:
         _services = ServiceRegistry()
         _services.register("uno", ctx)
 
-        # Install desktop terminate listener to clean up subprocesses on app exit
-        _install_terminate_listener(ctx)
+        # Skip terminate listener when running under the eval harness.
+        # The eval client already has a remote Desktop; this listener would shut down client subprocesses on office teardown.
+        if os.environ.get("WRITERAGENT_EVAL_HARNESS") != "1":
+            _install_terminate_listener(ctx)
 
         # 3. Core Services (Framework)
         from plugin.framework.config_service import ConfigService
@@ -297,6 +308,7 @@ def bootstrap(ctx: Any | None = None) -> None:
         # 5. Load manifest and initialize modules
         from plugin.framework.module_base import ModuleLoader
 
+        background_failed = False
         try:
             _modules.extend(ModuleLoader.load_modules(_services))
 
@@ -304,11 +316,17 @@ def bootstrap(ctx: Any | None = None) -> None:
             for mod in _modules:
                 mod.start_background(_services)
         except Exception as exc:
+            background_failed = True
             log.exception("bootstrap failed after the init flag was set")
             _bootstrap_error = exc
             if not _modules:
                 _initialized = False
-            return
+                return
+            # What was wrong: a module start_background failure used to return before
+            # core handlers, so Settings and the other register_action_handler calls never ran.
+            # How it happened: the except block unconditionally returned on any error.
+            # Why this change: fall through so core handlers and menu updates register;
+            # the error is kept so an unhandled command still raises BOOTSTRAP_FAILED.
 
         try:
             # Wire event bus into config service
@@ -335,10 +353,14 @@ def bootstrap(ctx: Any | None = None) -> None:
                 _register_core_handlers()
         except Exception as exc:
             log.exception("bootstrap failed after the init flag was set")
-            _bootstrap_error = exc
+            if _bootstrap_error is None:
+                _bootstrap_error = exc
             return
 
-        _bootstrap_error = None
+        if not background_failed:
+            _bootstrap_error = None
+    finally:
+        _bootstrapping = False
 
 
 def _register_core_handlers() -> None:
@@ -503,11 +525,10 @@ def _show_tests_unavailable(test_name: str) -> None:
 
         msgbox(get_ctx(), test_name, "This WriterAgent build was packaged without the optional `plugin.tests` test modules.")
     except Exception:
-        # Never let test menu state/messaging break core UI dispatch.
-        pass
-
-
-
+        # What was wrong: failure to show dialog was silently ignored without logging.
+        # How it happened: bare except: pass hid UI or dialog creation errors.
+        # Why this change: log the exception while still avoiding breaking callers.
+        log.exception("test unavailable dialog failed: %s", test_name)
 
 
 def _run_test_suite(test_func: Any, doc_checker: Callable[[Any], bool], test_name: str) -> None:
@@ -536,9 +557,17 @@ def _run_test_suite(test_func: Any, doc_checker: Callable[[Any], bool], test_nam
 
         msgbox(ctx, test_name, _("{0}: {1} passed, {2} failed.").format(test_name, p, f) + "\n\n" + "\n".join(suite_log))
     except Exception as e:
+        log.exception("_run_test_suite failed: %s", test_name)
         from plugin.framework.i18n import _
 
         msgbox(ctx, test_name, _("Tests failed to run: {0}").format(str(e)))
+
+
+def _find_module(mod_name: str) -> ModuleBase | None:
+    for mod in _modules:
+        if mod.name == mod_name:
+            return mod
+    return None
 
 
 def _dispatch_command(command: str) -> None:
@@ -573,10 +602,10 @@ def _dispatch_command(command: str) -> None:
         action = command[dot + 1 :]
 
         # Module actions
-        for mod in _modules:
-            if mod.name == mod_name:
-                mod.on_action(action)
-                return
+        mod = _find_module(mod_name)
+        if mod is not None:
+            mod.on_action(action)
+            return
 
     if _bootstrap_error is not None:
         from plugin.framework.errors import WriterAgentException
@@ -640,11 +669,11 @@ def get_menu_text(command: str) -> str | None:
     from plugin.framework.i18n import _
 
     # Check if the module provides a dynamic text
-    for mod in _modules:
-        if mod.name == mod_name:
-            text = mod.get_menu_text(action)
-            if text is not None:
-                return _(text)
+    mod = _find_module(mod_name)
+    if mod is not None:
+        text = mod.get_menu_text(action)
+        if text is not None:
+            return _(text)
 
     msgid = _STATIC_MENU_TITLES.get(command)
     if msgid is not None:
@@ -678,9 +707,12 @@ def notify_menu_update() -> None:
             log.warning("notify_menu_update: failed to fire status event for %s: %s", command, e)
     if failed:
         with _status_lock:
+            # What was wrong: prune used 'is' on PyUNO listener proxies, failing to match.
+            # How it happened: PyUNO creates different proxy instances for the same UNO object.
+            # Why this change: compare with uno_same and Complete URL matching.
             _status_listeners[:] = [
                 (lstnr, u) for (lstnr, u) in _status_listeners
-                if not any(lstnr is fl and u.Complete == fu.Complete for (fl, fu) in failed)
+                if not any(uno_same(lstnr, fl) and u.Complete == fu.Complete for (fl, fu) in failed)
             ]
     if os.environ.get("WRITERAGENT_TESTING") != "1" and os.environ.get("WRITERAGENT_EVAL_HARNESS") != "1":
         # Update icons in a background thread (avoids blocking UI)
@@ -691,14 +723,7 @@ def notify_menu_update() -> None:
 
 def _fire_status_event(listener: Any, url: Any, text: str | None) -> None:
     """Send a FeatureStateEvent to one listener."""
-    import typing
-
-    if typing.TYPE_CHECKING:
-        from com.sun.star.frame import FeatureStateEvent
-
-        ev = FeatureStateEvent()
-    else:
-        ev = uno.createUnoStruct("com.sun.star.frame.FeatureStateEvent")
+    ev = cast("Any", uno.createUnoStruct("com.sun.star.frame.FeatureStateEvent"))
     ev.FeatureURL = url
     command = url.Path
     ev.IsEnabled = True
@@ -724,9 +749,9 @@ def _get_menu_icon(command: str) -> str | None:
         return None
     mod_name = command[:dot]
     action = command[dot + 1 :]
-    for mod in _modules:
-        if mod.name == mod_name:
-            return mod.get_menu_icon(action)
+    mod = _find_module(mod_name)
+    if mod is not None:
+        return mod.get_menu_icon(action)
     return None
 
 
@@ -785,8 +810,13 @@ def _load_icon_graphic(module_name: str, icon_filename: str, ctx: Any | None = N
             log.warning("_load_icon_graphic: get_ctx() returned None for %s/%s", module_name, icon_filename)
             return None
         ctx_any = cast("Any", ctx)
-        smgr = getattr(ctx_any, "ServiceManager", getattr(ctx_any, "getServiceManager", lambda: None)())
-        assert smgr is not None
+        # What was wrong: getattr fallback evaluated getServiceManager on every call, and assert smgr is not None disappears under -O.
+        # How it happened: ad-hoc getattr ladder was used instead of the standard get_service_manager helper.
+        # Why this change: call get_service_manager and safely return None with a warning if missing.
+        smgr = get_service_manager(ctx_any)
+        if smgr is None:
+            log.warning("_load_icon_graphic: get_service_manager returned None for %s/%s", module_name, icon_filename)
+            return None
         gp = cast("Any", smgr).createInstanceWithContext("com.sun.star.graphic.GraphicProvider", ctx_any)
         ext_url = get_extension_url(ctx_any)
         if not ext_url:
@@ -869,8 +899,10 @@ def _update_menu_icons_impl() -> None:
         if not key_graphics:
             return
 
-        smgr = getattr(ctx, "ServiceManager", getattr(ctx, "getServiceManager", lambda: None)())
-        assert smgr is not None
+        smgr = get_service_manager(ctx)
+        if smgr is None:
+            log.warning("_update_menu_icons_impl: get_service_manager returned None")
+            return
 
         supplier = cast("Any", smgr).createInstanceWithContext("com.sun.star.ui.ModuleUIConfigurationManagerSupplier", ctx)
         for mod_id in _IMAGE_MANAGER_MODULES:
@@ -922,18 +954,25 @@ def _update_menu_icons() -> None:
     post_to_main_thread(_update_menu_icons_impl)
 
 
+_LEGACY_FRAMEWORK_COMMANDS: dict[str, str] = {
+    "ToggleMCPServer": "mcp.toggle_server",
+    "MCPStatus": "mcp.server_status",
+    "RunFormatTests": "main.RunFormatTests",
+    "RunCalcTests": "main.RunCalcTests",
+    "RunDrawTests": "main.RunDrawTests",
+    "RunCalcIntegrationTests": "main.RunCalcIntegrationTests",
+    "EvaluationDashboard": "main.EvaluationDashboard",
+    "NoOp": "main.NoOp",
+}
+
+
 # Bootstrapper replaces the previous monolithic MainJob.
 # It acts as an OnStartApp hook (triggered on office startup) and a proxy for legacy toolbar triggers.
 class MainBootstrapJob(unohelper.Base, XJobExecutor, XJob):
     ctx: Any
-    sm: Any
 
     def __init__(self, ctx: Any) -> None:
         self.ctx = ctx
-        try:
-            self.sm = ctx.getServiceManager()
-        except NameError:
-            self.sm = ctx.ServiceManager
 
     def execute(self, Arguments: Any) -> tuple[()]:
         """Called by the Jobs framework on OnStartApp."""
@@ -959,39 +998,38 @@ class MainBootstrapJob(unohelper.Base, XJobExecutor, XJob):
         except Exception:
             log.exception("MainBootstrapJob.trigger: init_logging failed")
 
-        args = Event
-        if args and isinstance(args, str) and ("." in args or args.startswith("plugin.")):
-            cmd = args
-            if cmd.startswith("plugin."):
-                cmd = cmd[7:]
-            _dispatch_command(cmd)
-            return
+        try:
+            args = Event
+            if args and isinstance(args, str) and ("." in args or args.startswith("plugin.")):
+                cmd = args
+                if cmd.startswith("plugin."):
+                    cmd = cmd[7:]
+                _dispatch_command(cmd)
+                return
 
-        if args == "settings":
-            _dispatch_command("main.settings")
-            return
+            if args == "settings":
+                _dispatch_command("main.settings")
+                return
 
-        if self._handle_framework_actions(args):
-            return
+            if self._handle_framework_actions(args):
+                return
 
-        model = get_active_document(self.ctx)
-        from plugin.doc.doc_type import get_document_type, DocumentType
+            model = get_active_document(self.ctx)
+            from plugin.doc.doc_type import get_document_type, DocumentType
 
-        doc_type = get_document_type(model)
-        if doc_type in (DocumentType.WRITER, DocumentType.CALC):
-            self._handle_selection_actions(args, model)
+            doc_type = get_document_type(model)
+            if doc_type in (DocumentType.WRITER, DocumentType.CALC):
+                self._handle_selection_actions(args, model)
+        except Exception as exc:
+            from plugin.framework.main_shared import report_action_failure
+
+            report_action_failure(str(Event or "trigger"), exc)
 
     def _handle_framework_actions(self, args: str) -> bool:
-        framework_args = ("ToggleMCPServer", "MCPStatus", "RunFormatTests", "RunCalcTests", "RunDrawTests", "RunCalcIntegrationTests", "EvaluationDashboard", "NoOp")
-        if args not in framework_args:
+        cmd = _LEGACY_FRAMEWORK_COMMANDS.get(args)
+        if cmd is None:
             return False
-
-        if args == "ToggleMCPServer":
-            _dispatch_command("mcp.toggle_server")
-        elif args == "MCPStatus":
-            _dispatch_command("mcp.server_status")
-        else:
-            _dispatch_command("main." + args)
+        _dispatch_command(cmd)
         return True
 
     def _handle_selection_actions(self, args: str, model: Any) -> None:
@@ -999,6 +1037,10 @@ class MainBootstrapJob(unohelper.Base, XJobExecutor, XJob):
             self._handle_selection_action(args, model)
 
     def _handle_selection_action(self, args: str, model: Any) -> None:
+        # What was wrong: accelerator actions bypassed _dispatch_command and never bootstrapped.
+        # How it happened: accelerators invoke trigger with ExtendSelection directly.
+        # Why this change: bootstrap eagerly before calling selection action.
+        bootstrap()
         from plugin.chatbot.dialog_views import input_box
         from plugin.chatbot.selection import do_selection_action_for_document
 
@@ -1097,6 +1139,14 @@ class DispatchHandler(unohelper.Base, XDispatch, XDispatchProvider, XInitializat
         listener = Control
         url = URL
         with _status_lock:
+            # What was wrong: re-registering a status listener for the same control and URL added duplicates.
+            # How it happened: addStatusListener unconditionally appended without deduplication.
+            # Why this change: drop existing entries matching uno_same and Complete URL before appending.
+            _status_listeners[:] = [
+                (lstnr, u)
+                for lstnr, u in _status_listeners
+                if not (uno_same(lstnr, listener) and u.Complete == url.Complete)
+            ]
             _status_listeners.append((listener, url))
         # Send current state immediately
         command = url.Path
@@ -1145,7 +1195,7 @@ def main() -> None:
             print("ERROR: Could not bootstrap default Office.")
             sys.exit(1)
     job = MainBootstrapJob(ctx)
-    job.trigger("hello")
+    job.execute(())
 
 
 # Starting from command line

@@ -296,3 +296,40 @@ def test_search_still_reaches_header_after_html_set(ctx, doc):
     from plugin.framework.uno_context import uno_same
 
     assert uno_same(found.getText(), header) or token in header.getString()
+
+
+@native_test
+@with_native_doc("writer")
+def test_set_header_first_does_not_write_shared_header_uno(ctx, doc):
+    style, _name = _style(doc)
+    style.setPropertyValue("HeaderIsOn", True)
+    style.setPropertyValue("FirstIsShared", True)
+    _set(doc, ctx, "header", "<p>Original shared header text</p>")
+
+    res = _set(doc, ctx, "header_first", "<p>Different first page text</p>")
+    assert res["status"] == "skipped"
+    assert res.get("mirrored") is True
+
+    got = _get(doc, ctx, "header")
+    assert "Original shared header text" in got["content"]
+    assert "Different first page text" not in got["content"]
+
+
+@native_test
+@with_native_doc("writer")
+def test_replace_emoji_in_header_uno(ctx, doc):
+    from plugin.writer.page import PageReplaceHeaderFooterText
+
+    style, _name = _style(doc)
+    style.setPropertyValue("HeaderIsOn", True)
+    header_text = style.getPropertyValue("HeaderText")
+    header_text.setString("A😀B")
+
+    tool = PageReplaceHeaderFooterText()
+    res = tool.execute(
+        _tool_ctx(doc, ctx), style=_style_name(doc), region="header",
+        old_content="😀", content="X",
+    )
+    assert res["status"] == "ok", res
+    assert header_text.getString() == "AXB"
+

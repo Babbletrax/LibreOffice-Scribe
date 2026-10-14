@@ -57,9 +57,16 @@ def get_visual_doc_type(doc: Any) -> str:
     return doc_type_label_for_enum(doc_type)
 
 
+# Bugfix: int(mm) * 100 truncated fractional millimetres to whole millimetres
+# (e.g. 12.7 mm became 12 mm / 1200 units). Rounding float(mm) * 100 preserves
+# fractional millimetre inputs to the nearest 1/100 mm LibreOffice unit.
+def mm_to_unit(mm: int | float) -> int:
+    """Nearest LibreOffice 1/100 mm. Python round (half to even)."""
+    return int(round(float(mm) * 100))
+
+
 def mm_to_units(width_mm: int | float, height_mm: int | float) -> tuple[int, int]:
-    """Convert millimetres to LibreOffice 1/100 mm units, preserving legacy truncation."""
-    return int(width_mm) * 100, int(height_mm) * 100
+    return mm_to_unit(width_mm), mm_to_unit(height_mm)
 
 
 def px_to_units(width_px: int | float, height_px: int | float) -> tuple[int, int]:

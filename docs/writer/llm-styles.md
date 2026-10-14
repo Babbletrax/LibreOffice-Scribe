@@ -70,7 +70,9 @@ To reliably get the LLM to use your styles, you need to provide it with instruct
 
 ### 1. Dynamic Discovery via Tools
 
-In newer versions of WriterAgent, the LLM has access to a `list_styles()` tool. You can instruct the agent in your prompt to first call this tool to learn what styles are available before writing its HTML formatting.
+In newer versions of WriterAgent, the LLM has access to a `style_list()` tool. Calling `style_list()` with no family returns family names; pass `family="ParagraphStyles"`, `"CharacterStyles"`, or `"PageStyles"` to list styles in that family. You can instruct the agent in your prompt to first call this tool to learn what styles are available before writing its HTML formatting.
+
+Note: `No Character Style` in the character styles list is only the `apply_style` clear token. Inspect and edit the character style object as `Default Style`.
 
 **Pros:**
 * Always accurate and up-to-date with whatever document the user is currently editing.
@@ -101,7 +103,7 @@ Instead of sending every available style, WriterAgent could:
 2. Only inject custom (user-defined) styles, excluding built-in LibreOffice defaults (`Standard`, `Heading 1`, etc.).
 3. Allow the user to define a specific subset of "preferred styles" in their Settings that always get injected.
 
-If the LLM needs a style outside of this injected "shortlist", it can rely on the dynamic `list_styles()` tool as a fallback. 
+If the LLM needs a style outside of this injected "shortlist", it can rely on the dynamic `style_list()` tool as a fallback. 
 
 ## Example System Prompt Instruction
 
@@ -113,7 +115,7 @@ WriterAgent also provides tools for the LLM to inspect and modify existing docum
 
 ### The `style_create` Tool
 
-The LLM can create new styles from scratch, allowing for document-wide consistent formatting updates. This tool supports standard Paragraph and Character styles, as well as **Conditional Paragraph Styles**.
+The LLM can create new styles from scratch, allowing for document-wide consistent formatting updates. This tool supports standard Paragraph and Character styles, as well as **Conditional Paragraph Styles**. `style_create` validates rules and properties before insertion; if any property or conditional rule is invalid, it returns `failed_properties` and does not insert the style into the document. Providing `conditional_rules` for a character style is an error.
 
 **Tool Parameters:**
 * `style_name`: The name of the new style.
@@ -122,14 +124,12 @@ The LLM can create new styles from scratch, allowing for document-wide consisten
 * `property_updates`: Initial font, margin, and color settings.
 * `conditional_rules`: (Optional, ParagraphStyles only) Map contexts like `Table` or `Header` to other styles.
 
-**Struct-valued properties** (`style_create` and `style_update`): `ParaLineSpacing`, the border
+**Struct-valued properties** (`style_create`, `style_update`, and read by `style_get_info`): `ParaLineSpacing`, the border
 properties (`Left/Right/Top/BottomBorder` and the `Char*` ones), `DropCapFormat` take an **object of
 fields**, and `ParaTabStops` a **list** of them — e.g. `{"ParaLineSpacing": {"Mode": "prop",
 "Height": 150}}` is 1.5 lines (`Mode` is `prop` / `minimum` / `leading` / `fix`; `Height` is a percent
-for `prop`, 1/100 mm otherwise). They are read back in the same object form. A plain dict used to
-reach PyUNO unconverted and fail with `'dict' object has no attribute 'getTypes'`; `ParaTabStops`
-additionally needs the typed `[]com.sun.star.style.TabStop` sequence, set through `uno.invoke`
-([`styles.py`](../../plugin/writer/styles.py) `_set_style_property`).
+for `prop`, 1/100 mm otherwise). `style_get_info` returns these struct properties as the same objects `style_update` accepts.
+`CharPosture` is `0=None`, `1=Oblique`, `2=Italic`; `style_get_info` returns that integer.
 
 ### The `style_clone` Tool
 
@@ -147,19 +147,20 @@ Paragraph and character clones share the source parent and copy only properties 
 If the user has a preferred template file (.ott or .odt), the agent can import all its styles at once to ensure branding consistency.
 
 **Tool Parameters:**
-* `file_path`: Absolute path to the template.
+* `path`: Absolute filesystem path to an existing template file.
 * `overwrite`: Whether to replace existing styles.
 * `load_paragraph_styles`: (Default: True) Import text styles.
 * `load_page_styles`: Import page layouts.
 
 ### Setting Colors and Properties
 
-When updating styles, the LLM sets underlying **LibreOffice UNO API properties**. The `style_update` tool has built-in support to parse common web hex colors (like `#FF0000` or `FF0000`) into the 24-bit integers that LibreOffice expects. `ParaAdjust` is `left` / `center` / `right` / `justify` — not `0/1/2/3` (those integers are hostile: `1` is right, `2` is justify). A misspelled style name gets a close-name hint. `before` / `after` echo the keys that were set. If `CharFontName` is not installed, the result warns that LibreOffice will substitute.
+When updating styles, the LLM sets underlying **LibreOffice UNO API properties**. The `style_update` and `style_create` tools support hex colors (like `#FF0000` or `FF0000`) and the values `-1`, `"automatic"`, or `"transparent"` for automatic or no fill (which are kept distinct from 24-bit RGB and not passed through `parse_color_to_uno_int`). Border `Color` fields accept the same forms. `ParaBackColor` accepts a hex string or `-1`/`automatic`/`transparent` as well. `ParaAdjust` is `left` / `center` / `right` / `justify` — not `0/1/2/3` (those integers are hostile: `1` is right, `2` is justify). A misspelled style name gets a close-name hint. `before` / `after` echo the keys that were set. If `CharFontName` is not installed, the result warns that LibreOffice will substitute.
 
 **Key Color Properties (CharacterStyles and ParagraphStyles):**
 * `CharColor`: The main text color.
 * `CharBackColor`: The background (highlight) color of the text.
 * `CharUnderlineColor`: The color of the text underline.
+* `ParaBackColor`: The paragraph background color.
 
 **Example Tool Call:**
 ```json
@@ -168,6 +169,8 @@ When updating styles, the LLM sets underlying **LibreOffice UNO API properties**
   "family": "ParagraphStyles",
   "property_updates": {
     "CharColor": "#0055A4",
+    "CharPosture": 2,
+    "ParaBackColor": "transparent",
     "CharWeight": 150,
     "ParaTopMargin": 500,
     "ParaAdjust": "center"

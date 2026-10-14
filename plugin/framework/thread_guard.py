@@ -33,8 +33,9 @@ See docs/framework/uno-thread-safety.md (Layer A).
 Concurrency: each background job is tagged with a name in
 **thread-local** storage when ``run_in_background`` starts, so a
 violation message can say ``run_search`` instead of a reused pool thread
-name. ``_violation_ui_lock`` only prevents two threads from opening the
-same “UNO used off the main thread” dialog at once. This module
+name. ``_violation_ui_lock`` guards ``_violation_dialog_open`` so only
+one process-wide violation dialog can be open at a time; further
+violations are logged until the dialog returns. This module
 **detects** wrong-thread UNO access; it does not move work to the UI
 thread — use ``QueueExecutor`` / ``execute_on_main_thread`` for that.
 """
@@ -107,26 +108,19 @@ def on_main_thread() -> bool:
     return current is threading.main_thread()
 
 
-# In-flight violation dialogs, keyed by OS thread ident. The proxy can fire on
-# every UNO access; a second post is skipped while one dialog is still up.
-# The ident is removed when that dialog returns so a recycled thread id cannot
-# suppress a later popup and the set cannot grow without bound.
-_violation_ui_threads: set[int] = set()
+# In-flight violation dialog flag. Only one process-wide violation dialog may be
+# open at a time; further violations are logged until that dialog returns.
+_violation_dialog_open: bool = False
 _violation_ui_lock = threading.Lock()
 
 
 def set_background_task(name: str | None) -> None:
     """Tag the current thread as a background worker task (for better diagnostics).
 
-    Pass None to clear the name when a pooled worker finishes so the next job
-    is not blamed under a stale task id, and so a reused pool thread can show
-    another violation popup.
+    Pass None to clear the task name when a pooled worker finishes so the next
+    job is not blamed under a stale task id. It does not arm another dialog.
     """
     _bg.task_name = name
-    if name is None:
-        tid = threading.get_ident()
-        with _violation_ui_lock:
-            _violation_ui_threads.discard(tid)
 
 
 def get_background_task_name() -> str | None:
@@ -154,11 +148,17 @@ def _notify_thread_violation(msg: str) -> None:
             return
     except Exception:
         return
-    tid = threading.get_ident()
+
+    # Bugfix: Per-ident dedup posted one modal per violating thread, and each
+    # modal runs a nested main-thread loop. set_background_task(None) also
+    # cleared the ident while that dialog was still up, so the next job on
+    # the same pool thread posted a second modal. One flag, cleared only when
+    # the dialog callback finishes or the post itself fails, allows a single dialog.
+    global _violation_dialog_open
     with _violation_ui_lock:
-        if tid in _violation_ui_threads:
+        if _violation_dialog_open:
             return
-        _violation_ui_threads.add(tid)
+        _violation_dialog_open = True
 
     def _show_popup() -> None:
         try:
@@ -171,14 +171,9 @@ def _notify_thread_violation(msg: str) -> None:
         except Exception:
             log.exception("Failed to show thread violation message box")
         finally:
-            # Drop the ident when the dialog returns. Waiting for
-            # set_background_task(None) leaves a thread that exited without
-            # that clear in the set: a recycled OS thread id then suppresses
-            # the next dialog, and the set grows without bound. A later
-            # violation on that id can post again. set_background_task(None)
-            # still clears an in-flight id when the job ends first.
+            global _violation_dialog_open
             with _violation_ui_lock:
-                _violation_ui_threads.discard(tid)
+                _violation_dialog_open = False
 
     try:
         from plugin.framework.queue_executor import post_to_main_thread
@@ -188,7 +183,7 @@ def _notify_thread_violation(msg: str) -> None:
     except Exception:
         log.exception("Failed to post thread violation message box on main thread")
         with _violation_ui_lock:
-            _violation_ui_threads.discard(tid)
+            _violation_dialog_open = False
 
 
 def assert_main_thread(what: str) -> None:

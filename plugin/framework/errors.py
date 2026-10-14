@@ -60,6 +60,7 @@ def is_disposed_exception(exc: BaseException) -> bool:
     tighter name check here.
     Tool chat mapping uses :func:`is_tool_document_disposed` so a live-doc
     bare RuntimeException is not reported as DOCUMENT_DISPOSED.
+    `reraise_if_disposed` uses `is_real_disposal` and must not call this function.
     """
     if isinstance(exc, DocumentDisposedError):
         return True
@@ -355,7 +356,7 @@ def format_error_message(e: Exception) -> str:
     import socket
     import urllib.error
 
-    msg = "mock" if UNDER_CROSSHAIR else str(e)
+    msg = "mock" if UNDER_CROSSHAIR else resolve_exception_message(e)
     if isinstance(e, ssl.SSLError):
         return _("TLS/SSL Error: {0}").format(msg)
     # Only HTTPError carries a status. RemoteDisconnected, BadStatusLine,
@@ -417,10 +418,16 @@ def format_error_message(e: Exception) -> str:
             reason_obj = e
         if reason_obj is not None and isinstance(reason_obj, (socket.timeout, TimeoutError)):
             return _("Request Timed Out. Try increasing 'Request Timeout' in Settings.")
+        # urllib.request wraps a certificate failure as URLError(reason=SSLError).
+        # A direct SSLError is handled above. The wrapped form used to return "Connection Error"
+        # and hide the TLS sentence.
+        if isinstance(reason_obj, ssl.SSLError):
+            tls = "mock" if UNDER_CROSSHAIR else resolve_exception_message(reason_obj)
+            return _("TLS/SSL Error: {0}").format(tls)
         if UNDER_CROSSHAIR:
             reason = "mock"
         elif reason_obj is not None:
-            reason = str(reason_obj)
+            reason = resolve_exception_message(reason_obj)
         elif isinstance(e, urllib.error.URLError):
             reason = str(getattr(e, "reason", None) or e)
         else:
@@ -602,8 +609,13 @@ def reraise_if_disposed(
     *,
     object_type: str = "document",
 ) -> None:
-    """Disposed UNO is a closed document or component, not a generic tool failure."""
-    if is_disposed_exception(exc):
+    """Disposed UNO is a closed document or component, not a generic tool failure.
+
+    Only DisposedException and DocumentDisposedError become DocumentDisposedError.
+    A bare RuntimeException must remain the original exception because wrapping
+    it makes is_tool_document_disposed skip the live-document probe.
+    """
+    if is_real_disposal(exc):
         raise DocumentDisposedError(message, object_type=object_type) from exc
 
 
@@ -632,7 +644,11 @@ def safe_uno_call(default: Any = None) -> Any:
             except Exception as e:
                 # Do not add "RuntimeException": that is a probe failure, not disposal.
                 if is_real_disposal(e):
-                    raise DocumentDisposedError(f"UNO object disposed during {func.__name__}", object_type=func.__name__, details={"args": str(args), "kwargs": str(kwargs), "original_error": str(e)}) from e
+                    # Bugfix: details used to store str(args) and str(kwargs); a probe
+                    # argument can be document text or a UNO proxy, and stringifying
+                    # it during teardown is large and can touch the dead object;
+                    # the message already names func.__name__.
+                    raise DocumentDisposedError(f"UNO object disposed during {func.__name__}", object_type=func.__name__, details={"original_error": resolve_exception_message(e)}) from e
                 logging.getLogger("writeragent.errors").debug("safe_uno_call: %s failed (%s), returning default %r", func.__name__, e, default)
                 return default
 
@@ -654,19 +670,20 @@ def handle_errors(context_name: str) -> Any:
             except WriterAgentException:
                 raise
             except Exception as e:
-                # We catch Exception here because pyuno bridge exceptions don't always inherit from Python's standard Exception cleanly in all builds,
-                # but catching Exception is the standard way to grab them. We immediately wrap it.
+                # Catch Exception; current PyUNO errors subclass Exception;
+                # KeyboardInterrupt and SystemExit propagate. We immediately wrap it.
                 e_name = type(e).__name__
                 # is_disposed_exception matches any RuntimeException name.
                 # A live-document failure is not disposal and must not skip
                 # the live-doc check in is_tool_document_disposed.
                 if is_real_disposal(e):
-                    raise DocumentDisposedError(f"UNO object disposed during {context_name}", object_type=context_name, details={"original_error": str(e)}) from e
+                    raise DocumentDisposedError(f"UNO object disposed during {context_name}", object_type=context_name, details={"original_error": resolve_exception_message(e)}) from e
                 else:
                     # Bugfix: handle_errors previously overrode the error code with code="INTERNAL_ERROR",
                     # which bypassed ToolExecutionError's standard code "TOOL_EXECUTION_ERROR" and required
                     # downstream handlers to rewrite it. Omitting code allows ToolExecutionError's default code to apply.
-                    raise ToolExecutionError(f"{context_name} failed: {e}", details={"error": str(e), "type": e_name}) from e
+                    text = resolve_exception_message(e)
+                    raise ToolExecutionError(f"{context_name} failed: {text}", details={"error": text, "type": e_name}) from e
 
         return wrapper
 
@@ -689,11 +706,12 @@ def safe_call(fn: Any, context_name: str, *args: Any, **kwargs: Any) -> Any:
         # stay UnoObjectError.
         e_name = type(e).__name__
         if is_real_disposal(e):
-            raise DocumentDisposedError(f"UNO object disposed during {context_name}", object_type=context_name, details={"original_error": str(e)}) from e
+            raise DocumentDisposedError(f"UNO object disposed during {context_name}", object_type=context_name, details={"original_error": resolve_exception_message(e)}) from e
 
-        # We catch Exception here because pyuno bridge exceptions don't always inherit from Python's standard Exception cleanly in all builds,
-        # but catching Exception is the standard way to grab them. We immediately wrap it.
-        raise UnoObjectError(f"{context_name} failed: {e}", details={"operation": context_name, "type": e_name}) from e
+        # Catch Exception; current PyUNO errors subclass Exception;
+        # KeyboardInterrupt and SystemExit propagate. We immediately wrap it.
+        text = resolve_exception_message(e)
+        raise UnoObjectError(f"{context_name} failed: {text}", details={"operation": context_name, "type": e_name}) from e
 
 
 # Exception types and error helpers live here. safe_json_loads / safe_python_literal_eval

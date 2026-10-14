@@ -35,6 +35,7 @@ from plugin.chatbot.send_state import (
 )
 from plugin.chatbot.state_machine import (
     CompleteJobEffect,
+    ErrorEvent,
     SendHandlerState,
     SpawnAgentWorkerEffect,
     StopRequestedEvent,
@@ -232,12 +233,18 @@ def test_hypothesis_tool_loop_stop_sequences(state: ToolLoopState, events) -> No
 @settings(max_examples=_hyp_n("send_handler"), deadline=None)
 def test_hypothesis_send_handler_stop_excludes_spawns(state: SendHandlerState, event) -> None:
     tr = send_handler_next_state(state, event)
-    if isinstance(event, StopRequestedEvent) and state.status != "error":
+    if isinstance(event, StopRequestedEvent) and state.status not in ("error", "done", "stopped"):
         assert stop_effects_exclude_spawns(tr.effects)
         assert any(isinstance(e, CompleteJobEffect) for e in tr.effects)
         assert not any(isinstance(e, SpawnAgentWorkerEffect) for e in tr.effects)
+        assert tr.state.status == "stopped"
     elif isinstance(event, StopRequestedEvent):
+        assert tr.effects == []
+        assert tr.state.status == state.status
         assert stop_effects_exclude_spawns(tr.effects)
+    elif isinstance(event, ErrorEvent) and state.status in ("done", "stopped", "error"):
+        assert tr.effects == []
+        assert tr.state.status == state.status
 
 
 @given(state=send_button_states(), events=st.lists(send_events(), min_size=1, max_size=5))
