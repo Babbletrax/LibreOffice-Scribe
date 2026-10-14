@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from unittest.mock import MagicMock
 
 from plugin.scripting.venv import editor_main as ej
@@ -108,11 +110,18 @@ def test_jedi_complete_exception(monkeypatch):
     assert res == {"items": []}
 
 
-def test_monaco_api_get_completions_when_jedi_missing(monkeypatch):
-    monkeypatch.setattr(ej, "jedi", None)
+def test_api_init_does_not_build_a_jedi_environment(monkeypatch):
+    mock_jedi = MagicMock()
+    mock_jedi.create_environment.side_effect = AssertionError("should not be called")
+    monkeypatch.setattr(ej, "jedi", mock_jedi)
     api = ej.MonacoEditorApi()
+    assert api.is_jedi_available() is True
+    mock_jedi.create_environment.assert_not_called()
+
+    monkeypatch.setattr(ej, "jedi", None)
     assert api.is_jedi_available() is False
     assert api.get_completions("def ", 1, 5) == {"items": []}
+    assert api._jedi_thread is None
 
 
 def test_jedi_completions_caps_docstrings(monkeypatch):
@@ -156,4 +165,101 @@ def test_monaco_api_get_completions_drops_stale_request(monkeypatch):
 
     res = api.get_completions("x.", 1, 3)
     assert res == {"items": []}
+
+
+def test_get_completions_returns_empty_while_a_call_is_in_flight():
+    api = ej.MonacoEditorApi()
+    mock_jedi = MagicMock()
+
+    started_ev = threading.Event()
+    release_ev = threading.Event()
+
+    calls = 0
+
+    def mock_get_completions(code, line, column):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            started_ev.set()
+            release_ev.wait(timeout=5.0)
+            return {"items": [{"label": "stale"}]}
+        return {"items": [{"label": "fresh"}]}
+
+    mock_jedi.get_completions.side_effect = mock_get_completions
+    api._jedi = mock_jedi
+
+    first_result = {}
+
+    def run_first():
+        first_result["res"] = api.get_completions("def ", 1, 5)
+
+    t1 = threading.Thread(target=run_first)
+    try:
+        t1.start()
+        assert started_ev.wait(timeout=5.0)
+
+        # Second get_completions on the test thread
+        second_res = api.get_completions("def ", 1, 5)
+        assert second_res == {"items": []}
+        assert mock_jedi.get_completions.call_count == 1
+
+        release_ev.set()
+        t1.join(timeout=2.0)
+        assert not t1.is_alive()
+        assert first_result.get("res") == {"items": []}
+
+        third_res = api.get_completions("def ", 1, 5)
+        assert third_res == {"items": [{"label": "fresh"}]}
+        assert mock_jedi.get_completions.call_count == 2
+        assert api._jedi_thread is not None
+        assert api._jedi_thread.daemon is True
+    finally:
+        release_ev.set()
+        t1.join(timeout=2.0)
+
+
+def test_get_completions_abandons_a_stuck_worker(monkeypatch):
+    assert not hasattr(ej, "_jedi_pool")
+    monkeypatch.setattr(ej, "_JEDI_CALL_TIMEOUT_SEC", 0.05)
+
+    api = ej.MonacoEditorApi()
+    started_ev = threading.Event()
+    release_ev = threading.Event()
+
+    blocking_mock = MagicMock()
+
+    def block_call(code, line, column):
+        started_ev.set()
+        release_ev.wait(timeout=5.0)
+        return {"items": [{"label": "blocked"}]}
+
+    blocking_mock.get_completions.side_effect = block_call
+    api._jedi = blocking_mock
+
+    t1 = threading.Thread(target=lambda: api.get_completions("def ", 1, 5))
+    try:
+        t1.start()
+        assert started_ev.wait(timeout=5.0)
+        assert api._jedi_thread is not None
+        assert api._jedi_thread.daemon is True
+
+        time.sleep(0.08)
+
+        new_mock = MagicMock()
+        new_mock.get_completions.return_value = {"items": [{"label": "new"}]}
+        factory_calls = []
+
+        def factory():
+            factory_calls.append(1)
+            return new_mock
+
+        monkeypatch.setattr(ej, "JediSession", factory)
+
+        second_res = api.get_completions("def ", 1, 5)
+        assert second_res == {"items": [{"label": "new"}]}
+        assert len(factory_calls) == 1
+        assert blocking_mock.get_completions.call_count == 1
+    finally:
+        release_ev.set()
+        t1.join(timeout=2.0)
 

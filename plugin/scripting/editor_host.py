@@ -33,6 +33,7 @@ from plugin.framework.i18n import _
 from plugin.framework.queue_executor import QueueExecutor, default_executor
 from plugin.framework.worker_pool import BackgroundHandle, run_in_background
 from plugin.scripting.editor_ipc import (
+    PARENT_TO_CHILD_TYPES,
     exception_traceback,
     failure_detail,
     failure_message,
@@ -398,6 +399,8 @@ class PersistentEditor:
     def send(self, message: dict[str, Any], *, session: EditorSessionState | None = None) -> None:
         """Thread-safe write to child stdin. Session messages get ``session_id`` + ``target``."""
         kind = message_type(message)
+        if kind and kind not in PARENT_TO_CHILD_TYPES:
+            log.warning("editor_host: type %s is not queued by the editor child", kind)
         state = session or (self.lookup(session_id_of(message)) if session_id_of(message) else self.focused())
         if kind and kind != "ready" and state is not None:
             message = stamp_session(

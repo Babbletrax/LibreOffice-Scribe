@@ -13,6 +13,7 @@ import struct
 import pytest
 
 from plugin.scripting.editor_ipc import (
+    PARENT_TO_CHILD_TYPES,
     exception_traceback,
     failure_detail,
     failure_message,
@@ -172,3 +173,7 @@ def test_target_identity_key_distinguishes_script_origin():
     user_script = {"script_name": "helper.py", "script_origin": "user"}
     doc_script = {"script_name": "helper.py", "script_origin": "document"}
     assert target_identity_key("run_script", user_script) != target_identity_key("run_script", doc_script)
+
+
+def test_parent_to_child_types_are_the_queued_set():
+    assert PARENT_TO_CHILD_TYPES == frozenset({"saved", "error", "load", "request_save", "theme", "scripts_list"})

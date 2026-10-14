@@ -37,7 +37,7 @@ Menu: `org.extension.writeragent:scripting.edit_python_cell` in [`extension/Addo
 
 ## 2. IPC protocol (pipe)
 
-Same framing as [`worker_harness.py`](../../plugin/scripting/worker_harness.py) (`struct.pack("!I", …)` + **pickle protocol 5**). Helpers live in [`editor_ipc.py`](../../plugin/scripting/editor_ipc.py) (`stamp_session`, `target_from_load`, `read_message` / `write_message`). Host dispatch is [`editor_host.py`](../../plugin/scripting/editor_host.py); the child echoes in [`editor_main.py`](../../plugin/scripting/venv/editor_main.py) and [`editor.js`](../../plugin/contrib/scripting/assets/editor/editor.js).
+Same framing as [`worker_harness.py`](../../plugin/scripting/worker_harness.py) (`struct.pack("!I", …)` + **pickle protocol 5**). Helpers live in [`editor_ipc.py`](../../plugin/scripting/editor_ipc.py) (`stamp_session`, `target_from_load`, `PARENT_TO_CHILD_TYPES`, `read_message` / `write_message`). Host dispatch is [`editor_host.py`](../../plugin/scripting/editor_host.py); the child echoes in [`editor_main.py`](../../plugin/scripting/venv/editor_main.py) and [`editor.js`](../../plugin/contrib/scripting/assets/editor/editor.js).
 
 ### Message types
 
@@ -133,7 +133,8 @@ The Monaco **shell** (toolbar, status line, script picker, `prompt()`/`confirm()
 ### Autocompletion (Jedi)
 
 - Run Jedi only in the **editor child**, not over the pipe on every key.
-- One `jedi.create_environment(venv_path)` per window lifetime.
+- `jedi.create_environment(sys.executable)` runs on the first completion, on that daemon thread. `MonacoEditorApi` construction and `ready` do not build it. `is_jedi_available` is only `jedi is not None`.
+- A completion that finds that thread still inside `_JEDI_CALL_TIMEOUT_SEC` (5s) returns no items and does not queue. A thread still running after that budget is abandoned with its environment; the next completion creates a new one.
 - Target: sub-10ms after warm-up.
 
 ---

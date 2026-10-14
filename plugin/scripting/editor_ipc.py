@@ -11,6 +11,7 @@
 #   - Monaco Editor Script:     plugin/contrib/scripting/assets/editor/editor.js
 #   - JS Script Manager:        plugin/contrib/scripting/assets/editor/scripts_manager.js
 #   - Host Bridge:              plugin/scripting/editor_host.py
+# Parent-to-child types that the child queues are PARENT_TO_CHILD_TYPES in this file, and a new type is added there only when the host sends it and editor.js or scripts_manager.js handles it.
 # =========================================================================================
 
 from __future__ import annotations
@@ -41,6 +42,7 @@ from plugin.scripting.ipc import (
 
 __all__ = [
     "EDITOR_DEFAULT_TITLE",
+    "PARENT_TO_CHILD_TYPES",
     "exception_traceback",
     "failure_detail",
     "failure_message",
@@ -56,6 +58,18 @@ __all__ = [
 ]
 
 EDITOR_DEFAULT_TITLE = " "
+
+# Queued by the editor child for poll_messages. ``closed`` is not here:
+# the child reader treats it as process shutdown. ``theme`` is handled
+# by editor.js; the host currently attaches theme data to ``load``.
+PARENT_TO_CHILD_TYPES = frozenset({
+    "saved",
+    "error",
+    "load",
+    "request_save",
+    "theme",
+    "scripts_list",
+})
 
 # Identity keys on every session message (omit empties).
 _TARGET_KEYS = ("cell_address", "script_name", "script_origin", "doc_url", "resource")
