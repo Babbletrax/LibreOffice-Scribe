@@ -13,20 +13,21 @@ To understand where plot insertion fits in Collabora Online, it is essential to 
 ### 1.1 What WriterAgent / LibrePy Does Today (Production Template)
 WriterAgent / LibrePy is running in production as a desktop extension for LibreOffice with comprehensive support for matplotlib, seaborn, and custom visualization payloads:
 1. **Plot Generation in Python:** The sandboxed runner captures open matplotlib/seaborn figures via `_capture_open_figures_payload` in [`plugin/scripting/venv/venv_sandbox.py`](../../plugin/scripting/venv/venv_sandbox.py). If a single figure is open, it serializes it to an image payload (`{"__wa_payload__": "image", "format": "png", "data": ...}`); if multiple figures are open, it bundles them into a `multi_data` envelope containing all open figures.
-2. **Result Inspection in Egress:** When `=PYTHON(...)` or `=PY(...)` executes in [`plugin/calc/python/function.py`](../../plugin/calc/python/function.py), `find_image_payloads(result)` scans the returned object. If images are present, it invokes `insert_image_result_on_sheet`:
+2. **Result Inspection in Egress:** When `=PYTHON(...)` or `=PY(...)` executes in [`plugin/calc/python/function.py`](../../plugin/calc/python/function.py), `find_image_payloads(result)` scans the returned object. If images are present, it invokes `insert_image_result_on_sheet` with `image_count=len(images)` and `notify_cell=True`:
    ```python
    images = find_image_payloads(result)
    if images:
-       for img in images:
-           insert_image_result_on_sheet(ctx, img, code=code, doc=target_doc)
+       for i, img in enumerate(images):
+           insert_image_result_on_sheet(ctx, img, code=code, doc=target_doc, image_index=i, image_count=len(images), notify_cell=True)
        return _("Image inserted") if len(images) == 1 else _("Images inserted")
    ```
+   When a smaller plot count is returned on recalc, higher plot slots on the cell are removed.
 3. **Smart Sizing & Geometry Snapping ([`plugin/calc/python/image_egress.py`](../../plugin/calc/python/image_egress.py)):**
-   * **Unmerged Single Cell:** Sized to a standard chart overlay of $10\text{ cm} \times 6\text{ cm}$ ($10000 \times 6000$ in $1/100\text{ mm}$), with `ResizeWithCell = False`.
+   * **Unmerged Single Cell:** Desktop no longer forces $10\text{ cm} \times 6\text{ cm}$ when the intrinsic aspect ratio is known: it scales the longer side to $10\text{ cm}$ with the shorter side proportional (falling back to $10\text{ cm} \times 6\text{ cm}$ if the aspect ratio cannot be determined), with `ResizeWithCell = False`.
    * **Merged Placeholder Cell:** If the user pre-merged a block of cells (e.g. `B2:H18`) as a chart area, LibrePy detects `target_cell.IsMerged` and checks if width $\ge 40\text{ mm}$ and height $\ge 30\text{ mm}$. If so, the graphic shape snaps exactly to the merged cell's geometry with `ResizeWithCell = True`.
-   * **Thin Banner Protection:** If the target cell is a 1-row merged strip (e.g. `A1:H1` title banner), setting shape size to cell size would crush the plot to a 5mm unreadable sliver. LibrePy detects thin banners and falls back to standard $10\text{ cm} \times 6\text{ cm}$.
+   * **Thin Banner Protection:** If the target cell is a 1-row merged strip (e.g. `A1:H1` title banner), setting shape size to cell size would crush the plot to a 5mm unreadable sliver. LibrePy detects thin banners and falls back to aspect size (or standard $10\text{ cm} \times 6\text{ cm}$).
 4. **Lifecycle & Recalculation Replacement:**
-   * Before creating a new shape, LibrePy inspects the sheet's `DrawPage` via `_shape_anchor_matches_cell`. If an existing shape is already anchored to the target formula cell, it updates the graphic on that shape in place rather than creating duplicate stacked shapes.
+   * Before creating a new shape, LibrePy inspects the sheet's `DrawPage` via `_shape_anchor_matches_cell`. If an existing shape is already anchored to the target formula cell, it updates the graphic on that shape in place rather than creating duplicate stacked shapes. If `image_count` is smaller than previous runs, higher plot slots are removed.
 5. **Main-Thread Marshaling:**
    * Drawing layer mutations are marshaled to the main VCL UI thread via `post_to_main_thread` / `execute_on_main_thread`.
 

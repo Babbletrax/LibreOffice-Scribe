@@ -113,7 +113,7 @@ def test_insert_image_result_uses_merged_safe_geometry(monkeypatch: pytest.Monke
     import sys
 
     monkeypatch.setitem(sys.modules, "uno", _UnoModule())
-    awt_mod = SimpleNamespace(Size=lambda w, h: ("Size", w, h))
+    awt_mod = SimpleNamespace(Size=lambda w, h: ("Size", w, h), Point=lambda x, y: ("Point", x, y))
     monkeypatch.setitem(sys.modules, "com.sun.star.awt", awt_mod)
 
     doc = CalcDocStub(selection="C4")
@@ -164,7 +164,7 @@ def test_insert_image_result_thin_merged_cell_preserves_default_size(monkeypatch
     import sys
 
     monkeypatch.setitem(sys.modules, "uno", _UnoModule())
-    awt_mod = SimpleNamespace(Size=lambda w, h: ("Size", w, h))
+    awt_mod = SimpleNamespace(Size=lambda w, h: ("Size", w, h), Point=lambda x, y: ("Point", x, y))
     monkeypatch.setitem(sys.modules, "com.sun.star.awt", awt_mod)
 
     doc = CalcDocStub(selection="A1")
@@ -220,7 +220,7 @@ def test_insert_image_result_targets_formula_cell_sheet_when_another_sheet_activ
     import sys
 
     monkeypatch.setitem(sys.modules, "uno", _UnoModule())
-    awt_mod = SimpleNamespace(Size=lambda w, h: ("Size", w, h))
+    awt_mod = SimpleNamespace(Size=lambda w, h: ("Size", w, h), Point=lambda x, y: ("Point", x, y))
     monkeypatch.setitem(sys.modules, "com.sun.star.awt", awt_mod)
 
     sheet_overview = CalcSheetStub("Overview")
@@ -304,7 +304,7 @@ def test_insert_image_result_unmerged_single_cell_default_size(monkeypatch: pyte
     import sys
 
     monkeypatch.setitem(sys.modules, "uno", _UnoModule())
-    awt_mod = SimpleNamespace(Size=lambda w, h: ("Size", w, h))
+    awt_mod = SimpleNamespace(Size=lambda w, h: ("Size", w, h), Point=lambda x, y: ("Point", x, y))
     monkeypatch.setitem(sys.modules, "com.sun.star.awt", awt_mod)
 
     doc = CalcDocStub(selection="C4")
@@ -364,7 +364,7 @@ def test_finalize_python_return_triggers_spill(monkeypatch: pytest.MonkeyPatch) 
 
     key = ("file:///fake.ods", sheet.getName(), 1, 1)
     assert key in python_function.SPILL_REGISTRY
-    assert python_function.SPILL_REGISTRY[key] == [(2, 1)]
+    assert python_function.SPILL_REGISTRY[key].spills == [(2, 1)]
 
 
 def test_finalize_python_return_spills_on_secondary_sheet(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -401,7 +401,7 @@ def test_finalize_python_return_spills_on_secondary_sheet(monkeypatch: pytest.Mo
     assert sheet2.getCellByPosition(1, 2).getValue() == 200.0
     key = ("file:///multi.ods", "Viz_Gallery", 1, 1)
     assert key in python_function.SPILL_REGISTRY
-    assert python_function.SPILL_REGISTRY[key] == [(2, 1)]
+    assert python_function.SPILL_REGISTRY[key].spills == [(2, 1)]
 
 
 def test_finalize_python_return_matrix_formula_does_not_spill() -> None:
@@ -465,12 +465,13 @@ def test_spill_collision_detection(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_load_and_save_spill_registry(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that spill registry loads from and saves to document properties correctly."""
     import json
+    from plugin.calc.python.function import SpillCell, SpillRecord
 
     saved_payload = None
 
     def mock_get_prop(model, name, default=None):
         if name == "WriterAgentSpillRegistry":
-            return json.dumps({
+            return saved_payload if saved_payload is not None else json.dumps({
                 "Sheet1:1,1": [[2, 1], [3, 1]]
             })
         return default
@@ -491,14 +492,35 @@ def test_load_and_save_spill_registry(monkeypatch: pytest.MonkeyPatch) -> None:
     python_function.load_spill_registry_for_doc(doc)
     key = ("file:///fake_doc.ods", "Sheet1", 1, 1)
     assert key in python_function.SPILL_REGISTRY
-    assert python_function.SPILL_REGISTRY[key] == [(2, 1), (3, 1)]
+    rec = python_function.SPILL_REGISTRY[key]
+    assert rec.spills == [(2, 1), (3, 1)]
+    assert rec.code == ""
+    assert all(c.kind == "u" for c in rec.cells)
 
-    python_function.SPILL_REGISTRY[key] = [(2, 1), (3, 1), (4, 1)]
+    python_function.SPILL_REGISTRY[key] = SpillRecord(
+        code="some_code",
+        cells=[SpillCell(2, 1, "n", 20.0), SpillCell(3, 1, "n", 30.0)],
+    )
     python_function.save_spill_registry_for_doc(doc)
 
     assert saved_payload is not None
     data = json.loads(saved_payload)
-    assert data["Sheet1:1,1"] == [[2, 1], [3, 1], [4, 1]]
+    assert data["Sheet1:1,1"] == {
+        "code": "some_code",
+        "cells": [
+            {"r": 2, "c": 1, "t": "n", "v": 20.0},
+            {"r": 3, "c": 1, "t": "n", "v": 30.0},
+        ],
+    }
+
+    # Add a second load of that object JSON
+    python_function.SPILL_REGISTRY.clear()
+    python_function.LOADED_DOCUMENTS.clear()
+    python_function.load_spill_registry_for_doc(doc)
+    rec2 = python_function.SPILL_REGISTRY[key]
+    assert rec2.spills == [(2, 1), (3, 1)]
+    assert rec2.code == "some_code"
+    assert rec2.cells[0].kind == "n" and rec2.cells[0].value == 20.0
 
 
 def test_untitled_docs_do_not_share_spill_registry(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -507,6 +529,7 @@ def test_untitled_docs_do_not_share_spill_registry(monkeypatch: pytest.MonkeyPat
     getURL() is "" for both. Registry identity is each book's RuntimeUID.
     """
     import json
+    from plugin.calc.python.function import PreparedSpill, SpillCell, SpillRecord
 
     stored: dict[int, str] = {}
 
@@ -541,17 +564,38 @@ def test_untitled_docs_do_not_share_spill_registry(monkeypatch: pytest.MonkeyPat
     try:
         prepared1 = python_function._prepare_auto_spill(ctx1, "untitled_spill_a", [[1], [2]], doc1)
         prepared2 = python_function._prepare_auto_spill(ctx2, "untitled_spill_b", [[3], [4]], doc2)
-        assert prepared1 == ("uid-spill-1", "Sheet1", 1, 1)
-        assert prepared2 == ("uid-spill-2", "Sheet1", 1, 1)
-        assert python_function.SPILL_REGISTRY[key1] == [(2, 1)]
-        assert python_function.SPILL_REGISTRY[key2] == [(9, 9)]
+        assert isinstance(prepared1, PreparedSpill)
+        assert isinstance(prepared2, PreparedSpill)
+        assert prepared1.doc_key == "uid-spill-1"
+        assert prepared1.sheet_name == "Sheet1"
+        assert prepared1.formula_row == 1
+        assert prepared1.formula_col == 1
+
+        assert prepared2.doc_key == "uid-spill-2"
+        assert prepared2.sheet_name == "Sheet1"
+        assert prepared2.formula_row == 1
+        assert prepared2.formula_col == 1
+
+        assert python_function.SPILL_REGISTRY[key1].spills == [(2, 1)]
+        assert python_function.SPILL_REGISTRY[key2].spills == [(9, 9)]
         assert ("", "Sheet1", 1, 1) not in python_function.SPILL_REGISTRY
         assert python_function.LOADED_DOCUMENTS == {"uid-spill-1", "uid-spill-2"}
         assert "" not in python_function.LOADED_DOCUMENTS
 
-        python_function.SPILL_REGISTRY[key1] = [(2, 1), (3, 1)]
+        python_function.SPILL_REGISTRY[key1] = SpillRecord(
+            code="untitled_spill_a",
+            cells=[SpillCell(2, 1, "n", 2.0), SpillCell(3, 1, "n", 3.0)],
+        )
         python_function.save_spill_registry_for_doc(doc1)
-        assert json.loads(stored[id(doc1)]) == {"Sheet1:1,1": [[2, 1], [3, 1]]}
+        assert json.loads(stored[id(doc1)]) == {
+            "Sheet1:1,1": {
+                "code": "untitled_spill_a",
+                "cells": [
+                    {"r": 2, "c": 1, "t": "n", "v": 2.0},
+                    {"r": 3, "c": 1, "t": "n", "v": 3.0},
+                ],
+            }
+        }
         assert json.loads(stored[id(doc2)]) == {"Sheet1:1,1": [[9, 9]]}
 
         # Blank listener identity must not clear either untitled book.
@@ -564,14 +608,17 @@ def test_untitled_docs_do_not_share_spill_registry(monkeypatch: pytest.MonkeyPat
         sheet1.getCellByPosition(1, 1).setFormula("")
         python_function.CalcSpillModifyListener(ctx1, "uid-spill-1", "Sheet1").modified(SimpleNamespace(Source=sheet1))
         assert key1 not in python_function.SPILL_REGISTRY
-        assert python_function.SPILL_REGISTRY[key2] == [(9, 9)]
+        assert python_function.SPILL_REGISTRY[key2].spills == [(9, 9)]
 
-        python_function.SPILL_REGISTRY[key1] = [(2, 1)]
+        python_function.SPILL_REGISTRY[key1] = SpillRecord(
+            code="untitled_spill_a",
+            cells=[SpillCell(2, 1, "n", 2.0)],
+        )
         python_function.LOADED_DOCUMENTS.add("uid-spill-1")
         python_function.clear_in_memory_spill_state(doc_url="", lifecycle_key="uid-spill-1")
         assert key1 not in python_function.SPILL_REGISTRY
         assert "uid-spill-1" not in python_function.LOADED_DOCUMENTS
-        assert python_function.SPILL_REGISTRY[key2] == [(9, 9)]
+        assert python_function.SPILL_REGISTRY[key2].spills == [(9, 9)]
         assert "uid-spill-2" in python_function.LOADED_DOCUMENTS
 
         # A scheduled identity from book 1 must not write book 2.
@@ -644,7 +691,7 @@ def test_finalize_python_return_triggers_spill_2d(monkeypatch: pytest.MonkeyPatc
 
     key = ("file:///fake2d.ods", "Sheet1", 1, 1)
     assert key in python_function.SPILL_REGISTRY
-    assert set(python_function.SPILL_REGISTRY[key]) == {(1, 2), (2, 1), (2, 2)}
+    assert set(python_function.SPILL_REGISTRY[key].spills) == {(1, 2), (2, 1), (2, 2)}
 
 
 def _install_immediate_spill_timer(
@@ -716,7 +763,7 @@ def test_spilltest_a1_off_main_paints_full_grid(monkeypatch: pytest.MonkeyPatch)
     assert sheet.getCellByPosition(1, 1).getValue() == 44  # B2
     key = ("file:///SpillTest.ods", "SpillTest", 0, 0)
     assert key in python_function.SPILL_REGISTRY
-    assert set(python_function.SPILL_REGISTRY[key]) == {(0, 1), (1, 0), (1, 1)}
+    assert set(python_function.SPILL_REGISTRY[key].spills) == {(0, 1), (1, 0), (1, 1)}
 
 
 def test_finalize_python_return_spills_off_main_into_caller_doc(
@@ -750,7 +797,7 @@ def test_finalize_python_return_spills_off_main_into_caller_doc(
     assert sheet.getCellByPosition(2, 2).getValue() == 44  # C3
     key = ("file:///offmain-spill.ods", "Sheet1", 1, 1)
     assert key in python_function.SPILL_REGISTRY
-    assert set(python_function.SPILL_REGISTRY[key]) == {(1, 2), (2, 1), (2, 2)}
+    assert set(python_function.SPILL_REGISTRY[key].spills) == {(1, 2), (2, 1), (2, 2)}
 
 
 def test_finalize_python_return_spills_dataframe_payload_off_main(
@@ -839,10 +886,14 @@ def test_calc_spill_modify_listener_cleanup(monkeypatch: pytest.MonkeyPatch) -> 
     listener = python_function.CalcSpillModifyListener(ctx, "file:///fake_cleanup.ods", "Sheet1")
 
     key = ("file:///fake_cleanup.ods", "Sheet1", 1, 1)
-    python_function.SPILL_REGISTRY[key] = [(2, 1)]
+    python_function.SPILL_REGISTRY[key] = python_function.SpillRecord(
+        code="some_code",
+        cells=[python_function.SpillCell(2, 1, "n", 20.0)],
+    )
 
     cell_B2 = MagicMock()
     cell_B3 = MagicMock()
+    cell_B3.getValue.return_value = 20.0
 
     def get_cell(c, r):
         if r == 1 and c == 1:
@@ -863,7 +914,7 @@ def test_calc_spill_modify_listener_cleanup(monkeypatch: pytest.MonkeyPatch) -> 
     listener.modified(aEvent)
 
     assert key not in python_function.SPILL_REGISTRY
-    cell_B3.clearContents.assert_called_once_with(23)
+    cell_B3.clearContents.assert_called_once_with(55)
     assert len(saved) == 1
 
 
@@ -883,7 +934,10 @@ def test_spill_orphan_cleanup_saves_sheet_owner_not_active_doc(monkeypatch: pyte
     monkeypatch.setattr(python_function, "save_spill_registry_for_doc", lambda doc: saved.append(doc))
 
     key = ("file:///owner.ods", "Sheet1", 1, 1)
-    python_function.SPILL_REGISTRY[key] = [(2, 1)]
+    python_function.SPILL_REGISTRY[key] = python_function.SpillRecord(
+        code='=PY("test")',
+        cells=[python_function.SpillCell(2, 1, "n", 99.0)],
+    )
     try:
         listener = python_function.CalcSpillModifyListener(MagicMock(), "file:///owner.ods", "Sheet1")
         listener.modified(SimpleNamespace(Source=sheet))
@@ -904,10 +958,14 @@ def test_calc_spill_modify_listener_clears_when_formula_only_contains_py(monkeyp
 
     listener = python_function.CalcSpillModifyListener(MagicMock(), "file:///fake_pymt.ods", "Sheet1")
     key = ("file:///fake_pymt.ods", "Sheet1", 1, 1)
-    python_function.SPILL_REGISTRY[key] = [(2, 1)]
+    python_function.SPILL_REGISTRY[key] = python_function.SpillRecord(
+        code="keep",
+        cells=[python_function.SpillCell(2, 1, "n", 20.0)],
+    )
 
     origin = MagicMock()
     spilled = MagicMock()
+    spilled.getValue.return_value = 20.0
 
     def get_cell(c, r):
         if r == 1 and c == 1:
@@ -926,7 +984,7 @@ def test_calc_spill_modify_listener_clears_when_formula_only_contains_py(monkeyp
         origin.getFormula.return_value = "=PYMT(0.05, 12, 1000)"
         listener.modified(aEvent)
         assert key not in python_function.SPILL_REGISTRY
-        spilled.clearContents.assert_called_once_with(23)
+        spilled.clearContents.assert_called_once_with(55)
     finally:
         python_function.SPILL_REGISTRY.pop(key, None)
 
@@ -1281,7 +1339,7 @@ def test_py_timing_cached_matrix_skips_ipc(monkeypatch: pytest.MonkeyPatch, capl
     ctx = _ctx_with_doc(doc)
     worker_data = None
     tid = threading.get_ident()
-    key = (tid, python_function.session_key(ctx, code, doc=doc), repr(worker_data))
+    key = (tid, python_function.session_key(ctx, code, doc=doc), python_function._worker_data_token(worker_data))
     python_function._MATRIX_SCALAR_SESSIONS[key] = python_function.WorkerResultSession(
         [1.0, 2.0, 3.0], [1.0, 2.0, 3.0]
     )
@@ -1544,7 +1602,7 @@ def test_text_single_cell_arg_spills_instead_of_error(monkeypatch: pytest.Monkey
     monkeypatch.setattr(
         python_function,
         "_prepare_auto_spill",
-        lambda *_a, **_k: ("file:///u.ods", "Sheet1", 0, 0),
+        lambda *_a, **_k: python_function.PreparedSpill("file:///u.ods", "Sheet1", 0, 0, sheet=doc.getSheets().getByName("Sheet1")),
     )
     monkeypatch.setattr(
         python_function,
@@ -1596,7 +1654,11 @@ def test_prepare_auto_spill_with_16384_columns() -> None:
         grid = [[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]]
         prepared = python_function._prepare_auto_spill(ctx, "py_code", grid, doc)
         assert prepared != "#SPILL!"
-        assert prepared == ("uid-wide", "Sheet1", 0, 1020)
+        assert isinstance(prepared, python_function.PreparedSpill)
+        assert prepared.doc_key == "uid-wide"
+        assert prepared.sheet_name == "Sheet1"
+        assert prepared.formula_row == 0
+        assert prepared.formula_col == 1020
 
 
 def test_ragged_results_handling() -> None:
@@ -1782,4 +1844,232 @@ def test_perform_deferred_spill_fallback_to_passed_sheet_when_getbyname_raises(m
     assert passed_sheet.getCellByPosition(1, 0).getValue() == 2.0
     assert passed_sheet.getCellByPosition(0, 1).getValue() == 3.0
     assert passed_sheet.getCellByPosition(1, 1).getValue() == 4.0
+
+
+def test_spill_remap_when_block_moves_with_formula(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Post-row-insert state: formula at row 5, spilled values at rows 6-8, registry at row 4. modified() remaps key without clearing."""
+    from plugin.tests.testing_utils import CalcSheetStub
+
+    sheet = CalcSheetStub("Sheet1")
+    doc = CalcDocStub(sheets=[sheet], url="file:///remap.ods")
+    monkeypatch.setattr(python_function, "_get_calc_doc", lambda _ctx: doc)
+
+    code = "result = [1, 2, 3]"
+    formula = f'=PY("{code}")'
+    # Formula is now at (col 0, row 5)
+    sheet.getCellByPosition(0, 5).setFormula(formula)
+    # Values 1, 2, 3 at rows 6, 7, 8
+    sheet.getCellByPosition(0, 6).setValue(1.0)
+    sheet.getCellByPosition(0, 7).setValue(2.0)
+    sheet.getCellByPosition(0, 8).setValue(3.0)
+
+    # Old registry entry at row 4
+    old_key = ("file:///remap.ods", "Sheet1", 4, 0)
+    python_function.SPILL_REGISTRY[old_key] = python_function.SpillRecord(
+        code=code,
+        cells=[
+            python_function.SpillCell(5, 0, "n", 1.0),
+            python_function.SpillCell(6, 0, "n", 2.0),
+            python_function.SpillCell(7, 0, "n", 3.0),
+        ],
+    )
+
+    listener = python_function.CalcSpillModifyListener(MagicMock(), "file:///remap.ods", "Sheet1")
+    listener.modified(SimpleNamespace(Source=sheet))
+
+    new_key = ("file:///remap.ods", "Sheet1", 5, 0)
+    assert old_key not in python_function.SPILL_REGISTRY
+    assert new_key in python_function.SPILL_REGISTRY
+    assert python_function.SPILL_REGISTRY[new_key].spills == [(6, 0), (7, 0), (8, 0)]
+    assert sheet.getCellByPosition(0, 6).getValue() == 1.0
+    assert sheet.getCellByPosition(0, 7).getValue() == 2.0
+    assert sheet.getCellByPosition(0, 8).getValue() == 3.0
+
+
+def test_spill_clear_does_not_follow_cut_paste(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Formula moved to another column (col 3), spill values still at old col (col 0). Listener clears old coordinates and does not write destination col into registry."""
+    from plugin.tests.testing_utils import CalcSheetStub
+
+    sheet = CalcSheetStub("Sheet1")
+    doc = CalcDocStub(sheets=[sheet], url="file:///cutpaste.ods")
+    monkeypatch.setattr(python_function, "_get_calc_doc", lambda _ctx: doc)
+
+    code = "result = [1, 2]"
+    # Formula cut-pasted to col 3 row 4
+    sheet.getCellByPosition(3, 4).setFormula(f'=PY("{code}")')
+    # Old formula cell at col 0 row 4 is now empty
+    sheet.getCellByPosition(0, 4).setFormula("")
+    # Old spill values still at col 0 row 5
+    sheet.getCellByPosition(0, 5).setValue(2.0)
+
+    old_key = ("file:///cutpaste.ods", "Sheet1", 4, 0)
+    python_function.SPILL_REGISTRY[old_key] = python_function.SpillRecord(
+        code=code,
+        cells=[python_function.SpillCell(5, 0, "n", 2.0)],
+    )
+
+    listener = python_function.CalcSpillModifyListener(MagicMock(), "file:///cutpaste.ods", "Sheet1")
+    listener.modified(SimpleNamespace(Source=sheet))
+
+    assert old_key not in python_function.SPILL_REGISTRY
+    assert ("file:///cutpaste.ods", "Sheet1", 4, 3) not in python_function.SPILL_REGISTRY
+    # Spilled cell at (col 0, row 5) was cleared
+    assert sheet.getCellByPosition(0, 5).getValue() in (0, 0.0)
+
+
+def test_spill_clear_skips_formula_cell_and_edited_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One spill cell is now =SUM(1) (not cleared), one value was edited (not cleared), one still matches (cleared)."""
+    from plugin.tests.testing_utils import CalcSheetStub
+
+    sheet = CalcSheetStub("Sheet1")
+    doc = CalcDocStub(sheets=[sheet], url="file:///skip.ods")
+    monkeypatch.setattr(python_function, "_get_calc_doc", lambda _ctx: doc)
+
+    # Formula at (0, 0) is deleted
+    sheet.getCellByPosition(0, 0).setFormula("")
+
+    # Cell (0, 1): now has =SUM(1)
+    sheet.getCellByPosition(0, 1).setFormula("=SUM(1)")
+
+    # Cell (0, 2): edited from 2.0 to 999.0
+    sheet.getCellByPosition(0, 2).setValue(999.0)
+
+    # Cell (0, 3): still matches 3.0
+    sheet.getCellByPosition(0, 3).setValue(3.0)
+
+    key = ("file:///skip.ods", "Sheet1", 0, 0)
+    python_function.SPILL_REGISTRY[key] = python_function.SpillRecord(
+        code="result = [1, 2, 3]",
+        cells=[
+            python_function.SpillCell(1, 0, "n", 1.0),
+            python_function.SpillCell(2, 0, "n", 2.0),
+            python_function.SpillCell(3, 0, "n", 3.0),
+        ],
+    )
+
+    listener = python_function.CalcSpillModifyListener(MagicMock(), "file:///skip.ods", "Sheet1")
+    listener.modified(SimpleNamespace(Source=sheet))
+
+    assert key not in python_function.SPILL_REGISTRY
+    # Formula cell preserved
+    assert sheet.getCellByPosition(0, 1).getFormula() == "=SUM(1)"
+    # Edited cell preserved
+    assert sheet.getCellByPosition(0, 2).getValue() == 999.0
+    # Matching cell cleared
+    assert sheet.getCellByPosition(0, 3).getValue() in (0, 0.0)
+
+
+def test_overflow_int_becomes_decimal_text() -> None:
+    """to_calc_compatible(10**400) == str(10**400) and the same through _coerce_spill_value. to_calc_compatible(float('nan')) stays NaN."""
+    huge = 10**400
+    huge_str = str(huge)
+    assert python_function.to_calc_compatible(huge) == huge_str
+
+    val, meta = python_function._coerce_spill_value(huge)
+    assert val == huge_str
+    assert meta == {"is_temporal": False, "is_empty": False}
+
+    nan_val = python_function.to_calc_compatible(float("nan"))
+    assert math.isnan(nan_val)
+
+
+def test_selection_does_not_suppress_spill(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CalcDocStub selection is a multi-cell range, the located formula cell is a single cell, finalize_python_return still spills. Fallback does not spill."""
+    from unittest.mock import patch
+
+    doc = CalcDocStub(url="file:///sel_spill.ods", selection="A1:D10")
+    sheet = doc.getSheets().getByName("Sheet1")
+    formula_cell = sheet.getCellByPosition(0, 0)
+    formula_cell.setFormula('=PY("code_single")')
+    ctx = _ctx_with_doc(doc)
+
+    python_function.SPILL_REGISTRY.clear()
+    python_function.LOADED_DOCUMENTS.clear()
+
+    _install_immediate_spill_timer(monkeypatch)
+
+    with patch(
+        "plugin.calc.python.formula_locator_cache.locate_formula_cell_in_doc",
+        return_value=(sheet, formula_cell, (0, 0)),
+    ):
+        val = python_function.finalize_python_return(ctx, "code_single", [10, 20, 30], doc=doc)
+
+    assert val == 10
+    assert sheet.getCellByPosition(0, 1).getValue() == 20
+    key = ("file:///sel_spill.ods", "Sheet1", 0, 0)
+    assert key in python_function.SPILL_REGISTRY
+    assert python_function.SPILL_REGISTRY[key].spills == [(1, 0), (2, 0)]
+
+    # Second case: locate returns None, multi-cell selection falls back to no spill (matrix mode)
+    with patch(
+        "plugin.calc.python.formula_locator_cache.locate_formula_cell_in_doc",
+        return_value=None,
+    ):
+        val_fallback = python_function.finalize_python_return(ctx, "code_fallback", [10, 20, 30], doc=doc)
+    # When is_matrix is true, returns scalar without queuing spill
+    assert val_fallback == 10
+
+
+def test_indexed_multi_data_ignores_my_data() -> None:
+    """_code_uses_indexed_multi_data('my_data[0]') is false; 'data[0]' and 'ranges[1]' and 'note = \"data[0]\"' are true."""
+    assert not python_function._code_uses_indexed_multi_data("my_data[0]")
+    assert not python_function._code_uses_indexed_multi_data("_data[0]")
+    assert python_function._code_uses_indexed_multi_data("data[0]")
+    assert python_function._code_uses_indexed_multi_data("ranges[1]")
+    assert python_function._code_uses_indexed_multi_data('note = "data[0]"')
+
+
+def test_matrix_sessions_expire() -> None:
+    """Plant an entry with timestamp older than _PY_PASS_GAP_SEC, call scalar_for_list_result for a different key, assert old key is gone."""
+    import time
+    from unittest.mock import patch
+
+    python_function.clear_python_addin_cache()
+    doc = CalcDocStub()
+    ctx = _ctx_with_doc(doc)
+    old_time = time.monotonic() - (python_function._PY_PASS_GAP_SEC + 5.0)
+
+    stale_key = ("tid_old", ("file:///d.ods", "S", "sid", "c", "1,1"), "token_old")
+    with python_function._MATRIX_SCALAR_SESSIONS_LOCK:
+        python_function._MATRIX_SCALAR_SESSIONS[stale_key] = python_function.WorkerResultSession(
+            [1], [1], timestamp=old_time
+        )
+
+    # Call scalar_for_list_result for a different formula with a unique origin
+    with patch(
+        "plugin.calc.python.function.session_key",
+        return_value=("file:///d.ods", "S", "sid", "c_new", "2,2"),
+    ):
+        python_function.scalar_for_list_result(ctx, "c_new", [10, 20], doc=doc)
+
+    with python_function._MATRIX_SCALAR_SESSIONS_LOCK:
+        assert stale_key not in python_function._MATRIX_SCALAR_SESSIONS
+
+
+def test_second_spill_timer_cancels_the_first() -> None:
+    """Two _register_spill_timer calls with the same lifecycle and token; the first timer's cancel was called and only the second remains. A different token does not cancel the first."""
+    _clear_spill_timer_registry()
+
+    t1 = MagicMock()
+    t1.finished.is_set.return_value = False
+    t2 = MagicMock()
+    t2.finished.is_set.return_value = False
+    t3 = MagicMock()
+    t3.finished.is_set.return_value = False
+
+    python_function._register_spill_timer("life1", t1, token="Sheet1:0:0")
+    # Same lifecycle and token -> t1 cancelled, t2 stored
+    python_function._register_spill_timer("life1", t2, token="Sheet1:0:0")
+    t1.cancel.assert_called_once()
+    t2.cancel.assert_not_called()
+
+    # Different token -> does not cancel t2
+    python_function._register_spill_timer("life1", t3, token="Sheet1:1:0")
+    t2.cancel.assert_not_called()
+    t3.cancel.assert_not_called()
+
+    active_timers = [t for _k, t in python_function._PENDING_SPILL_TIMERS]
+    assert t1 not in active_timers
+    assert t2 in active_timers
+    assert t3 in active_timers
 

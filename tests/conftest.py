@@ -166,11 +166,23 @@ class MockSize:
         self.Width = width
         self.Height = height
 
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, MockSize) and self.Width == other.Width and self.Height == other.Height
+
+    def __repr__(self) -> str:
+        return f"Size({self.Width}, {self.Height})"
+
 
 class MockPoint:
     def __init__(self, x=0, y=0):
         self.X = x
         self.Y = y
+
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, MockPoint) and self.X == other.X and self.Y == other.Y
+
+    def __repr__(self) -> str:
+        return f"Point({self.X}, {self.Y})"
 
 
 class MockRectangle:

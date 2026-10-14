@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import logging
 import os
+import re
+import struct
 from typing import Any, NoReturn
 
 from plugin.scripting.payload_codec import write_image_payload_to_temp
@@ -32,11 +34,213 @@ MIN_CHART_PLACEHOLDER_HEIGHT = 3000
 # image is also a GraphicObjectShape; matching the anchor alone overwrote it.
 _DRAW_GRAPHIC_SERVICE = "com.sun.star.drawing.GraphicObjectShape"
 _PLOT_SHAPE_NAME_PREFIX = "WriterAgentPlot"
+_IMAGE_ANNOTATION_PREFIX = "WriterAgent image: "
 
 
 def _plot_slot_name(image_index: int) -> str:
     """Slot name for a plot shape: WriterAgentPlot for 0, WriterAgentPlot_{index+1} for rest."""
     return _PLOT_SHAPE_NAME_PREFIX if image_index == 0 else f"{_PLOT_SHAPE_NAME_PREFIX}_{image_index + 1}"
+
+
+def _plot_slot_index(name: str) -> int | None:
+    """Slot index for a plot shape: 0 for WriterAgentPlot, N-1 for WriterAgentPlot_N (N>=2)."""
+    if name == _PLOT_SHAPE_NAME_PREFIX:
+        return 0
+    prefix = f"{_PLOT_SHAPE_NAME_PREFIX}_"
+    if name.startswith(prefix):
+        suffix = name[len(prefix):]
+        try:
+            n = int(suffix)
+            if n >= 2:
+                return n - 1
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_svg_dimension(val_str: str) -> float | None:
+    m = re.match(r"^\s*([0-9]*\.?[0-9]+)\s*(pt|px|in|cm|mm)?\s*$", val_str)
+    if not m:
+        return None
+    num = float(m.group(1))
+    unit = m.group(2) or "px"
+    if unit == "pt":
+        return num * 0.3528
+    elif unit == "in":
+        return num * 25.4
+    elif unit == "cm":
+        return num * 10.0
+    elif unit == "mm":
+        return num * 1.0
+    return num
+
+
+def _intrinsic_aspect(data: bytes) -> tuple[int, int] | None:
+    """Parse intrinsic width and height from PNG or SVG image bytes."""
+    if not data or not isinstance(data, (bytes, bytearray)):
+        return None
+    if len(data) >= 24 and data.startswith(b"\x89PNG\r\n\x1a\n") and data[12:16] == b"IHDR":
+        w, h = struct.unpack(">II", data[16:24])
+        if w > 0 and h > 0:
+            return (w, h)
+        return None
+
+    try:
+        text = data[:8192].decode("utf-8", "ignore")
+    except Exception:
+        return None
+
+    svg_match = re.search(r"<svg\b([^>]*)>", text, re.IGNORECASE)
+    if svg_match:
+        attrs = svg_match.group(1)
+        w_match = re.search(r'\bwidth\s*=\s*["\']([^"\']+)["\']', attrs, re.IGNORECASE)
+        h_match = re.search(r'\bheight\s*=\s*["\']([^"\']+)["\']', attrs, re.IGNORECASE)
+        if w_match and h_match:
+            w_val = _parse_svg_dimension(w_match.group(1))
+            h_val = _parse_svg_dimension(h_match.group(1))
+            if w_val is not None and h_val is not None and w_val > 0 and h_val > 0:
+                return (round(w_val * 1000), round(h_val * 1000))
+        vb_match = re.search(r'\bviewBox\s*=\s*["\']([^"\']+)["\']', attrs, re.IGNORECASE)
+        if vb_match:
+            parts = re.split(r"[\s,]+", vb_match.group(1).strip())
+            if len(parts) >= 4:
+                try:
+                    vb_w = float(parts[2])
+                    vb_h = float(parts[3])
+                    if vb_w > 0 and vb_h > 0:
+                        return (round(vb_w * 1000), round(vb_h * 1000))
+                except ValueError:
+                    pass
+    return None
+
+
+def _aspect_size(aspect: tuple[int, int] | None) -> Any:
+    """Calculate Size maintaining aspect ratio, longer side 10000 (10 cm)."""
+    from com.sun.star.awt import Size
+
+    if aspect is None or len(aspect) != 2:
+        return Size(DEFAULT_CHART_SIZE_WIDTH, DEFAULT_CHART_SIZE_HEIGHT)
+    w, h = aspect
+    if w <= 0 or h <= 0:
+        return Size(DEFAULT_CHART_SIZE_WIDTH, DEFAULT_CHART_SIZE_HEIGHT)
+    major = max(w, h)
+    minor = min(w, h)
+    short_side = max(1000, round(10000 * minor / major))
+    if w >= h:
+        return Size(10000, short_side)
+    else:
+        return Size(short_side, 10000)
+
+
+def _drop_extra_plot_slots(draw_page: Any, target_cell: Any, image_count: int) -> None:
+    """Remove existing plot shapes on target_cell with slot index >= image_count."""
+    if draw_page is None or target_cell is None or not hasattr(draw_page, "remove"):
+        return
+    try:
+        raw_count = getattr(draw_page, "getCount", lambda: 0)()
+        if not isinstance(raw_count, int) or raw_count <= 0:
+            return
+        to_remove = []
+        for index in range(raw_count):
+            shape = draw_page.getByIndex(index)
+            if not _supports_draw_graphic(shape):
+                continue
+            if not _shape_anchor_matches_cell(shape, target_cell):
+                continue
+            slot_idx = _plot_slot_index(_shape_name(shape))
+            if slot_idx is not None and slot_idx >= image_count:
+                to_remove.append(shape)
+        for s in to_remove:
+            try:
+                draw_page.remove(s)
+            except Exception:
+                log.debug("_drop_extra_plot_slots: remove shape failed", exc_info=True)
+    except Exception:
+        log.debug("_drop_extra_plot_slots scan failed", exc_info=True)
+
+
+def _read_image_bytes(payload: dict[str, Any] | None, tmp_path: str | None) -> bytes | None:
+    if tmp_path and os.path.isfile(tmp_path):
+        try:
+            with open(tmp_path, "rb") as f:
+                return f.read()
+        except Exception:
+            pass
+    if payload and isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, (bytes, bytearray)):
+            return bytes(data)
+    return None
+
+
+def _set_image_cell_annotation(ctx: Any, doc: Any, code: str | None, error_message: str) -> None:
+    """Set error annotation on the located formula cell after off-main egress failure."""
+    if not code or doc is None:
+        return
+    try:
+        from plugin.calc.python.formula_locator_cache import locate_formula_cell_in_doc
+
+        located = locate_formula_cell_in_doc(ctx, doc, code)
+        if located is None:
+            return
+        sheet, cell, (row, col) = located
+        text = f"{_IMAGE_ANNOTATION_PREFIX}{error_message}"
+        ann = cell.getAnnotation() if hasattr(cell, "getAnnotation") else None
+        if ann is not None and hasattr(ann, "setString") and hasattr(ann, "getString") and ann.getString():
+            ann.setString(text)
+        elif hasattr(sheet, "getAnnotations"):
+            annotations = sheet.getAnnotations()
+            if hasattr(annotations, "insertNew"):
+                addr: Any = None
+                if hasattr(cell, "getCellAddress"):
+                    try:
+                        addr = cell.getCellAddress()
+                    except Exception:
+                        addr = None
+                if addr is None:
+                    sheet_idx = getattr(sheet.getRangeAddress(), "Sheet", 0) if hasattr(sheet, "getRangeAddress") else 0
+                    try:
+                        from com.sun.star.table import CellAddress
+
+                        addr = CellAddress(Sheet=sheet_idx, Column=col, Row=row)
+                    except Exception:
+                        from types import SimpleNamespace
+
+                        addr = SimpleNamespace(Sheet=sheet_idx, Column=col, Row=row)
+                annotations.insertNew(addr, text)
+    except Exception:
+        log.debug("_set_image_cell_annotation failed", exc_info=True)
+
+
+def _clear_image_cell_annotation(ctx: Any, doc: Any, code: str | None) -> None:
+    """Remove WriterAgent image: annotation on the located formula cell on success."""
+    if not code or doc is None:
+        return
+    try:
+        from plugin.calc.python.formula_locator_cache import locate_formula_cell_in_doc
+
+        located = locate_formula_cell_in_doc(ctx, doc, code)
+        if located is None:
+            return
+        sheet, cell, (row, col) = located
+        ann = cell.getAnnotation() if hasattr(cell, "getAnnotation") else None
+        if ann is not None and hasattr(ann, "getString"):
+            val = ann.getString() or ""
+            if val.startswith(_IMAGE_ANNOTATION_PREFIX):
+                if hasattr(sheet, "getAnnotations"):
+                    annotations = sheet.getAnnotations()
+                    if hasattr(annotations, "getCount") and hasattr(annotations, "getByIndex") and hasattr(annotations, "removeByIndex"):
+                        for i in range(annotations.getCount()):
+                            item = annotations.getByIndex(i)
+                            pos = item.getPosition() if hasattr(item, "getPosition") else None
+                            if pos is not None and getattr(pos, "Column", None) == col and getattr(pos, "Row", None) == row:
+                                annotations.removeByIndex(i)
+                                break
+                        else:
+                            if hasattr(ann, "setString"):
+                                ann.setString("")
+    except Exception:
+        log.debug("_clear_image_cell_annotation failed", exc_info=True)
 
 
 class ImageEgressError(Exception):
@@ -145,7 +349,17 @@ def _unlink_temp_image(path: str | None) -> None:
         log.debug("insert_image_result_on_sheet: temp image cleanup failed for %s", path, exc_info=True)
 
 
-def insert_image_result_on_sheet(ctx: Any, payload: dict[str, Any], *, code: str | None = None, doc: Any | None = None, image_index: int = 0, image_path: str | None = None) -> None:
+def insert_image_result_on_sheet(
+    ctx: Any,
+    payload: dict[str, Any],
+    *,
+    code: str | None = None,
+    doc: Any | None = None,
+    image_index: int = 0,
+    image_path: str | None = None,
+    image_count: int | None = None,
+    notify_cell: bool = False,
+) -> None:
     """Write image payload bytes to a temp file and insert as a cell-anchored shape on the target sheet.
 
     Posts execution asynchronously to the main VCL UI thread if invoked from a background worker thread.
@@ -163,24 +377,57 @@ def insert_image_result_on_sheet(ctx: Any, payload: dict[str, Any], *, code: str
     # must run on LibreOffice's main VCL thread to prevent internal C++ state corruption and deadlocks.
     # If called from a background recalculation or script worker thread, post asynchronously to the main thread.
     if not on_main_thread():
-        post_to_main_thread(_insert_image_result_on_sheet_impl, ctx, payload, code, doc, image_index, image_path=image_path)
+        def _off_main_wrapper() -> None:
+            try:
+                _insert_image_result_on_sheet_impl(
+                    ctx,
+                    payload,
+                    code=code,
+                    doc=doc,
+                    image_index=image_index,
+                    image_path=image_path,
+                    image_count=image_count,
+                    notify_cell=notify_cell,
+                )
+                if notify_cell:
+                    _clear_image_cell_annotation(ctx, doc, code)
+            except ImageEgressError as err:
+                if notify_cell:
+                    _set_image_cell_annotation(ctx, doc, code, str(err))
+                else:
+                    raise
+
+        post_to_main_thread(_off_main_wrapper)
         return
 
-    _insert_image_result_on_sheet_impl(ctx, payload, code, doc, image_index, image_path=image_path)
+    _insert_image_result_on_sheet_impl(
+        ctx,
+        payload,
+        code=code,
+        doc=doc,
+        image_index=image_index,
+        image_path=image_path,
+        image_count=image_count,
+        notify_cell=notify_cell,
+    )
+    if notify_cell:
+        _clear_image_cell_annotation(ctx, doc, code)
 
 
-def _insert_image_result_on_sheet_impl(ctx: Any, payload: dict[str, Any], code: str | None = None, doc: Any | None = None, image_index: int = 0, *, image_path: str | None = None) -> None:
+def _insert_image_result_on_sheet_impl(
+    ctx: Any,
+    payload: dict[str, Any],
+    code: str | None = None,
+    doc: Any | None = None,
+    image_index: int = 0,
+    *,
+    image_path: str | None = None,
+    image_count: int | None = None,
+    notify_cell: bool = False,
+) -> None:
     """Main-thread implementation of graphic shape creation and anchoring."""
     import uno
-    try:
-        from com.sun.star.awt import Point, Size
-    except ImportError:
-        import sys
-        from types import SimpleNamespace
-
-        awt_mod = sys.modules.get("com.sun.star.awt")
-        Point = getattr(awt_mod, "Point", lambda x=0, y=0: SimpleNamespace(X=x, Y=y))  # type: ignore
-        Size = getattr(awt_mod, "Size", lambda w=0, h=0: SimpleNamespace(Width=w, Height=h))  # type: ignore
+    from com.sun.star.awt import Point
 
     # Resolve the target sheet and cell from the formula when the code is
     # known. During a workbook recalc (Ctrl+Shift+F9, or file open) the
@@ -261,6 +508,9 @@ def _insert_image_result_on_sheet_impl(ctx: Any, payload: dict[str, Any], code: 
             except Exception:
                 log.debug("insert_image_result_on_sheet: selection fallback failed", exc_info=True)
 
+        if image_count is not None and image_index == 0 and target_cell is not None:
+            _drop_extra_plot_slots(draw_page, target_cell, image_count)
+
         we_created_temp = False
         if image_path:
             tmp_path = image_path
@@ -270,6 +520,10 @@ def _insert_image_result_on_sheet_impl(ctx: Any, payload: dict[str, Any], code: 
             tmp_path = write_image_payload_to_temp(payload)
             we_created_temp = True
         file_url = uno.systemPathToFileUrl(os.path.abspath(tmp_path))
+
+        data_bytes = _read_image_bytes(payload, tmp_path)
+        aspect = _intrinsic_aspect(data_bytes) if data_bytes else None
+        aspect_size = _aspect_size(aspect)
 
         slot_name = _plot_slot_name(image_index)
         shape = None
@@ -286,11 +540,10 @@ def _insert_image_result_on_sheet_impl(ctx: Any, payload: dict[str, Any], code: 
                 shape = None
 
         created_shape = False
-        default_size = Size(DEFAULT_CHART_SIZE_WIDTH, DEFAULT_CHART_SIZE_HEIGHT)
         if shape is None:
             shape = doc.createInstance(_DRAW_GRAPHIC_SERVICE)
             if hasattr(shape, "setSize"):
-                shape.setSize(default_size)
+                shape.setSize(aspect_size)
             draw_page.add(shape)
             created_shape = True
             try:
@@ -326,7 +579,7 @@ def _insert_image_result_on_sheet_impl(ctx: Any, payload: dict[str, Any], code: 
                     if image_index == 0:
                         shape.setPosition(cell_pos)
                     else:
-                        pos_x = getattr(cell_pos, "X", 0) + (image_index * DEFAULT_CHART_SIZE_WIDTH)
+                        pos_x = getattr(cell_pos, "X", 0) + (image_index * aspect_size.Width)
                         pos_y = getattr(cell_pos, "Y", 0)
                         shape.setPosition(Point(pos_x, pos_y) if Point is not None else cell_pos)
 
@@ -337,8 +590,18 @@ def _insert_image_result_on_sheet_impl(ctx: Any, payload: dict[str, Any], code: 
                 else:
                     shape.setPropertyValue("ResizeWithCell", False)
                     if hasattr(shape, "setSize"):
-                        shape.setSize(default_size)
+                        shape.setSize(aspect_size)
             except Exception:
+                # Bugfix: What was wrong: Anchor failure on a newly created shape left a floating orphan shape on the draw page and reported success.
+                # How it happened: The anchor block caught all exceptions and logged a warning without raising or rolling back the added shape.
+                # Why this change fixes it: For shapes created in this call, we remove the shape from the draw page and raise ImageEgressError; reused shapes keep their existing position and only log a warning.
+                if created_shape:
+                    if hasattr(draw_page, "remove"):
+                        try:
+                            draw_page.remove(shape)
+                        except Exception:
+                            log.debug("insert_image_result_on_sheet: failed to remove failed shape", exc_info=True)
+                    raise ImageEgressError("could not anchor plot to the formula cell")
                 log.warning("insert_image_result_on_sheet: could not anchor to cell", exc_info=True)
     except ImageEgressError:
         raise
@@ -348,3 +611,4 @@ def _insert_image_result_on_sheet_impl(ctx: Any, payload: dict[str, Any], code: 
     finally:
         if we_created_temp:
             _unlink_temp_image(tmp_path)
+

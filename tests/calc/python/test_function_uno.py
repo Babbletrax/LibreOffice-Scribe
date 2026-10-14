@@ -11,12 +11,20 @@ import shutil
 import tempfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import uno
 from com.sun.star.table import CellAddress
 
 from plugin.calc.calc_addin_data import calc_addin_data_to_python
-from plugin.calc.python.function import _py_scoped_dir_bindings
+from plugin.calc.python.function import (
+    SPILL_REGISTRY,
+    CalcSpillModifyListener,
+    SpillCell,
+    SpillRecord,
+    _py_scoped_dir_bindings,
+    _spill_registry_doc_key,
+)
 from plugin.doc.doc_type import is_calc
 from plugin.framework.uno_context import get_desktop
 from plugin.testing_runner import native_test, teardown
@@ -314,4 +322,49 @@ def test_py_multi_document_spill_and_plot(ctx):
             except Exception:
                 pass
         PythonWorkerManager.shutdown_all()
+
+
+@native_test
+def test_row_insert_does_not_clear_moved_spill(ctx):
+    """Row insertion shifts =PY() formula and its spill; modify listener remaps without clearing."""
+    desktop = get_desktop(ctx)
+    doc = desktop.loadComponentFromURL("private:factory/scalc", "_blank", 0, _hidden_props())
+    doc_key = _spill_registry_doc_key(doc)
+    try:
+        sheet = doc.getSheets().getByIndex(0)
+        if sheet.getName() != "Sheet1":
+            sheet.setName("Sheet1")
+        code = "result = [1, 2, 3, 4, 5]"
+        sheet.getCellByPosition(0, 4).setFormula(f'=PY("{code}")')
+        for r in range(5, 10):
+            sheet.getCellByPosition(0, r).setValue(float(r - 4))
+
+        cells = [SpillCell(row=r, col=0, kind="n", value=float(r - 4)) for r in range(5, 10)]
+        SPILL_REGISTRY[(doc_key, "Sheet1", 4, 0)] = SpillRecord(code=code, cells=cells)
+
+        sheet.getRows().insertByIndex(0, 1)
+
+        CalcSpillModifyListener(ctx, doc_key, "Sheet1").modified(SimpleNamespace(Source=sheet))
+
+        a6_formula = sheet.getCellByPosition(0, 5).getFormula()
+        assert "PY" in a6_formula, f"Expected PY in A6 formula, got {a6_formula!r}"
+        for r in range(6, 11):
+            val = sheet.getCellByPosition(0, r).getValue()
+            assert val == float(r - 5), f"Expected {float(r - 5)} at row {r}, got {val}"
+
+        assert (doc_key, "Sheet1", 5, 0) in SPILL_REGISTRY, "Expected (doc_key, Sheet1, 5, 0) in SPILL_REGISTRY"
+        assert (doc_key, "Sheet1", 4, 0) not in SPILL_REGISTRY, "Old key should have been remapped"
+        rec = SPILL_REGISTRY[(doc_key, "Sheet1", 5, 0)]
+        assert [c.row for c in rec.cells] == list(range(6, 11))
+        assert [c.col for c in rec.cells] == [0] * 5
+        assert [c.value for c in rec.cells] == [float(i) for i in range(1, 6)]
+    finally:
+        try:
+            doc.close(True)
+        except Exception:
+            pass
+        for k in list(SPILL_REGISTRY.keys()):
+            if k[0] == doc_key:
+                SPILL_REGISTRY.pop(k, None)
+
 

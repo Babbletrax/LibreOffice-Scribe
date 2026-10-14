@@ -1,9 +1,11 @@
 from unittest.mock import MagicMock
 
 from plugin.calc.python.function import (
-    _spill_registry_doc_key,
+    LOADED_DOCUMENTS,
     SPILL_REGISTRY,
-    LOADED_DOCUMENTS
+    SpillCell,
+    SpillRecord,
+    _spill_registry_doc_key,
 )
 
 def test_spill_registry_doc_key():
@@ -23,7 +25,10 @@ def test_spill_save_as_lifecycle_consistency():
     LOADED_DOCUMENTS.clear()
 
     doc_key = _spill_registry_doc_key(mock_doc)
-    SPILL_REGISTRY[(doc_key, "Sheet1", 0, 0)] = [(1, 0), (2, 0)]
+    SPILL_REGISTRY[(doc_key, "Sheet1", 0, 0)] = SpillRecord(
+        code="result = 1",
+        cells=[SpillCell(1, 0, "n", 1.0), SpillCell(2, 0, "n", 2.0)],
+    )
     LOADED_DOCUMENTS.add(doc_key)
 
     # Save As simulates URL change, but RuntimeUID remains.
@@ -33,6 +38,7 @@ def test_spill_save_as_lifecycle_consistency():
     new_doc_key = _spill_registry_doc_key(mock_doc)
     assert new_doc_key == doc_key
     assert (new_doc_key, "Sheet1", 0, 0) in SPILL_REGISTRY
+    assert SPILL_REGISTRY[(new_doc_key, "Sheet1", 0, 0)].spills == [(1, 0), (2, 0)]
 
 def test_spill_registry_migration():
     mock_doc = MagicMock()
@@ -45,7 +51,10 @@ def test_spill_registry_migration():
     LOADED_DOCUMENTS.clear()
 
     # Simulate old state where keys were stored under URL
-    SPILL_REGISTRY[("file:///tmp/old.ods", "Sheet1", 0, 0)] = [(1, 0), (2, 0)]
+    SPILL_REGISTRY[("file:///tmp/old.ods", "Sheet1", 0, 0)] = SpillRecord(
+        code="result = 1",
+        cells=[SpillCell(1, 0, "n", 1.0), SpillCell(2, 0, "n", 2.0)],
+    )
     LOADED_DOCUMENTS.add("file:///tmp/old.ods")
 
     # When _spill_registry_doc_key is called, it should migrate the keys
@@ -54,6 +63,7 @@ def test_spill_registry_migration():
     assert doc_key == "uid-123"
 
     assert ("uid-123", "Sheet1", 0, 0) in SPILL_REGISTRY
+    assert SPILL_REGISTRY[("uid-123", "Sheet1", 0, 0)].spills == [(1, 0), (2, 0)]
     assert ("file:///tmp/old.ods", "Sheet1", 0, 0) not in SPILL_REGISTRY
     assert "uid-123" in LOADED_DOCUMENTS
     assert "file:///tmp/old.ods" not in LOADED_DOCUMENTS

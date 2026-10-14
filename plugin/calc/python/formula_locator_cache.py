@@ -6,13 +6,27 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
+import contextvars
 import logging
 import re
-from typing import Any
+from typing import Any, Iterator
 
 from plugin.framework.errors import is_disposed_exception
 
 log = logging.getLogger(__name__)
+
+_LOCATE_MEMO: contextvars.ContextVar[dict[tuple[int, str], tuple[Any, Any, tuple[int, int]] | None] | None] = contextvars.ContextVar("_LOCATE_MEMO", default=None)
+
+
+@contextmanager
+def bind_formula_locate_memo() -> Iterator[None]:
+    """Bind a fresh per-call formula location memo dictionary."""
+    token = _LOCATE_MEMO.set({})
+    try:
+        yield
+    finally:
+        _LOCATE_MEMO.reset(token)
 
 # Handles Calc-escaped double-quotes ("") inside string literals and optional add-in
 # OriginalNames (WriterAgent / LibrePy, or Collabora GETPY before open-rewrite).
@@ -233,6 +247,11 @@ def locate_formula_cell_in_doc(ctx: Any, doc: Any, code_str: str) -> tuple[Any, 
     if doc is None:
         return None
 
+    memo = _LOCATE_MEMO.get()
+    cache_key = (id(doc), code_str) if memo is not None else None
+    if memo is not None and cache_key in memo:
+        return memo[cache_key]
+
     collected: list[tuple[Any, Any, tuple[int, int]]] = []
     seen: set[tuple[str, int, int]] = set()
 
@@ -247,6 +266,7 @@ def locate_formula_cell_in_doc(ctx: Any, doc: Any, code_str: str) -> tuple[Any, 
         seen.add(key)
         collected.append((sheet, cell, (row, col)))
 
+    res: tuple[Any, Any, tuple[int, int]] | None = None
     try:
         sheets = doc.getSheets() if hasattr(doc, "getSheets") else None
         if sheets is not None:
@@ -256,40 +276,17 @@ def locate_formula_cell_in_doc(ctx: Any, doc: Any, code_str: str) -> tuple[Any, 
                 for cell, r, c in collect_matching_formula_origins(sheet, code_str, doc=doc):
                     _add(sheet, cell, r, c)
                     if len(collected) > 1:
+                        if memo is not None and cache_key is not None:
+                            memo[cache_key] = None
                         return None
     except Exception:
         log.debug("locate_formula_cell_in_doc failed across sheets", exc_info=True)
+        if memo is not None and cache_key is not None:
+            memo[cache_key] = None
         return None
 
-    if len(collected) != 1:
-        return None
-    return collected[0]
-
-
-def locate_formula_cell(ctx: Any, sheet: Any, code_str: str) -> tuple[int, int] | None:
-    """Find (row, col) containing the Python formula on sheet."""
-    try:
-        from plugin.framework.thread_guard import on_main_thread
-
-        if not on_main_thread() or not (hasattr(ctx, "ServiceManager") or hasattr(ctx, "getServiceManager")):
-            return None
-        # The sheet's own spreadsheet, not the front window.
-        from plugin.calc.python.sheet_modify import _owning_calc_doc
-
-        doc = _owning_calc_doc(sheet)
-        if doc is not None:
-            located = locate_formula_cell_in_doc(ctx, doc, code_str)
-            if located is not None:
-                found_sheet, _, (r, c) = located
-                if found_sheet == sheet or (hasattr(found_sheet, "getName") and hasattr(sheet, "getName") and found_sheet.getName() == sheet.getName()):
-                    return (r, c)
-    except Exception:
-        log.debug("locate_formula_cell failed", exc_info=True)
-
-    # Fallback to direct sheet search
-    res = search_sheet_for_formula(sheet, code_str)
-    if res is not None:
-        _, r, c = res
-        return (r, c)
-
-    return None
+    if len(collected) == 1:
+        res = collected[0]
+    if memo is not None and cache_key is not None:
+        memo[cache_key] = res
+    return res

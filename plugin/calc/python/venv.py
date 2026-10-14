@@ -110,30 +110,21 @@ def _venv_schema_and_description(doc_type: str | None) -> tuple[str, dict[str, A
     return desc, params
 
 
+# Bugfix: What was wrong: _strip_image_payloads dropped image payloads completely, collapsed lists, and dropped dictionary keys.
+# How it happened: It filtered out None values resulting from image payloads, which altered list lengths and deleted dictionary keys or omitted the result key entirely.
+# Why this change fixes it: It replaces any image payload with "<image>" while preserving collection lengths, sequence ordering, and dictionary keys.
+_IMAGE_PLACEHOLDER = "<image>"
+
+
 def _strip_image_payloads(obj: Any) -> Any:
-    """Return non-image scalar, string, or collection from result, dropping image payloads."""
+    """Return result with image payloads replaced by '<image>', preserving structure."""
     if is_image_payload(obj):
-        return None
+        return _IMAGE_PLACEHOLDER
     if isinstance(obj, (list, tuple)):
-        cleaned = [_strip_image_payloads(x) for x in obj]
-        cleaned_non_null = [x for x in cleaned if x is not None]
-        if not cleaned_non_null:
-            return None
-        return cleaned_non_null if len(cleaned_non_null) > 1 else cleaned_non_null[0]
+        return [_strip_image_payloads(x) for x in obj]
     if isinstance(obj, dict):
-        cleaned_dict = {
-            str(k): _strip_image_payloads(v)
-            for k, v in obj.items()
-            if not is_image_payload(v)
-        }
-        cleaned_dict = {k: v for k, v in cleaned_dict.items() if v is not None}
-        if not cleaned_dict:
-            return None
-        return cleaned_dict
+        return {str(k): _strip_image_payloads(v) for k, v in obj.items()}
     return obj
-
-
-_CALC_DESC, _CALC_PARAMS = _venv_schema_and_description("calc")
 
 
 class RunVenvPythonScript(ToolCalcPythonBase):
@@ -141,8 +132,14 @@ class RunVenvPythonScript(ToolCalcPythonBase):
 
     name: str | None = "run_venv_python_script"
     specialized_cross_cutting: ClassVar[bool] = True
-    description: str = _CALC_DESC
-    parameters: dict[str, Any] | None = _CALC_PARAMS
+    description: str = (
+        "Run Python code in the configured venv. Set `result` to a return value (NumPy ndarray, Pandas DataFrame, list, dict, or scalar)."
+    )
+    parameters: dict[str, Any] | None = {
+        "type": "object",
+        "properties": {"code": dict(_CODE_PROP)},
+        "required": ["code"],
+    }
     uno_services: list[str] | None = list(_ALL_VENV_DOCS)
     long_running: bool = True
 
@@ -234,6 +231,7 @@ class RunVenvPythonScript(ToolCalcPythonBase):
                                 doc=ctx.doc,
                                 image_index=i,
                                 image_path=path,
+                                image_count=len(images),
                             )
                         except Exception as exc:
                             log.warning("run_venv_python_script: plot insert failed: %s", exc)

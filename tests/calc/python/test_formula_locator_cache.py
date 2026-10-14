@@ -9,9 +9,9 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 from plugin.calc.python.formula_locator_cache import (
+    bind_formula_locate_memo,
     extract_code_from_py_formula,
     is_matching_py_formula,
-    locate_formula_cell,
     locate_formula_cell_in_doc,
 )
 from plugin.tests.testing_utils import CalcDocStub, CalcSheetStub
@@ -65,16 +65,64 @@ def test_extract_code_from_py_formula():
     assert extract_code_from_py_formula('=PY("x")+1') == "x"
 
 
-def test_locate_formula_cell_convenience_helper():
+def test_locate_memo_reuses_result_inside_bind():
     sheet = CalcSheetStub("Sheet1")
-    doc = CalcDocStub(sheets=[sheet], url="file:///test.ods")
+    doc = CalcDocStub(sheets=[sheet], url="file:///test_memo.ods")
     ctx = _ctx_with_doc(doc)
 
-    code = "result = 99"
+    code = "result = 42"
     sheet.getCellByPosition(1, 2).setFormula(f'=PYTHON("{code}")')
 
-    coords = locate_formula_cell(ctx, sheet, code)
-    assert coords == (2, 1)
+    call_count = 0
+    orig_query = sheet.queryContentCells
+
+    def counting_query(flags):
+        nonlocal call_count
+        call_count += 1
+        return orig_query(flags)
+
+    sheet.queryContentCells = counting_query
+
+    with bind_formula_locate_memo():
+        loc1 = locate_formula_cell_in_doc(ctx, doc, code)
+        loc2 = locate_formula_cell_in_doc(ctx, doc, code)
+        assert loc1 is not None
+        assert loc1 == loc2
+        assert call_count == 1
+
+    code2 = "result = 99"
+    sheet.getCellByPosition(3, 4).setFormula(f'=PYTHON("{code2}")')
+    loc3 = locate_formula_cell_in_doc(ctx, doc, code2)
+    assert loc3 is not None
+    assert loc3[2] == (4, 3)
+    assert call_count > 1
+
+
+def test_locate_memo_caches_none():
+    sheet = CalcSheetStub("Sheet1")
+    doc = CalcDocStub(sheets=[sheet], url="file:///test_none.ods")
+    ctx = _ctx_with_doc(doc)
+
+    code = "result = 1"
+    sheet.getCellByPosition(1, 1).setFormula(f'=PYTHON("{code}")')
+    sheet.getCellByPosition(1, 2).setFormula(f'=PYTHON("{code}")')
+
+    call_count = 0
+    orig_query = sheet.queryContentCells
+
+    def counting_query(flags):
+        nonlocal call_count
+        call_count += 1
+        return orig_query(flags)
+
+    sheet.queryContentCells = counting_query
+
+    with bind_formula_locate_memo():
+        res1 = locate_formula_cell_in_doc(ctx, doc, code)
+        res2 = locate_formula_cell_in_doc(ctx, doc, code)
+        assert res1 is None
+        assert res2 is None
+        assert call_count == 1
 
 
 def test_locate_formula_cell_in_doc_secondary_sheet_when_active_sheet_differs():

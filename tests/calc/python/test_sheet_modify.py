@@ -160,7 +160,12 @@ def test_rename_migrates_spill_registry_and_listener(monkeypatch):
     cell_formula.setFormula('=PY("result = [1, 2]")')
     cell_neighbor = sheet.getCellByPosition(1, 0)
     cell_neighbor.setValue(2.0)
-    SPILL_REGISTRY[("uid-rename", "Sheet1", 0, 0)] = [(0, 0), (0, 1)]
+    from plugin.calc.python.function import SpillCell, SpillRecord
+
+    SPILL_REGISTRY[("uid-rename", "Sheet1", 0, 0)] = SpillRecord(
+        code='result = [1, 2]',
+        cells=[SpillCell(0, 1, "n", 2.0)],
+    )
 
     sheet.setName("SheetRenamed")
     doc.getSheets()._sheets["SheetRenamed"] = sheet
@@ -174,6 +179,7 @@ def test_rename_migrates_spill_registry_and_listener(monkeypatch):
     assert ("uid-rename", "SheetRenamed") in SHEET_MODIFY_LISTENERS
     assert ("uid-rename", "Sheet1", 0, 0) not in SPILL_REGISTRY
     assert ("uid-rename", "SheetRenamed", 0, 0) in SPILL_REGISTRY
+    assert SPILL_REGISTRY[("uid-rename", "SheetRenamed", 0, 0)].spills == [(0, 1)]
     assert listener.sheet_name == "SheetRenamed"
 
     # Now clear formula cell and run modify pass
@@ -183,6 +189,65 @@ def test_rename_migrates_spill_registry_and_listener(monkeypatch):
 
     assert ("uid-rename", "SheetRenamed", 0, 0) not in SPILL_REGISTRY
     assert cell_neighbor.getValue() == 0.0 or cell_neighbor.getString() == ""
+
+
+def test_rename_without_identity_does_not_touch_other_workbooks():
+    from plugin.calc.python.function import SPILL_REGISTRY, SpillCell, SpillRecord
+    from plugin.calc.python.sheet_modify import migrate_sheet_rename
+
+    SPILL_REGISTRY[("uid-other", "Sheet1", 0, 0)] = SpillRecord(
+        code="result = 1",
+        cells=[SpillCell(0, 1, "n", 1.0)],
+    )
+
+    doc_no_id = CalcDocStub(url="", props={})
+    migrate_sheet_rename(doc_no_id, "Sheet1", "Sheet2")
+
+    assert ("uid-other", "Sheet1", 0, 0) in SPILL_REGISTRY
+    assert ("uid-other", "Sheet2", 0, 0) not in SPILL_REGISTRY
+
+
+def test_perform_deferred_spill_does_not_schedule_modify(monkeypatch):
+    """While perform_deferred_spill runs, is_sheet_modify_dispatching() is true so no modify pass is scheduled."""
+    from plugin.calc.python.function import perform_deferred_spill
+    from plugin.calc.python.sheet_modify import dispatch_sheet_modified
+
+    doc = CalcDocStub(url="file:///spill_dispatch.ods", props={"RuntimeUID": "uid-spill-dispatch"})
+    sheet = doc.getSheets().getByName("Sheet1")
+    sheet.getParent = lambda: doc
+
+    scheduled_calls = 0
+
+    def mock_schedule(*args, **kwargs):
+        nonlocal scheduled_calls
+        scheduled_calls += 1
+
+    monkeypatch.setattr("plugin.calc.python.sheet_modify.schedule_sheet_modify_pass", mock_schedule)
+    monkeypatch.setattr("plugin.framework.thread_guard.on_main_thread", lambda: True)
+
+    orig_clear = sheet.getCellByPosition(0, 0).clearContents
+
+    def clear_and_dispatch(flags):
+        dispatch_sheet_modified(SimpleNamespace(Source=sheet))
+        return orig_clear(flags)
+
+    cell = sheet.getCellByPosition(1, 0)
+    cell.clearContents = clear_and_dispatch
+
+    perform_deferred_spill(
+        "ctx",
+        "file:///spill_dispatch.ods",
+        "Sheet1",
+        0,
+        0,
+        [[1, 2]],
+        doc=doc,
+        sheet=sheet,
+        code='=PY("result = [1, 2]")',
+        lifecycle_key="uid-spill-dispatch",
+    )
+
+    assert scheduled_calls == 0
 
 
 def test_schedule_timer_callback_clears_pending_timer(monkeypatch):
