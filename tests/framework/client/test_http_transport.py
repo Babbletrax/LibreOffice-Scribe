@@ -213,7 +213,7 @@ def test_transport_send_uses_free_pacing_key_for_openrouter_free():
             connection_getter=lambda: mock_conn,
         )
     wait.assert_called_once()
-    assert wait.call_args[0][0] == "openrouter.ai:free"
+    assert wait.call_args[0][0] == "openrouter.ai:443:free"
 
 
 def test_transport_send_stop_already_set_does_not_open_or_send():
@@ -427,8 +427,127 @@ def test_connection_error_backoff_uses_free_pacing_key_not_paid_host():
             model="deepseek/deepseek-r1:free",
         )
     assert action == "retry"
-    assert _host_gap_sec.get("openrouter.ai:free") == 4.0
-    assert "openrouter.ai" not in _host_gap_sec
+    assert _host_gap_sec.get("openrouter.ai:443:free") == 4.0
+    assert "openrouter.ai:443" not in _host_gap_sec
+
+
+def test_explicit_openrouter_flag_uses_free_key_on_custom_host():
+    from plugin.framework.client.request_controls import _host_gap_sec
+
+    t1 = LlmHttpTransport(lambda: "https://proxy.example/v1", lambda: 30, openrouter_getter=lambda: True)
+    with (
+        patch("plugin.framework.client.http_transport.wait_abortable", return_value=True),
+        patch("plugin.framework.client.http_transport.backoff_delay_sec", return_value=4.0),
+    ):
+        action1 = t1.handle_connection_error(
+            OSError("reset"),
+            path="/v1/chat/completions",
+            retries_left=1,
+            retry_log_message="retry",
+            model="x:free",
+        )
+    assert action1 == "retry"
+    assert _host_gap_sec.get("proxy.example:443:free") == 4.0
+
+    t2 = LlmHttpTransport(lambda: "https://proxy.example/v1", lambda: 30)
+    with (
+        patch("plugin.framework.client.http_transport.wait_abortable", return_value=True),
+        patch("plugin.framework.client.http_transport.backoff_delay_sec", return_value=4.0),
+    ):
+        action2 = t2.handle_connection_error(
+            OSError("reset"),
+            path="/v1/chat/completions",
+            retries_left=1,
+            retry_log_message="retry",
+            model="x:free",
+        )
+    assert action2 == "retry"
+    assert _host_gap_sec.get("proxy.example:443") == 4.0
+
+
+def test_over_cap_retry_after_fails_without_sleep():
+    from plugin.framework.client.request_controls import RETRY_MAX_DELAY_SEC, _host_gap_sec
+
+    transport = LlmHttpTransport(lambda: "https://api.openai.com", lambda: 30)
+    response = MagicMock()
+    response.status = 429
+    response.reason = "Too Many Requests"
+    response.read.return_value = b'{"error": "rate limit"}'
+    response.getheader.side_effect = lambda name, default=None: "120" if str(name).lower() == "retry-after" else default
+
+    with patch("plugin.framework.client.http_transport.wait_abortable") as mock_wait:
+        with pytest.raises(NetworkError) as exc_info:
+            transport.handle_http_status(
+                response,
+                request_body=b'{"model":"gpt-4o"}',
+                path="/v1/chat/completions",
+                retries_left=2,
+                emitted_any=False,
+            )
+        mock_wait.assert_not_called()
+    assert exc_info.value.code == "HTTP_ERROR"
+    assert "120" in str(exc_info.value)
+    assert "retry cap" in str(exc_info.value)
+    assert _host_gap_sec.get("api.openai.com:443") == RETRY_MAX_DELAY_SEC
+
+
+def test_retry_after_ms_used_when_retry_after_absent():
+    transport = LlmHttpTransport(lambda: "https://api.openai.com", lambda: 30)
+    response = MagicMock()
+    response.status = 429
+    response.reason = "Too Many Requests"
+    response.read.return_value = b'{"error": "rate limit"}'
+
+    def get_header(name, default=None):
+        low = str(name).lower()
+        if low == "retry-after":
+            return None
+        if low == "retry-after-ms":
+            return "2000"
+        return default
+
+    response.getheader.side_effect = get_header
+    recorded: list[float | None] = []
+
+    def fake_backoff(*, attempt=1, retry_after_sec=None):
+        recorded.append(retry_after_sec)
+        return 0.0
+
+    with (
+        patch("plugin.framework.client.http_transport.backoff_delay_sec", side_effect=fake_backoff),
+        patch("plugin.framework.client.http_transport.wait_abortable", return_value=True),
+    ):
+        action = transport.handle_http_status(
+            response,
+            request_body=b'{"model":"gpt-4o"}',
+            path="/v1/chat/completions",
+            retries_left=2,
+            emitted_any=False,
+        )
+    assert action == "retry"
+    assert recorded == [2.0]
+
+
+def test_localhost_ports_do_not_share_a_pacing_key():
+    from plugin.framework.client.request_controls import _host_gap_sec
+
+    t1 = LlmHttpTransport(lambda: "http://localhost:11434", lambda: 30)
+    t2 = LlmHttpTransport(lambda: "http://localhost:1234", lambda: 30)
+    assert t1.pacing_key_for_model() == "localhost:11434"
+    assert t2.pacing_key_for_model() == "localhost:1234"
+
+    with (
+        patch("plugin.framework.client.http_transport.wait_abortable", return_value=True),
+        patch("plugin.framework.client.http_transport.backoff_delay_sec", return_value=4.0),
+    ):
+        t1.handle_connection_error(
+            OSError("reset"),
+            path="/api/chat",
+            retries_left=1,
+            retry_log_message="retry",
+        )
+    assert _host_gap_sec.get("localhost:11434") == 4.0
+    assert "localhost:1234" not in _host_gap_sec
 
 
 def test_exchange_truncated_json_is_not_a_finished_reply():

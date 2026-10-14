@@ -28,7 +28,8 @@ _THINKING_STRING_FIELDS = ("reasoning_content", "reasoning", "thought", "thinkin
 _THINKING_HINT_KEYS = frozenset(_THINKING_STRING_FIELDS) | {"reasoning_details"}
 _REASONING_REPLAY_STRING_KEYS = ("reasoning", "reasoning_content")
 # Stripped from message_snapshot during streaming so thinking is not double-collected.
-THINKING_DELTA_KEYS = frozenset(_THINKING_STRING_FIELDS) | {"reasoning_details"}
+# Snapshot stripping and the debug hint set are the same keys, so they cannot drift.
+THINKING_DELTA_KEYS = _THINKING_HINT_KEYS
 _DETAIL_TEXT_FIELDS = ("text", "summary", "data")
 # meta["source"] values set by accumulate_streaming_thinking / honored by ensure.
 _STREAMING_SOURCE_VALUES = frozenset({"reasoning_details", "reasoning_content", "reasoning"})
@@ -111,7 +112,7 @@ def accumulate_streaming_thinking(text_parts: list[str], meta: dict[str, Any], d
             meta["index"] = item.get("index")
 
 
-@deal.pre(lambda entries: isinstance(entries, list) and len(entries) <= DEAL_MAX_SHAPE_DIM)
+@deal.pre(lambda entries: isinstance(entries, list))
 @deal.post(lambda result: isinstance(result, list))
 @deal.ensure(lambda entries, result: len(result) <= sum(1 for e in entries if type(e) is dict))
 def _merge_reasoning_details(entries: list[Any]) -> list[Any]:
@@ -159,9 +160,10 @@ def _streaming_replay(text: str, meta: Mapping[str, Any]) -> dict[str, Any]:
     # crosshair: off
     encrypted_raw = meta.get("encrypted_fragments")
     encrypted_fragments: list[Any] = encrypted_raw if isinstance(encrypted_raw, list) else []
-    # _merge_reasoning_details @deal.pre caps list length (256 in pytest/app and 4 under CrossHair).
-    if len(encrypted_fragments) > DEAL_MAX_SHAPE_DIM:
-        encrypted_fragments = encrypted_fragments[:DEAL_MAX_SHAPE_DIM]
+    # Bugfix: The DEAL_MAX_SHAPE_DIM slice existed so the @deal.pre length cap would pass;
+    # that cap is a contract domain (plugin/framework/deal_shim.py), not a product limit;
+    # truncating encrypted fragments corrupts the blob the next request must echo.
+    # The pre no longer caps length, so the slice is gone.
     merged_encrypted = _merge_reasoning_details(encrypted_fragments)
     source = meta.get("source")
 
@@ -317,8 +319,10 @@ def normalize_message_content(raw: Any) -> str | None:
             if isinstance(item, str):
                 parts.append(item)
             elif isinstance(item, dict):
+                # Bugfix: a non-string text (a nested object) reached str.join
+                # and the stream loop turned the TypeError into NetworkError.
                 if item.get("type") == "text" or "text" in item:
-                    parts.append(item.get("text") or "")
+                    parts.append(_text_of(item.get("text")))
         return "".join(parts) if parts else None
     return str(raw)
 
@@ -378,10 +382,12 @@ class ThinkTagStreamSplitter:
 
     in_thinking: bool
     _buf: str
+    _seen_open: bool
 
     def __init__(self) -> None:
         self.in_thinking = False
         self._buf = ""
+        self._seen_open = False
 
     def feed(self, chunk: str) -> list[tuple[bool, str]]:
         """Process incoming text chunk and return list of (is_thinking, text_segment)."""
@@ -404,6 +410,12 @@ class ThinkTagStreamSplitter:
                 close_idx = text.find(close_tag)
 
                 if close_idx != -1 and (open_idx == -1 or close_idx < open_idx):
+                    if self._seen_open:
+                        segment = text[: close_idx + close_len]
+                        if segment:
+                            results.append((False, segment))
+                        text = text[close_idx + close_len :]
+                        continue
                     # Close-only tag while not in thinking: prefix is thinking, suffix is content.
                     if close_idx > 0:
                         results.append((True, text[:close_idx]))
@@ -414,6 +426,7 @@ class ThinkTagStreamSplitter:
                 if open_idx != -1:
                     if open_idx > 0:
                         results.append((False, text[:open_idx]))
+                    self._seen_open = True
                     self.in_thinking = True
                     text = text[open_idx + open_len :]
                     continue
@@ -423,9 +436,20 @@ class ThinkTagStreamSplitter:
                 max_p = min(max(open_len, close_len) - 1, len(text))
                 for p_len in range(max_p, 0, -1):
                     suffix = text[-p_len:]
-                    if close_tag.startswith(suffix) and suffix != "<":
+                    if not self._seen_open and p_len >= 2 and close_tag.startswith(suffix):
+                        # Bugfix: what was wrong: a suffix that is only a prefix of </think>
+                        # was classified as thinking, so HTML such as </p> went to on_thinking.
+                        # How it happened: the partial-close arm assumed a close-only tag.
+                        # Why the hold fixes it: storing the entire remainder in _buf lets the
+                        # next chunk either complete </think> or be ordinary text, and Extend/Edit
+                        # apply_chunk (plugin/writer/editselection.py and plugin/calc/editselection.py)
+                        # drops is_thinking chunks, so falsely classifying ordinary text loses it.
+                        self._buf = text
+                        partial_match = True
+                        break
+                    elif self._seen_open and close_tag.startswith(suffix) and suffix != "<":
                         if len(text) > p_len:
-                            results.append((True, text[:-p_len]))
+                            results.append((False, text[:-p_len]))
                         self._buf = suffix
                         partial_match = True
                         break
@@ -462,7 +486,15 @@ class ThinkTagStreamSplitter:
                 results.append((True, text))
                 break
 
-        return [(is_t, s) for is_t, s in results if s]
+        coalesced: list[tuple[bool, str]] = []
+        for is_t, s in results:
+            if not s:
+                continue
+            if coalesced and coalesced[-1][0] == is_t:
+                coalesced[-1] = (is_t, coalesced[-1][1] + s)
+            else:
+                coalesced.append((is_t, s))
+        return coalesced
 
     def flush(self) -> list[tuple[bool, str]]:
         """Flush any remaining buffered text."""
@@ -493,21 +525,22 @@ def strip_think_tags(text: str | None) -> tuple[str, str | None]:
 
     clean = _THINK_TAG_BLOCK_RE.sub(repl, text)
 
-    # Bugfix: Handle close-only </think> tags when models (e.g. Ollama / LM Studio)
-    # emit a closing tag in content without an opening <think>.
-    # What was wrong: strip_think_tags left the entire string in clean content with no thinking.
-    # How it happened: Only <think>...</think> and unclosed <think> were matched.
-    # Why this fixes it: Text before a lone </think> is treated as thinking, and text after as clean content.
-    if "</think>" in clean:
-        idx = clean.find("</think>")
-        thoughts.append(clean[:idx])
-        clean = clean[idx + len("</think>") :]
-
-    if "<think>" in clean:
-        m = _THINK_UNCLOSED_RE.search(clean)
-        if m:
-            thoughts.append(m.group(1))
-            clean = clean[: m.start()]
+    # Bugfix: Close-only </think> applies only when the original string had no <think>,
+    # and every </think> acts as a separator (all segments except the last are thoughts,
+    # and the last is clean content). When the original string did contain <think>, any
+    # literal tag after a real block must stay in the content; the old pass treated the first
+    # leftover </think> as a close-only marker and deleted the answer text in front of it.
+    if "<think>" not in text:
+        if "</think>" in clean:
+            parts = clean.split("</think>")
+            thoughts.extend(parts[:-1])
+            clean = parts[-1]
+    else:
+        if "<think>" in clean:
+            m = _THINK_UNCLOSED_RE.search(clean)
+            if m:
+                thoughts.append(m.group(1))
+                clean = clean[: m.start()]
 
     clean = clean.strip()
     thinking = "\n\n".join(t.strip() for t in thoughts if t.strip()) if thoughts else None

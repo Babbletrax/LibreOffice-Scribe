@@ -38,7 +38,28 @@ from plugin.framework.url_utils import get_url_hostname
 
 from plugin.framework.errors import format_error_message
 from .errors import _format_http_error_response
-from .request_controls import RETRY_MAX_ATTEMPTS, RETRYABLE_HTTP_STATUS, LocalHttpsCertificateFallback, RequestPacer, backoff_delay_sec, clear_host_gap, emit_retry_status, ensure_free_model_pacing, mark_host_sent, pacing_key, parse_retry_after, remember_host_gap, request_model_from_body, wait_abortable, wait_host_gap
+from .provider_detection import is_openrouter_endpoint
+from .request_controls import (
+    RETRY_MAX_ATTEMPTS,
+    RETRY_MAX_DELAY_SEC,
+    RETRYABLE_HTTP_STATUS,
+    LocalHttpsCertificateFallback,
+    RequestPacer,
+    backoff_delay_sec,
+    clear_host_gap,
+    emit_retry_status,
+    ensure_free_model_pacing,
+    mark_host_sent,
+    over_cap_retry_message,
+    pacing_key,
+    parse_retry_after,
+    parse_retry_after_ms,
+    remember_host_gap,
+    request_model_from_body,
+    retry_after_exceeds_cap,
+    wait_abortable,
+    wait_host_gap,
+)
 from .ssl_helpers import get_unverified_ssl_context, get_verified_ssl_context
 
 log = logging.getLogger(__name__)
@@ -352,12 +373,22 @@ class LlmHttpTransport:
     _timeout_getter: Callable[[], int | float]
     _pacer: RequestPacer
     _cert_fallback: LocalHttpsCertificateFallback
+    _openrouter_getter: Callable[[], bool] | None
 
-    def __init__(self, endpoint_getter: Callable[[], str], timeout_getter: Callable[[], int | float], *, pacer: RequestPacer | None = None, cert_fallback: LocalHttpsCertificateFallback | None = None) -> None:
+    def __init__(
+        self,
+        endpoint_getter: Callable[[], str],
+        timeout_getter: Callable[[], int | float],
+        *,
+        pacer: RequestPacer | None = None,
+        cert_fallback: LocalHttpsCertificateFallback | None = None,
+        openrouter_getter: Callable[[], bool] | None = None,
+    ) -> None:
         self._endpoint_getter = endpoint_getter
         self._timeout_getter = timeout_getter
         self._pacer = pacer or RequestPacer()
         self._cert_fallback = cert_fallback or LocalHttpsCertificateFallback()
+        self._openrouter_getter = openrouter_getter
         self._persistent_conn: http.client.HTTPConnection | http.client.HTTPSConnection | None = None
         self._conn_key: tuple[str, str, int, str] | None = None
         # Set while exchange follows a redirect onto a different origin.
@@ -380,6 +411,24 @@ class LlmHttpTransport:
         host = get_url_hostname(endpoint)
         port = _explicit_port(parsed) or (443 if scheme == "https" else 80)
         return scheme, host, port
+
+    def _openrouter_for_pacing(self) -> bool:
+        endpoint = self._redirect_origin if self._redirect_origin else self._endpoint_getter()
+        explicit = False
+        if self._openrouter_getter is not None:
+            try:
+                explicit = bool(self._openrouter_getter())
+            except Exception:
+                explicit = False
+        return is_openrouter_endpoint(endpoint, explicit_is_openrouter=explicit)
+
+    def _pacing_parts(self) -> tuple[str, int, bool]:
+        _, host, port = self._endpoint_parts()
+        return host, port, self._openrouter_for_pacing()
+
+    def pacing_key_for_model(self, model: str | None = None) -> str:
+        host, port, openrouter = self._pacing_parts()
+        return pacing_key(host, model, port=port, openrouter=openrouter)
 
     def _absolute_url(self, path: str) -> str:
         scheme, host, port = self._endpoint_parts()
@@ -469,8 +518,9 @@ class LlmHttpTransport:
         _stale_resend: bool = True,
     ) -> http.client.HTTPResponse:
         """Send one request on the persistent connection and return its response."""
-        host = self.current_host()
-        key = ensure_free_model_pacing(host, request_model_from_body(body))
+        parts = self._pacing_parts()
+        model = request_model_from_body(body)
+        key = ensure_free_model_pacing(parts[0], model, port=parts[1], openrouter=parts[2])
         if not wait_host_gap(key, stop_checker, status_callback):
             raise NetworkError("LLM request aborted by Stop", code="STOPPED")
         conn = connection_getter() if connection_getter is not None else self.get_connection()
@@ -616,21 +666,29 @@ class LlmHttpTransport:
             log.error("HTTP %s for %s: %s", response.status, safe_target, message)
         self.close()
         status = int(response.status)
+        model = request_model_from_body(request_body)
+        retry_after = None
+        getter = getattr(response, "getheader", None)
+        if callable(getter):
+            header = getter("Retry-After")
+            retry_after = parse_retry_after(header if isinstance(header, str) else None)
+            if retry_after is None:
+                header_ms = getter("retry-after-ms")
+                retry_after = parse_retry_after_ms(header_ms if isinstance(header_ms, str) else None)
+        details: dict[str, Any] = {"url": safe_target, "status": status}
+        if retry_after_exceeds_cap(retry_after):
+            assert retry_after is not None
+            remember_host_gap(self.pacing_key_for_model(model), RETRY_MAX_DELAY_SEC)
+            message = over_cap_retry_message(message, retry_after)
+            raise NetworkError(message, code="HTTP_ERROR", details=details)
         if status in RETRYABLE_HTTP_STATUS and retries_left > 0 and not emitted_any:
-            retry_after = None
-            getter = getattr(response, "getheader", None)
-            if callable(getter):
-                header = getter("Retry-After")
-                retry_after = parse_retry_after(header if isinstance(header, str) else None)
             delay = backoff_delay_sec(attempt=attempt, retry_after_sec=retry_after)
-            model = request_model_from_body(request_body)
-            remember_host_gap(pacing_key(self.current_host(), model), delay)
+            remember_host_gap(self.pacing_key_for_model(model), delay)
             log.warning("Retrying HTTP %s after %.3fs (Retry-After=%s attempt=%s left=%s)", status, delay, retry_after, attempt, retries_left)
             emit_retry_status(status_callback, delay)
             if not wait_abortable(delay, stop_checker):
                 return "stop"
             return "retry"
-        details: dict[str, Any] = {"url": safe_target, "status": status}
         raise NetworkError(message, code="HTTP_ERROR", details=details)
 
     def exchange(
@@ -730,7 +788,7 @@ class LlmHttpTransport:
                             on_retry()
                         continue
                     if attempt == 0:
-                        clear_host_gap(pacing_key(self.current_host(), model))
+                        clear_host_gap(self.pacing_key_for_model(model))
                     raw = _response_bytes(response)
                     body_in_hand = True
                     if after_read is not None:
@@ -790,7 +848,7 @@ class LlmHttpTransport:
             # Store the backoff under pacing_key, not current_host() alone.
             # An OpenRouter ``:free`` failure would otherwise slow paid traffic
             # on that host and leave ``:free`` unpaced. Chat already uses pacing_key.
-            remember_host_gap(pacing_key(self.current_host(), model), delay)
+            remember_host_gap(self.pacing_key_for_model(model), delay)
             emit_retry_status(status_callback, delay)
             if not wait_abortable(delay, stop_checker):
                 return "stop"

@@ -83,6 +83,11 @@ def test_normalize_message_content_shapes():
     assert normalize_message_content([{"type": "image_url"}]) is None
 
 
+def test_normalize_message_content_ignores_non_string_text():
+    assert normalize_message_content([{"type": "text", "text": {"nested": 1}}, {"type": "text", "text": "ok"}]) == "ok"
+    assert normalize_message_content([{"type": "text", "text": {"nested": 1}}]) == ""
+
+
 def test_normalize_delta_basic():
     delta = {"role": None, "tool_calls": [{"id": "call_1", "function": {"arguments": None}}]}
     normalize_delta(delta)
@@ -341,17 +346,35 @@ def test_strip_think_tags_no_tags():
     assert clean == "Direct output without tags."
     assert thinking is None
 
-def test_streaming_replay_truncates_encrypted_fragments_to_shape_dim():
+def test_streaming_replay_keeps_encrypted_fragments_past_shape_dim():
     from plugin.framework.deal_shim import DEAL_MAX_SHAPE_DIM
 
+    n = DEAL_MAX_SHAPE_DIM + 1
     meta = {
         "source": "reasoning_details",
-        "encrypted_fragments": [{"type": "reasoning.encrypted", "data": "x", "index": i} for i in range(DEAL_MAX_SHAPE_DIM + 1)],
+        "encrypted_fragments": [{"type": "reasoning.encrypted", "data": f"x{i}", "index": i} for i in range(n)],
     }
     replay = sn._streaming_replay("", meta)
     assert isinstance(replay, dict)
     details = replay.get("reasoning_details", [])
-    assert len(details) == DEAL_MAX_SHAPE_DIM
+    assert len(details) == n
+    for i in range(n):
+        assert details[i]["data"] == f"x{i}"
+
+
+def test_streaming_replay_merges_same_index_past_shape_dim():
+    from plugin.framework.deal_shim import DEAL_MAX_SHAPE_DIM
+
+    n = DEAL_MAX_SHAPE_DIM + 1
+    meta = {
+        "source": "reasoning_details",
+        "encrypted_fragments": [{"type": "reasoning.encrypted", "data": "x", "index": 0} for _ in range(n)],
+    }
+    replay = sn._streaming_replay("", meta)
+    assert isinstance(replay, dict)
+    details = replay.get("reasoning_details", [])
+    assert len(details) == 1
+    assert details[0]["data"] == "x" * n
 
 
 def test_iterate_sse_skips_comments_blanks_and_keeps_data_and_raw_json():
@@ -445,10 +468,49 @@ def test_strip_think_tags_close_only():
 def test_think_tag_stream_splitter_close_only_split_across_chunks():
     splitter = sn.ThinkTagStreamSplitter()
     out1 = splitter.feed("because I said so</th")
-    assert out1 == [(True, "because I said so")]
+    assert out1 == []
     out2 = splitter.feed("ink>The answer is 4.")
-    assert out2 == [(False, "The answer is 4.")]
+    assert out2 == [(True, "because I said so"), (False, "The answer is 4.")]
     assert splitter.flush() == []
+
+
+def test_think_tag_splitter_partial_close_is_content():
+    splitter = sn.ThinkTagStreamSplitter()
+    out1 = splitter.feed("<p>Hello</")
+    assert out1 == []
+    out2 = splitter.feed("p> world")
+    assert out2 == [(False, "<p>Hello</p> world")]
+    assert splitter.flush() == []
+
+
+def test_think_tag_splitter_partial_close_flush_is_content():
+    splitter = sn.ThinkTagStreamSplitter()
+    out1 = splitter.feed("<p>Hello</")
+    assert out1 == []
+    assert splitter.flush() == [(False, "<p>Hello</")]
+
+
+def test_think_tag_splitter_literal_close_after_open_is_content():
+    splitter = sn.ThinkTagStreamSplitter()
+    out = splitter.feed("<think>hidden</think>Explain the </think> tag")
+    assert out == [
+        (True, "hidden"),
+        (False, "Explain the </think> tag"),
+    ]
+    assert splitter.flush() == []
+
+
+def test_strip_think_tags_repeated_close_only():
+    clean, thinking = sn.strip_think_tags("a</think>b</think>c")
+    assert clean == "c"
+    assert thinking == "a\n\nb"
+
+
+def test_strip_think_tags_literal_close_after_real_block():
+    clean, thinking = sn.strip_think_tags("Explain the </think> tag after <think>hidden</think> done")
+    assert thinking == "hidden"
+    assert "Explain the </think> tag after" in clean
+    assert "done" in clean
 
 
 
