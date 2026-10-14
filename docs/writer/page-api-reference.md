@@ -19,8 +19,9 @@ To copy a page style (direct properties, header/footer content, and floating gra
 ### Key Properties (Dimensions in 1/100th mm)
 - **`Width`** (`int`): The width of the page.
 - **`Height`** (`int`): The height of the page.
-- **`IsLandscape`** (`bool`): Indicates if the page orientation is landscape.
+- **`IsLandscape`** (`bool`): Indicates if the page orientation is landscape. `page_set_style_properties` sets the `IsLandscape` flag only and does not swap dimensions; pass `width_mm` and `height_mm` to change dimensions (written after the flag).
 - **`LeftMargin`**, **`RightMargin`**, **`TopMargin`**, **`BottomMargin`** (`int`): Page margins.
+- Note: `page_set_style_properties` reports `updated` when a later property throws, and those earlier properties stay applied.
 
 ### Python Example: Retrieving and Modifying Page Dimensions
 ```python
@@ -50,7 +51,7 @@ Headers and footers are also controlled via the Page Style properties. Each page
 - **`HeaderTextLeft`** / **`HeaderTextRight`** / **`FooterTextLeft`** / **`FooterTextRight`**: Used when left and right pages have different headers/footers (i.e., when `HeaderIsShared` is False).
 - **`FirstIsShared`** (`bool`): If false, the first page has its own header/footer — the usual setup for a letterhead. Its content then lives in **`HeaderTextFirst`** / **`FooterTextFirst`**, which are separate text objects: `HeaderText` does not reach them.
 
-These variants are exposed as the `region` values of `page_get_header_footer_text` / `page_set_header_footer_text`: `header`, `footer`, `header_first`, `footer_first`, `header_left`, `footer_left`. When the matching `*IsShared` flag is on, the variant mirrors the shared text, so asking for it is always safe. `page_get_style_properties` reports `first_is_shared`, and `page_set_style_properties` writes it. `style_get_info(family=PageStyles)` reads through the same `get_page_style_properties` function so the caller does not need a second tool hop. **Turn the header/footer on first** — `FirstIsShared` reads/writes as nothing while `HeaderIsOn` / `FooterIsOn` is false. The same goes for the header/footer measures (`HeaderHeight`, `HeaderBodyDistance`, `FooterHeight`, `FooterBodyDistance`): they are void while that header or footer is off, so `page_get_style_properties` reports them as `null`, not as a failure. `image_insert` uses the same names as `target` for `header`, `footer`, `header_first`, and `footer_first`. A first-page letterhead logo needs `first_is_shared=false` so `HeaderTextFirst` is its own text object; then `target=header_first` (or `footer_first`). Shared `target=header` still writes `HeaderText`, which does not reach the first page when `FirstIsShared` is false.
+These variants are exposed as the `region` values of `page_get_header_footer_text` / `page_set_header_footer_text`: `header`, `footer`, `header_first`, `footer_first`, `header_left`, `footer_left`. When the matching `*IsShared` flag is on, the variant mirrors the shared text: get still returns the shared text, while `page_set_header_footer_text` and `page_replace_header_footer_text` skip a mirror and do not write it. `page_get_style_properties` reports `first_is_shared`, and `page_set_style_properties` writes it. `style_get_info(family=PageStyles)` reads through the same `get_page_style_properties` function so the caller does not need a second tool hop. **Turn the header/footer on first** — `FirstIsShared` reads/writes as nothing while `HeaderIsOn` / `FooterIsOn` is false. The same goes for the header/footer measures (`HeaderHeight`, `HeaderBodyDistance`, `FooterHeight`, `FooterBodyDistance`): they are void while that header or footer is off, so `page_get_style_properties` reports them as `null`, not as a failure. `image_insert` uses the same names as `target` for `header`, `footer`, `header_first`, and `footer_first`. A first-page letterhead logo needs `first_is_shared=false` so `HeaderTextFirst` is its own text object; then `target=header_first` (or `footer_first`). Shared `target=header` still writes `HeaderText`, which does not reach the first page when `FirstIsShared` is false.
 
 Images in a header/footer must be anchored **`AS_CHARACTER`** (in the text flow). A floating `AT_CHARACTER` image does not contribute to line height, so even with dynamic height the region may not grow.
 
@@ -93,9 +94,11 @@ Columns can be applied to Page Styles, Sections, or Text Frames. They are manage
 
 ### The `TextColumn` Struct
 Each column configuration is represented by a `TextColumn` struct:
-- **`Width`** (`int`): Relative width of the column.
-- **`LeftMargin`** (`int`): Spacing to the left of the column (1/100th mm).
-- **`RightMargin`** (`int`): Spacing to the right of the column (1/100th mm).
+- **`Width`** (`int`): Relative width of the column (`page_get_columns` returns `width_unit: "relative"`).
+- **`LeftMargin`** (`int`): Spacing to the left of the column (1/100th mm; reported in mm).
+- **`RightMargin`** (`int`): Spacing to the right of the column (1/100th mm; reported in mm).
+
+Setting `spacing_mm=0` in `page_set_columns` explicitly writes the inner margins to `0`, clearing any previous gap.
 
 ### Python Example: Setting 2 Columns on a Page Style
 ```python
@@ -124,6 +127,7 @@ While not strictly layout, forcing content onto a new page is often part of layo
 ### Key Property
 - **`BreakType`** (`com.sun.star.style.BreakType` enum): Applied to a paragraph to force a break before or after.
   - `PAGE_BEFORE`, `PAGE_AFTER`, `COLUMN_BEFORE`, `COLUMN_AFTER`, `NONE`.
+- A page break inside a table cell is rejected with an error and does not set `BreakType`.
 
 ### Python Example: Forcing a Page Break Before a Paragraph
 ```python
@@ -178,6 +182,6 @@ Properties defining how footnotes are displayed at the bottom of the page.
 * `GridMode` (short)
 
 ### Miscellaneous
-* `NumberingType` (short): Page numbering format (e.g., 4=Arabic, 0=Upper Roman, etc.).
-* `PageStyleLayout` (com.sun.star.style.PageStyleLayout enum): `ALL`, `LEFT`, `RIGHT`, `MIRRORED`.
+* `NumberingType` (short): Page numbering format (e.g., 0=CHARS_UPPER_LETTER, 1=CHARS_LOWER_LETTER, 2=ROMAN_UPPER, 3=ROMAN_LOWER, 4=ARABIC).
+* `PageStyleLayout` (short): 0=ALL, 1=LEFT, 2=RIGHT, 3=MIRRORED.
 * `RegisterParagraphStyle` (string): Register-true (line up lines of text on both sides of a page).

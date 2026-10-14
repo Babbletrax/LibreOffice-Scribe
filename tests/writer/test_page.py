@@ -1,3 +1,4 @@
+import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -205,6 +206,7 @@ def test_insert_page_break():
     controller.getViewCursor.return_value = view_cursor
     view_cursor.getStart.return_value = start_pos
     view_cursor.getText.return_value = text_obj
+    text_cursor.getPropertyValue.return_value = None
     text_obj.createTextCursorByRange.return_value = text_cursor
 
     ctx = TestingFactory.create_context(doc=doc, doc_type="writer")
@@ -724,6 +726,7 @@ def _pagebreak_doc(found_next=True):
     found = MagicMock()
     para = MagicMock()
     para.gotoNextParagraph.return_value = found_next
+    para.getPropertyValue.return_value = None
     found.getText.return_value.createTextCursorByRange.return_value = para
     doc.findFirst.return_value = found
     return doc, para
@@ -996,8 +999,7 @@ def test_replace_header_footer_refuses_character_anchored_image():
     portions = [_text_portion(hay)]
     doc, text_obj = _replace_doc(portions, hay=hay)
     seen = _cursors_for(text_obj, hay)
-    text_obj.compareRegionStarts.return_value = 1
-    text_obj.compareRegionEnds.return_value = -1
+    text_obj.compareRegionStarts.side_effect = lambda left, right: 0 if right == seen[0].getStart() else 1
     shape = _logo_anchored_in(text_obj, name="stamp")
     shape.getPropertyValue.side_effect = lambda name: AT_CHARACTER if name == "AnchorType" else None
     doc.getDrawPage().getCount.return_value = 1
@@ -1005,4 +1007,291 @@ def test_replace_header_footer_refuses_character_anchored_image():
     res = _replace(doc, old_content=hay, content="Annex A: Methods")
     assert res["status"] == "error" and "stamp" in res["message"]
     assert seen and seen[0].written is None
+
+
+def test_mm_to_hmm_rounds():
+    from plugin.writer.page import _mm_to_hmm
+    assert _mm_to_hmm(2.3) == 230
+    assert _mm_to_hmm(0) == 0
+    with pytest.raises((TypeError, ValueError)):
+        _mm_to_hmm(True)
+    with pytest.raises((TypeError, ValueError)):
+        _mm_to_hmm(-1)
+
+
+def test_set_page_style_width_rounds():
+    from plugin.writer.page import PageSetStyleProperties
+    doc = MagicMock()
+    style = MagicMock()
+    doc.getStyleFamilies().getByName().getByName.return_value = style
+    ctx = SimpleNamespace(doc=doc)
+
+    res = PageSetStyleProperties().execute(ctx, width_mm=2.3)
+    assert res["status"] == "ok"
+    style.setPropertyValue.assert_called_with("Width", 230)
+
+
+def test_set_page_style_stops_and_reports_updated():
+    from plugin.writer.page import PageSetStyleProperties
+    doc = MagicMock()
+    style = MagicMock()
+    def set_prop(prop, val):
+        if prop == "Height":
+            raise RuntimeError("Height failed")
+    style.setPropertyValue.side_effect = set_prop
+    doc.getStyleFamilies().getByName().getByName.return_value = style
+    ctx = SimpleNamespace(doc=doc)
+
+    res = PageSetStyleProperties().execute(ctx, width_mm=10, height_mm=20)
+    assert res["status"] == "error"
+    assert res["updated"] == ["width"]
+    assert "height" in res["failed"]
+
+
+def test_set_page_style_bad_mm_writes_nothing():
+    from plugin.writer.page import PageSetStyleProperties
+    doc = MagicMock()
+    style = MagicMock()
+    doc.getStyleFamilies().getByName().getByName.return_value = style
+    ctx = SimpleNamespace(doc=doc)
+
+    res = PageSetStyleProperties().execute(ctx, width_mm="wide")
+    assert res["status"] == "error"
+    style.setPropertyValue.assert_not_called()
+
+
+def test_is_landscape_flag_only_restores_size():
+    from plugin.writer.page import PageSetStyleProperties
+    doc = MagicMock()
+    style = MagicMock()
+    style.getPropertyValue.side_effect = lambda prop: 21000 if prop == "Width" else (29700 if prop == "Height" else None)
+    doc.getStyleFamilies().getByName().getByName.return_value = style
+    ctx = SimpleNamespace(doc=doc)
+
+    res = PageSetStyleProperties().execute(ctx, is_landscape=True)
+    assert res["status"] == "ok"
+    style.setPropertyValue.assert_any_call("IsLandscape", True)
+    style.setPropertyValue.assert_any_call("Width", 21000)
+    style.setPropertyValue.assert_any_call("Height", 29700)
+
+
+def test_is_landscape_explicit_size_written_after_flag():
+    from plugin.writer.page import PageSetStyleProperties
+    doc = MagicMock()
+    style = MagicMock()
+    doc.getStyleFamilies().getByName().getByName.return_value = style
+    ctx = SimpleNamespace(doc=doc)
+
+    res = PageSetStyleProperties().execute(ctx, is_landscape=True, width_mm=297, height_mm=210)
+    assert res["status"] == "ok"
+    calls = [c.args for c in style.setPropertyValue.call_args_list]
+    props = [c[0] for c in calls]
+    assert "IsLandscape" in props
+    assert props.index("IsLandscape") < props.index("Width")
+    assert props.index("IsLandscape") < props.index("Height")
+    style.setPropertyValue.assert_any_call("Width", 29700)
+    style.setPropertyValue.assert_any_call("Height", 21000)
+
+
+def test_page_style_layout_read_and_write():
+    from types import SimpleNamespace
+    import sys
+    from plugin.writer.page import get_page_style_properties, PageSetStyleProperties
+
+    psl = SimpleNamespace(ALL=0, LEFT=1, RIGHT=2, MIRRORED=3)
+    sys.modules["com.sun.star.style.PageStyleLayout"] = psl
+
+    doc = MagicMock()
+    style = MagicMock()
+    layout_enum = SimpleNamespace(value="ALL")
+    style.getPropertyValue.side_effect = lambda prop: layout_enum if prop == "PageStyleLayout" else 21000
+    doc.getStyleFamilies().getByName().getByName.return_value = style
+    res = get_page_style_properties(doc, "Standard")
+    assert res["properties"]["page_style_layout"] == 0
+
+    ctx = SimpleNamespace(doc=doc)
+    res_bad = PageSetStyleProperties().execute(ctx, page_style_layout=4)
+    assert res_bad["status"] == "error"
+
+    res_ok = PageSetStyleProperties().execute(ctx, page_style_layout=1)
+    assert res_ok["status"] == "ok"
+    style.setPropertyValue.assert_any_call("PageStyleLayout", 1)
+
+
+def test_register_paragraph_style_missing_still_reads():
+    from plugin.writer.page import get_page_style_properties
+    doc = MagicMock()
+    style = MagicMock()
+    def get_prop(prop):
+        if prop == "RegisterParagraphStyle":
+            raise RuntimeError("property missing")
+        if prop == "Width":
+            return 21000
+        return None
+    style.getPropertyValue.side_effect = get_prop
+    doc.getStyleFamilies().getByName().getByName.return_value = style
+
+    res = get_page_style_properties(doc, "Standard")
+    assert res["status"] == "ok"
+    assert res["properties"]["width_mm"] == 210.0
+    assert "register_paragraph_style" not in res["properties"]
+
+
+def test_set_header_first_skipped_when_shared():
+    from plugin.writer.page import PageSetHeaderFooterText
+    doc = MagicMock()
+    style = MagicMock()
+    style.getPropertyValue.side_effect = lambda prop: True if prop == "FirstIsShared" else None
+    doc.getStyleFamilies().getByName().getByName.return_value = style
+    ctx = SimpleNamespace(doc=doc)
+
+    res = PageSetHeaderFooterText().execute(ctx, region="header_first", content="<p>Test</p>")
+    assert res["status"] == "skipped"
+    assert res["mirrored"] is True
+    style.setPropertyValue.assert_not_called()
+
+
+def test_set_header_rolls_back_enable_when_import_fails():
+    from plugin.writer.page import PageSetHeaderFooterText
+    doc = MagicMock()
+    style = MagicMock()
+    style.getPropertyValue.side_effect = lambda prop: False if prop == "HeaderIsOn" else MagicMock()
+    doc.getStyleFamilies().getByName().getByName.return_value = style
+    ctx = SimpleNamespace(doc=doc)
+
+    with patch("plugin.writer.html_import.replace_xtext_with_html", side_effect=RuntimeError("import failed")):
+        res = PageSetHeaderFooterText().execute(ctx, region="header", content="<p>Test</p>")
+        assert res["status"] == "error"
+        calls = [c.args for c in style.setPropertyValue.call_args_list if c.args[0] == "HeaderIsOn"]
+        assert calls[0] == ("HeaderIsOn", True)
+        assert calls[1] == ("HeaderIsOn", False)
+
+
+def test_set_columns_spacing_zero_clears_inner_margins():
+    from plugin.writer.page import PageSetColumns
+    doc = MagicMock()
+    style = MagicMock()
+    text_columns = MagicMock()
+    col1 = MagicMock(RightMargin=250, LeftMargin=0)
+    col2 = MagicMock(RightMargin=0, LeftMargin=250)
+    text_columns.getColumns.return_value = [col1, col2]
+    style.getPropertyValue.return_value = text_columns
+    doc.getStyleFamilies().getByName().getByName.return_value = style
+    ctx = SimpleNamespace(doc=doc)
+
+    res = PageSetColumns().execute(ctx, column_count=2, spacing_mm=0)
+    assert res["status"] == "ok"
+    assert col1.RightMargin == 0
+    assert col2.LeftMargin == 0
+    text_columns.setColumns.assert_called_once()
+
+    text_columns.setColumnCount.reset_mock()
+    res_err = PageSetColumns().execute(ctx, column_count="2")
+    assert res_err["status"] == "error"
+    text_columns.setColumnCount.assert_not_called()
+
+
+def test_get_columns_marks_relative_width():
+    from plugin.writer.page import PageGetColumns
+    doc = MagicMock()
+    style = MagicMock()
+    text_columns = MagicMock()
+    col = MagicMock(Width=100, LeftMargin=0, RightMargin=0)
+    text_columns.getColumnCount.return_value = 1
+    text_columns.getColumns.return_value = [col]
+    style.getPropertyValue.return_value = text_columns
+    doc.getStyleFamilies().getByName().getByName.return_value = style
+    ctx = SimpleNamespace(doc=doc)
+
+    res = PageGetColumns().execute(ctx)
+    assert res["status"] == "ok"
+    assert len(res["columns"]) == 1
+    assert res["columns"][0]["width_unit"] == "relative"
+
+
+def test_anchor_point_on_first_character_blocks():
+    from plugin.writer.page import _anchor_point_in_match
+    text = MagicMock()
+    p0 = MagicMock()
+    p2 = MagicMock()
+    cursor = MagicMock()
+    cursor.getStart.return_value = p0
+    cursor.getEnd.return_value = p2
+
+    anchor = MagicMock()
+    # Case 1: anchor is on the first character (p0)
+    anchor.getStart.return_value = p0
+    def cmp_first(left, right):
+        if left == p0 and right == p0:
+            return 0
+        if left == p0 and right == p2:
+            return 1
+        return 0
+    text.compareRegionStarts.side_effect = cmp_first
+    assert _anchor_point_in_match(text, anchor, cursor) is True
+
+    # Case 2: anchor is on the match end (p2)
+    anchor.getStart.return_value = p2
+    def cmp_end(left, right):
+        if left == p2 and right == p2:
+            return 0
+        if left == p2 and right == p0:
+            return -1
+        return 0
+    text.compareRegionStarts.side_effect = cmp_end
+    assert _anchor_point_in_match(text, anchor, cursor) is False
+
+    # Case 3: anchor is strictly before the match
+    p_before = MagicMock()
+    anchor.getStart.return_value = p_before
+    def cmp_before(left, right):
+        if left == p_before and right == p0:
+            return 1
+        return 0
+    text.compareRegionStarts.side_effect = cmp_before
+    assert _anchor_point_in_match(text, anchor, cursor) is False
+
+
+def test_uno_len_emoji():
+    from plugin.writer.page import _uno_len
+    assert _uno_len("A😀") == 3
+    assert _uno_len("A") == 1
+
+
+def test_lower_keeps_length_name():
+    import plugin.writer.page as page_mod
+    assert hasattr(page_mod, "_lower_keeps_length")
+    assert not hasattr(page_mod, "_casefold_keeps_length")
+
+
+def test_page_break_in_table_cell_errors():
+    from plugin.writer.page import PageInsertBreak
+
+    # Anchor path: para is in text table
+    doc, para = _pagebreak_doc()
+    para.getPropertyValue.side_effect = lambda prop: object() if prop == "TextTable" else None
+    res = PageInsertBreak().execute(SimpleNamespace(doc=doc), before_text="Anchor")
+    assert res["status"] == "error"
+    assert "table cell" in res["message"]
+    para.setPropertyValue.assert_not_called()
+
+    # View-cursor path: model cursor is in text table
+    doc2 = MagicMock()
+    controller = MagicMock()
+    view_cursor = MagicMock()
+    start_pos = MagicMock()
+    text_obj = MagicMock()
+    text_cursor = MagicMock()
+    text_cursor.getPropertyValue.side_effect = lambda prop: object() if prop == "TextTable" else None
+    doc2.getCurrentController.return_value = controller
+    controller.getViewCursor.return_value = view_cursor
+    view_cursor.getStart.return_value = start_pos
+    view_cursor.getText.return_value = text_obj
+    text_obj.createTextCursorByRange.return_value = text_cursor
+
+    ctx = SimpleNamespace(doc=doc2)
+    res2 = PageInsertBreak().execute(ctx)
+    assert res2["status"] == "error"
+    assert "table cell" in res2["message"]
+    text_cursor.setPropertyValue.assert_not_called()
 

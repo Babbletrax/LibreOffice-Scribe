@@ -35,7 +35,7 @@ What is implemented today (not every Writer mutation tool):
 | Extend / edit selection (menu + sidebar) | Yes | No | No |
 | Vision / `python_runner` Writer insert | Yes | No | No |
 | `table_delete` | Yes (one agent change; the table stays struck through until accepted) | No | No |
-| Style tools | No (`style_unreviewed: true`) | No | No |
+| Style tools and page layout (`page_set_style_properties`, `page_set_header_footer_text`, `page_replace_header_footer_text`, `page_set_columns`) | No (`style_unreviewed: true`; `page_insert_break` is not in this set) | No | No |
 | Other Writer tools (comments, images, …) | No | No | No |
 
 Extend / Edit Selection stop when the selection already contains a tracked insertion or deletion.
@@ -207,9 +207,11 @@ resolve-all returns user-facing messages when verification fails.
 
 ### Limitations
 
-* **Style changes are not reviewable.** `apply_style`, `style_update`, `style_create` and
-  `style_import` apply directly and return `style_unreviewed: true`; the agent is prompted to tell
-  the user it changed a style (styles don't produce redlines).
+* **Style and page layout changes are not reviewable.** `apply_style`, `style_update`, `style_create`,
+  `style_import`, `page_set_style_properties`, `page_set_header_footer_text`,
+  `page_replace_header_footer_text`, and `page_set_columns` apply directly and return
+  `style_unreviewed: true`; the agent is prompted to tell the user it changed a style or page layout
+  (they don't produce redlines). `page_insert_break` is not in that set.
 * **Extend selection** records only the appended continuation as a single tracked **insertion**
   (the original is never struck); it streams live with tracking off, then collapses to one redline
   at the end. Streamed collapse may show both marks under the INSERT author instead of split
