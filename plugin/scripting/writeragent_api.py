@@ -1486,7 +1486,7 @@ class _PageProxy:
     """Proxy for page tools."""
 
     def get_columns(self, *, style: str | None = None) -> dict[str, Any]:
-        """Get the column layout for a page style.
+        """Get the column layout for a page style. Column widths are relative weights, not millimetres. Margins are millimetres.
 
         Args:
             style (optional): The name of the page style. Defaults to 'Standard'.
@@ -1547,7 +1547,7 @@ class _PageProxy:
         return _rpc_call("page_set_columns", style=style, column_count=column_count, spacing_mm=spacing_mm)
 
     def set_header_footer_text(self, region: str, content: str, *, style: str | None = None, auto_height: bool | None = None) -> dict[str, Any]:
-        """Replace this page-style header or footer with HTML so logos, tables, and page-number fields survive — the same StarWriter import as apply_document_content, pointed at the region's XText. Call page_get_header_footer_text first and edit that HTML. Enables the region if it is off. Pass auto_height=true so a taller letterhead grows instead of overlapping the body. Plain text is wrapped as a paragraph and still goes through import. To change one substring and leave fields and floating graphics alone, use page_replace_header_footer_text.
+        """Replace this page-style header or footer with HTML so logos, tables, and page-number fields survive — the same StarWriter import as apply_document_content, pointed at the region's XText. Call page_get_header_footer_text first and edit that HTML. Enables the region if it is off. Pass auto_height=true so a taller letterhead grows instead of overlapping the body. Plain text is wrapped as a paragraph and still goes through import. A _first or _left region that only mirrors the shared header or footer is skipped; edit header/footer or turn sharing off. To change one substring and leave fields and floating graphics alone, use page_replace_header_footer_text.
 
         Args:
             region (required): Which region to set. 'header'/'footer' are the shared ones; '_first' targets a 'different first page' letterhead and '_left' the left-hand pages. One of: header, footer, header_first, footer_first, header_left, footer_left.
@@ -1564,7 +1564,7 @@ class _PageProxy:
             style (optional): The name of the page style (e.g., 'Standard' or 'Default Style'). Defaults to 'Standard'.
             width_mm (optional): New width in mm.
             height_mm (optional): New height in mm.
-            is_landscape (optional): Set orientation to landscape.
+            is_landscape (optional): Sets the IsLandscape flag only. Does not change Width or Height unless width_mm and height_mm are also passed. Landscape A4 is width_mm 297 and height_mm 210.
             left_margin_mm (optional): Left margin in mm.
             right_margin_mm (optional): Right margin in mm.
             top_margin_mm (optional): Top margin in mm.
@@ -1581,7 +1581,7 @@ class _PageProxy:
             footer_body_distance_mm (optional): Spacing from footer to body in mm.
             back_color (optional): Background color (RGB long).
             back_transparent (optional): Make background transparent.
-            numbering_type (optional): Numbering type enum (4=Arabic, 0=Roman).
+            numbering_type (optional): com.sun.star.style.NumberingType short (0=CHARS_UPPER_LETTER, 1=CHARS_LOWER_LETTER, 2=ROMAN_UPPER, 3=ROMAN_LOWER, 4=ARABIC).
             footnote_height_mm (optional): Max footnote area height in mm.
             register_paragraph_style (optional): Register true reference style.
             page_style_layout (optional): 0=ALL, 1=LEFT, 2=RIGHT, 3=MIRRORED.
@@ -2174,7 +2174,7 @@ class _StylesProxy:
         """List available styles in the document. Omit family to list all style family names; set family to list styles in that family.
 
         Args:
-            family (optional): Style family. Default: ParagraphStyles. Use PageStyles to find the page-style name the page tools need. One of: ParagraphStyles, CharacterStyles, PageStyles.
+            family (optional): Omit to list family names. Otherwise ParagraphStyles, CharacterStyles, or PageStyles. One of: ParagraphStyles, CharacterStyles, PageStyles.
         """
         return _rpc_call("style_list", family=family)
 

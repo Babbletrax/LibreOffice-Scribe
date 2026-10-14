@@ -610,3 +610,86 @@ def test_copy_page_style_clones_next_page_number_and_roman(ctx, doc):
                     assert cloned_field.getPropertyValue("Offset") == 1
                     assert cloned_field.getPropertyValue("NumberingType") == 2
     assert found_field, "Could not locate cloned PageNumber field to check properties"
+
+
+@native_test
+@with_native_doc("writer")
+def test_is_landscape_does_not_swap_unless_sizes_passed_uno(ctx, doc):
+    style, name = _style(doc)
+    w_snap = int(style.getPropertyValue("Width"))
+    h_snap = int(style.getPropertyValue("Height"))
+
+    res1 = _set_props(doc, ctx, is_landscape=True)
+    assert res1["status"] == "ok", res1
+    assert style.getPropertyValue("IsLandscape") is True
+    assert int(style.getPropertyValue("Width")) == w_snap
+    assert int(style.getPropertyValue("Height")) == h_snap
+
+    res2 = _set_props(doc, ctx, is_landscape=True, width_mm=297, height_mm=210)
+    assert res2["status"] == "ok", res2
+    assert style.getPropertyValue("IsLandscape") is True
+    assert abs(int(style.getPropertyValue("Width")) - 29700) <= 2
+    assert abs(int(style.getPropertyValue("Height")) - 21000) <= 2
+
+
+@native_test
+@with_native_doc("writer")
+def test_numbering_type_roman_upper_uno(ctx, doc):
+    from plugin.writer.page import get_page_style_properties
+
+    res = _set_props(doc, ctx, numbering_type=2)
+    assert res["status"] == "ok", res
+
+    props = get_page_style_properties(doc, _style_name(doc))
+    assert props["properties"]["numbering_type"] == 2
+
+
+@native_test
+@with_native_doc("writer")
+def test_page_break_inside_table_cell_uno(ctx, doc):
+    from plugin.writer.page import PageInsertBreak
+
+    text = doc.getText()
+    cursor = text.createTextCursor()
+    cursor.gotoEnd(False)
+    table = doc.createInstance("com.sun.star.text.TextTable")
+    table.initialize(1, 1)
+    text.insertTextContent(cursor, table, False)
+
+    cell = table.getCellByName("A1")
+    cell_text = cell.getText()
+    cell_cursor = cell_text.createTextCursor()
+    cell_cursor.setString("UniqueCellWord")
+
+    tool = PageInsertBreak()
+    res = tool.execute(_tool_ctx(doc, ctx), before_text="UniqueCellWord")
+    assert res["status"] == "error", res
+    assert "table cell" in res["message"]
+
+    from com.sun.star.style.BreakType import PAGE_BEFORE
+    assert cell_cursor.getPropertyValue("BreakType") != PAGE_BEFORE
+
+
+@native_test
+@with_native_doc("writer")
+def test_column_spacing_zero_uno(ctx, doc):
+    from plugin.writer.page import PageSetColumns, PageGetColumns
+
+    set_tool = PageSetColumns()
+    get_tool = PageGetColumns()
+    tool_ctx = _tool_ctx(doc, ctx)
+    s_name = _style_name(doc)
+
+    res1 = set_tool.execute(tool_ctx, style=s_name, column_count=2, spacing_mm=5)
+    assert res1["status"] == "ok", res1
+
+    res2 = set_tool.execute(tool_ctx, style=s_name, column_count=2, spacing_mm=0)
+    assert res2["status"] == "ok", res2
+
+    cols_res = get_tool.execute(tool_ctx, style=s_name)
+    assert cols_res["status"] == "ok", cols_res
+    cols = cols_res["columns"]
+    assert len(cols) == 2
+    assert cols[0]["right_margin_mm"] == 0.0
+    assert cols[1]["left_margin_mm"] == 0.0
+

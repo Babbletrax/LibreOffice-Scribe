@@ -14,7 +14,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 from plugin.testing_runner import native_test
-from plugin.writer.styles import StyleClone, StyleCreate, StyleList, StyleUpdate
+from plugin.writer.styles import StyleClone, StyleCreate, StyleGetInfo, StyleList, StyleUpdate
 from plugin.tests.testing_utils import TestingFactory, with_native_doc
 
 
@@ -189,3 +189,54 @@ def test_clone_page_style_uno(ctx, doc):
     assert dst.getPropertyValue("FollowStyle") == "ClonePageDst"
     # Twip rounding: 1234 can read back as 1235 (probe C3). Compare to the source read-back.
     assert abs(int(dst.getPropertyValue("LeftMargin")) - int(src.getPropertyValue("LeftMargin"))) <= 2
+
+
+@native_test
+@with_native_doc("writer")
+def test_para_back_color_hex_uno(ctx, doc):
+    tool_ctx = TestingFactory.create_context(doc=doc, ctx=ctx, env="native")
+    style_name = "AgentBackColorTest"
+    fam = doc.getStyleFamilies().getByName("ParagraphStyles")
+    _drop_style(fam, style_name)
+
+    res = StyleCreate().execute(
+        tool_ctx, style=style_name, family="ParagraphStyles",
+        property_updates={"ParaBackColor": "#00FF00"},
+    )
+    assert res["status"] == "ok", f"Tool failed: {res}"
+    style = fam.getByName(style_name)
+    assert int(style.getPropertyValue("ParaBackColor")) == 0x00FF00
+
+    res2 = StyleUpdate().execute(
+        tool_ctx, style=style_name, family="ParagraphStyles",
+        property_updates={"ParaBackColor": -1},
+    )
+    assert res2["status"] == "ok", f"Tool failed: {res2}"
+    assert int(style.getPropertyValue("ParaBackColor")) == -1
+
+
+@native_test
+@with_native_doc("writer")
+def test_char_posture_roundtrip_uno(ctx, doc):
+    tool_ctx = TestingFactory.create_context(doc=doc, ctx=ctx, env="native")
+    style_name = "AgentPostureTest"
+    fam = doc.getStyleFamilies().getByName("ParagraphStyles")
+    _drop_style(fam, style_name)
+
+    res = StyleCreate().execute(
+        tool_ctx, style=style_name, family="ParagraphStyles",
+        property_updates={"CharPosture": 2},
+    )
+    assert res["status"] == "ok", f"Tool failed: {res}"
+
+    info = StyleGetInfo().execute(tool_ctx, style=style_name, family="ParagraphStyles")
+    assert info["status"] == "ok"
+    assert info["CharPosture"] == 2
+
+    style = fam.getByName(style_name)
+    uno_val = style.getPropertyValue("CharPosture")
+    if hasattr(uno_val, "value"):
+        assert uno_val.value == "ITALIC"
+    else:
+        assert int(uno_val) == 2
+
