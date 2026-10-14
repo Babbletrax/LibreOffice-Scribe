@@ -369,8 +369,237 @@ def resolve_df(
     return coerce_to_dataframe(data, headers=headers, header_row=header_row, sheet_hint=sheet_hint)
 
 
+def parse_date_column(series: Any) -> Any:
+    """Parse date series supporting datetime64, years, serials, strings, and mixed.
+
+    pd.to_datetime on a Calc serial is nanoseconds since 1970 (45292.0 ->
+    1970-01-01 00:00:00.000045292). read_range without format info leaves serial
+    floats on purpose. The year window is separate because 1900-2200 would
+    otherwise become 1905.
+    """
+    import numpy as np
+    import pandas as pd
+
+    if not isinstance(series, pd.Series):
+        series = pd.Series(series)
+
+    if pd.api.types.is_datetime64_any_dtype(series):
+        if getattr(series.dt, "tz", None) is not None:
+            series = series.dt.tz_localize(None)
+        return series.astype("datetime64[ns]")
+
+    if pd.api.types.is_bool_dtype(series):
+        return pd.Series(pd.NaT, index=series.index, name=series.name, dtype="datetime64[ns]")
+
+    if pd.api.types.is_numeric_dtype(series):
+        return _parse_numeric_date_series(series)
+
+    # Object or string dtype
+    is_num_cell = series.map(
+        lambda x: isinstance(x, (int, float, np.integer, np.floating))
+        and not isinstance(x, bool)
+        and not pd.isna(x)
+    )
+
+    result = pd.Series(pd.NaT, index=series.index, name=series.name, dtype="datetime64[ns]")
+
+    if is_num_cell.any():
+        num_slice = series[is_num_cell]
+        parsed_num = _parse_numeric_date_series(num_slice)
+        result.loc[is_num_cell] = parsed_num
+
+    not_num = ~is_num_cell
+    if not_num.any():
+        str_slice = series[not_num]
+        parsed_str = pd.to_datetime(str_slice, errors="coerce")
+        if getattr(parsed_str.dt, "tz", None) is not None:
+            parsed_str = parsed_str.dt.tz_localize(None)
+        result.loc[not_num] = parsed_str.astype("datetime64[ns]")
+
+    return result
+
+
+def _parse_numeric_date_series(series: Any) -> Any:
+    import numpy as np
+    import pandas as pd
+
+    non_null = series.dropna()
+    is_year = False
+    if len(non_null) > 0:
+        try:
+            arr = non_null.to_numpy(dtype=float)
+            if np.isfinite(arr).all():
+                is_int = (arr % 1 == 0)
+                in_range = (arr >= 1900) & (arr <= 2200)
+                if is_int.all() and in_range.all():
+                    is_year = True
+        except Exception:
+            pass
+
+    if is_year:
+        year_strs = series.map(
+            lambda v: f"{int(v):04d}-01-01"
+            if pd.notna(v) and np.isfinite(float(v))
+            else pd.NaT
+        )
+        return pd.to_datetime(year_strs, errors="coerce").astype("datetime64[ns]")
+    else:
+        def to_serial(v: Any) -> float:
+            if pd.isna(v):
+                return float("nan")
+            try:
+                fv = float(v)
+                if np.isfinite(fv) and 0 < fv <= 2958465:
+                    return fv
+            except Exception:
+                pass
+            return float("nan")
+
+        serials = series.map(to_serial)
+        return pd.to_datetime(serials, unit="D", origin="1899-12-30", errors="coerce").astype("datetime64[ns]")
+
+
+def coerce_int(value: Any, name: str = "value") -> int:
+    """Coerce *value* to int or raise ValueError."""
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer, got {value!r}")
+    try:
+        import numpy as np
+        int_types = (int, np.integer)
+        float_types = (float, np.floating)
+    except ImportError:
+        int_types = (int,)  # type: ignore[assignment]
+        float_types = (float,)  # type: ignore[assignment]
+
+    if isinstance(value, int_types):
+        return int(value)
+    if isinstance(value, float_types):
+        if math.isfinite(value) and float(value).is_integer():
+            return int(value)
+        raise ValueError(f"{name} must be an integer, got {value!r}")
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped:
+            try:
+                f = float(stripped)
+                if math.isfinite(f) and f.is_integer():
+                    return int(f)
+            except (ValueError, TypeError):
+                pass
+        raise ValueError(f"{name} must be an integer, got {value!r}")
+    raise ValueError(f"{name} must be an integer, got {value!r}")
+
+
+def coerce_optional_int(value: Any, name: str = "value") -> int | None:
+    if value is None:
+        return None
+    return coerce_int(value, name=name)
+
+
+def coerce_float(value: Any, name: str = "value") -> float:
+    """Coerce *value* to float or raise ValueError."""
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a float, got {value!r}")
+    try:
+        import numpy as np
+        num_types = (int, float, np.integer, np.floating)
+    except ImportError:
+        num_types = (int, float)  # type: ignore[assignment]
+
+    if isinstance(value, num_types):
+        f = float(value)
+        if math.isfinite(f):
+            return f
+        raise ValueError(f"{name} must be a float, got {value!r}")
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped:
+            try:
+                f = float(stripped)
+                if math.isfinite(f):
+                    return f
+            except (ValueError, TypeError):
+                pass
+        raise ValueError(f"{name} must be a float, got {value!r}")
+    raise ValueError(f"{name} must be a float, got {value!r}")
+
+
+def coerce_optional_float(value: Any, name: str = "value") -> float | None:
+    if value is None:
+        return None
+    return coerce_float(value, name=name)
+
+
+def coerce_bool(value: Any, *, name: str = "value", default: bool = False) -> bool:
+    """Coerce *value* to bool or raise ValueError."""
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    try:
+        import numpy as np
+        int_types = (int, np.integer)
+        float_types = (float, np.floating)
+    except ImportError:
+        int_types = (int,)  # type: ignore[assignment]
+        float_types = (float,)  # type: ignore[assignment]
+
+    if isinstance(value, int_types):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+        raise ValueError(f"{name} must be a boolean, got {value!r}")
+    if isinstance(value, float_types):
+        if math.isfinite(value) and float(value).is_integer():
+            if int(value) == 1:
+                return True
+            if int(value) == 0:
+                return False
+        raise ValueError(f"{name} must be a boolean, got {value!r}")
+    if isinstance(value, str):
+        stripped = value.strip().lower()
+        if stripped in ("1", "true", "yes", "y"):
+            return True
+        if stripped in ("0", "false", "no", "n"):
+            return False
+        raise ValueError(f"{name} must be a boolean, got {value!r}")
+    raise ValueError(f"{name} must be a boolean, got {value!r}")
+
+
+def coerce_str_list(value: Any, name: str = "value") -> list[str] | None:
+    """Coerce *value* to a list of column names or raise ValueError."""
+    if value is None:
+        return None
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError(f"{name} must be a column list, got {value!r}")
+        if "," in value:
+            parts = [p.strip() for p in value.split(",") if p.strip()]
+            if not parts:
+                raise ValueError(f"{name} must be a column list, got {value!r}")
+            return parts
+        return [stripped]
+    if isinstance(value, (list, tuple)):
+        result: list[str] = []
+        for item in value:
+            if not isinstance(item, str):
+                s = str(item).strip()
+            else:
+                s = item.strip()
+            if s:
+                result.append(s)
+        return result
+    raise ValueError(f"{name} must be a column list, got {value!r}")
+
+
 def numeric_columns(df: Any, columns: list[str] | None = None) -> list[str]:
     """Return *columns* when given, else the numeric column names. Unknown names raise."""
+    if isinstance(columns, str):
+        columns = [columns]
+    elif isinstance(columns, tuple):
+        columns = list(columns)
     if columns:
         missing = [c for c in columns if c not in df.columns]
         if missing:
@@ -528,12 +757,19 @@ def missing_package_error(helper: str, package: str) -> dict[str, Any]:
     )
 
 
+def _json_frame(df: Any) -> Any:
+    # where(..., None) on a float column stores NaN again, so decomposition edges
+    # became the JSON token NaN and Calc error cells.
+    return df.astype(object).where(df.notna(), None)
+
+
 def table_from_df(df: Any, *, name: str, max_rows: int = 50) -> dict[str, Any]:
     limited = df.head(max_rows)
+    obj_df = _json_frame(limited)
     return {
         "name": name,
         "columns": [str(c) for c in limited.columns],
-        "rows": limited.where(limited.notna(), None).values.tolist(),
+        "rows": obj_df.values.tolist(),
         "truncated": len(df) > max_rows,
         "total_rows": int(len(df)),
     }
@@ -541,4 +777,4 @@ def table_from_df(df: Any, *, name: str, max_rows: int = 50) -> dict[str, Any]:
 
 def records_from_df(df: Any, *, max_rows: int = 50) -> list[dict[str, Any]]:
     limited = df.head(max_rows)
-    return limited.where(limited.notna(), None).to_dict(orient="records")
+    return _json_frame(limited).to_dict(orient="records")

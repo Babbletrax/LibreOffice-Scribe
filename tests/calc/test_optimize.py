@@ -137,3 +137,39 @@ def test_insert_optimize_result_qualifies_sheet_on_the_anchor(mock_bridge, mock_
             start_row=row,
         )
         assert manipulator.write_formula_range.call_args.args[0] == expected
+
+
+def test_optimize_data_describes_parameters():
+    tool = OptimizeDataTool()
+    params_desc = tool.get_parameters()["properties"]["params"]["description"]
+    for word in ("c_col", "a_cols", "risk_free_rate", "unassigned_rows"):
+        assert word in tool.description
+        assert word in params_desc
+    assert "minimum-variance" in tool.description.lower()
+
+
+@patch("plugin.scripting.optimize.insert_optimize_result_into_calc", side_effect=RuntimeError("disk full"))
+@patch("plugin.framework.queue_executor.execute_on_main_thread")
+@patch("plugin.scripting.optimize.run_trusted_optimize")
+def test_optimize_sheet_write_failure_keeps_the_result(
+    mock_run_trusted, mock_main_thread, mock_insert, calc_ctx
+):
+    mock_run_trusted.return_value = {
+        "status": "ok",
+        "helper": "linear_programming",
+        "metrics": {"objective_value": 42.0},
+    }
+    mock_main_thread.side_effect = lambda fn, *args, **kwargs: fn(*args, **kwargs)
+
+    tool = OptimizeDataTool()
+    result = tool.execute(
+        calc_ctx,
+        helper="linear_programming",
+        data_range="Sheet1.A1:D20",
+        output_range="Sheet1.F1",
+    )
+
+    assert result["status"] == "ok"
+    assert result["sheet_write_error"] == "disk full"
+    assert result["metrics"] == {"objective_value": 42.0}
+

@@ -27,6 +27,10 @@ def test_forecast_data_lists_helpers():
     tool = ForecastDataTool()
     for name in HELPER_NAMES:
         assert name in tool.description
+    params_desc = tool.get_parameters()["properties"]["params"]["description"]
+    for word in ("date_col", "seasonal_periods", "include_all"):
+        assert word in tool.description
+        assert word in params_desc
 
 
 def test_forecast_data_requires_helper(calc_ctx):
@@ -223,3 +227,33 @@ def test_forecast_data_rejects_raw_data_in_analysis_domain(calc_ctx):
     )
     assert result["status"] == "error"
     assert "data_range" in result["message"].lower()
+
+
+@patch("plugin.calc.forecast_auto_plot.run_auto_plot_after_forecast", return_value=None)
+@patch("plugin.scripting.forecast.insert_forecast_result_into_calc", side_effect=RuntimeError("disk full"))
+@patch("plugin.framework.queue_executor.execute_on_main_thread")
+@patch("plugin.scripting.forecast.run_trusted_forecast")
+def test_forecast_sheet_write_failure_keeps_the_result(
+    mock_run_trusted, mock_main_thread, mock_insert, mock_auto_plot, calc_ctx
+):
+    mock_run_trusted.return_value = {
+        "status": "ok",
+        "helper": "forecast_time_series",
+        "metrics": {"periods": 6},
+    }
+    mock_main_thread.side_effect = lambda fn, *args, **kwargs: fn(*args, **kwargs)
+
+    tool = ForecastDataTool()
+    result = tool.execute(
+        calc_ctx,
+        helper="forecast_time_series",
+        data_range="Sheet1.A1:B37",
+        output_range="Sheet1.D1",
+        auto_plot=True,
+    )
+
+    assert result["status"] == "ok"
+    assert result["sheet_write_error"] == "disk full"
+    assert result["metrics"] == {"periods": 6}
+    mock_auto_plot.assert_called_once()
+
