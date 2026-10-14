@@ -518,7 +518,7 @@ def optimize_popen_pipes(proc: subprocess.Popen[Any]) -> None:
 # Hypothesis and venv-path tests pass Unicode argv/paths; ascii_bounded would reject them.
 # Argv uses DEAL_MAX_ARGV (venv -c probes are longer than DEAL_MAX_PATH filesystem caps).
 @deal.pre(
-    lambda cmd, env=None, cwd=None: isinstance(cmd, list)
+    lambda cmd, env=None, cwd=None, watch_bus=False: isinstance(cmd, list)
     and len(cmd) <= DEAL_MAX_CMD_ARGS
     and all(str_bounded(x, DEAL_MAX_ARGV) for x in cmd)
     and (
@@ -532,7 +532,7 @@ def optimize_popen_pipes(proc: subprocess.Popen[Any]) -> None:
 )
 @deal.post(lambda result: isinstance(result, list) and all(isinstance(x, str) for x in result))
 @deal.ensure(
-    lambda cmd, env=None, cwd=None, result=None: isinstance(result, list)
+    lambda cmd, env=None, cwd=None, watch_bus=False, result=None: isinstance(result, list)
     and len(result) >= len(cmd)
     and (result[-len(cmd):] == cmd if cmd else True)
 )
@@ -541,9 +541,13 @@ def wrap_command_for_sandbox(
     *,
     env: dict[str, str] | None = None,
     cwd: str | None = None,
+    watch_bus: bool = False,
 ) -> list[str]:
     """Prepend ``flatpak-spawn --host`` when running inside a Flatpak sandbox.
 
+    ``watch_bus=True`` inserts ``--watch-bus`` so ``Popen.kill()`` on
+    ``flatpak-spawn`` also ends the host child; the default is false so a
+    bus drop does not kill the venv worker.
     ``flatpak-spawn --host`` does not forward the Popen env or cwd.
     ``--env`` without ``--clear-env`` would still leave host-session secrets
     in the child. Callers that omit ``env`` (harper, vale, headless soffice)
@@ -555,6 +559,8 @@ def wrap_command_for_sandbox(
     if sandbox != "flatpak":
         return cmd
     argv = ["flatpak-spawn", "--host"]
+    if watch_bus:
+        argv.append("--watch-bus")
     if env is not None:
         argv.append("--clear-env")
     if isinstance(cwd, str) and cwd:

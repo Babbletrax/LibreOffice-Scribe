@@ -2041,6 +2041,23 @@ class TestSTTClientReset:
             host._transcribe_audio("fake.wav", "stt-model")
             assert mock_llm_client.called
 
+    def test_local_stt_does_not_build_llm_client(self) -> None:
+        host = DummyChatbotPanel()
+        host.client = MagicMock()
+
+        with (
+            patch("plugin.audio.stt_service.uses_local_stt", return_value=True),
+            patch("plugin.chatbot.send_handlers.get_api_config") as mock_get_api_config,
+            patch("plugin.chatbot.send_handlers.LlmClient") as mock_llm_client,
+            patch("plugin.chatbot.send_handlers.run_blocking_in_thread", side_effect=_run_blocking_now),
+            patch("plugin.audio.stt_service.transcribe", return_value="hi"),
+            patch("plugin.chatbot.send_handlers.capture_send_stop", return_value=(MagicMock(), lambda: False)),
+        ):
+            res = host._transcribe_audio("fake.wav", "stt-model")
+            assert res == "hi"
+            mock_llm_client.assert_not_called()
+            mock_get_api_config.assert_not_called()
+
 
 def test_direct_image_records_user_message_only_once():
     """Image mode stored the prompt twice: the StartEvent user append folded it,

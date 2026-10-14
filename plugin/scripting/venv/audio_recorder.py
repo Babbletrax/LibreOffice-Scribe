@@ -64,6 +64,7 @@ def record_to_wav(
         else None
     )
     auto_stopped = False
+    write_error: BaseException | None = None
 
     # Open the WAV before PortAudio. A disk or permission error must not be
     # reported as PORTAUDIO_LINUX_HINT.
@@ -78,16 +79,19 @@ def record_to_wav(
     stream = None
 
     def callback(indata: Any, frames: int, time_info: Any, status: Any) -> None:
-        nonlocal auto_stopped
+        nonlocal auto_stopped, write_error
         if status:
             print(status, file=sys.stderr)
-        if not wav_file:
-            return
         pcm = bytes(indata)
-        wav_file.writeframes(pcm)
+        try:
+            wav_file.writeframes(pcm)
+        except Exception as exc:
+            write_error = exc
+            stop_event.set()
+            return
         if vad is None or auto_stopped:
             return
-        result = vad.process_chunk(pcm, frame_count=frames)
+        result = vad.process_chunk(pcm)
         if on_ipc_emit is not None and vad.should_emit_silence_progress(result):
             on_ipc_emit({"status": "silence_progress", "ms": result.silence_ms, "rms": round(result.rms, 5)})
         if result.should_stop:
@@ -126,6 +130,13 @@ def record_to_wav(
                 wav_file.close()
             except (OSError, ValueError):
                 pass
+
+    # An exception inside callback used to leave the callback, sounddevice
+    # aborted the stream, and stop_event.wait blocked until the 4 hour cap.
+    if write_error is not None:
+        raise RuntimeError(
+            f"Failed to write audio WAV file at {output_path}: {write_error}"
+        ) from write_error
 
     # Emit auto_stopped on the main thread after the WAV is closed. Emitting
     # from the PortAudio callback publishes a header whose length is still 0.
