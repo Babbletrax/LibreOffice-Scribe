@@ -1,5 +1,6 @@
 import pytest
 import json
+import logging
 import os
 import tempfile
 import threading
@@ -269,6 +270,100 @@ class TestConfigSyncFileIO:
             assert f.read() == corrupt
         with open(self._backup_path(), 'r', encoding='utf-8') as f:
             assert (f.read()) == (corrupt)
+        backups = [e for e in os.listdir(self.temp_dir.name) if e.startswith(os.path.basename(self.config_path) + CONFIG_BACKUP_SUFFIX)]
+        assert len(backups) == 1
+
+    def test_unrepairable_config_backs_up_once(self):
+        broken = "{ invalid json 1"
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            f.write(broken)
+        reset_config_for_tests()
+        for unused in range(3):
+            assert get_config("text_model") == ""
+        with open(self.config_path, "r", encoding="utf-8") as f:
+            assert f.read() == broken
+        backups = [e for e in os.listdir(self.temp_dir.name) if e.startswith(os.path.basename(self.config_path) + CONFIG_BACKUP_SUFFIX)]
+        assert len(backups) == 1
+        assert backups[0] == os.path.basename(self._backup_path())
+        with open(self._backup_path(), "r", encoding="utf-8") as f:
+            assert f.read() == broken
+
+        broken2 = "{ invalid json 1 -- extra"
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            f.write(broken2)
+        reset_config_for_tests()
+        assert get_config("text_model") == ""
+        backups_after = [e for e in os.listdir(self.temp_dir.name) if e.startswith(os.path.basename(self.config_path) + CONFIG_BACKUP_SUFFIX)]
+        assert len(backups_after) == 2
+        stamped = [b for b in backups_after if b != os.path.basename(self._backup_path())]
+        assert len(stamped) == 1
+        with open(self._backup_path(), "r", encoding="utf-8") as f:
+            assert f.read() == broken
+        with open(os.path.join(self.temp_dir.name, stamped[0]), "r", encoding="utf-8") as f:
+            assert f.read() == broken2
+
+    def test_remove_without_write_backs_up_repairable_file_once(self):
+        body = '{"text_model": "gpt",}'
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            f.write(body)
+        reset_config_for_tests()
+        from plugin.framework.config import remove_config
+
+        remove_config("image_model")
+        remove_config("image_model")
+        with open(self.config_path, "r", encoding="utf-8") as f:
+            assert f.read() == body
+        backups = [e for e in os.listdir(self.temp_dir.name) if e.startswith(os.path.basename(self.config_path) + CONFIG_BACKUP_SUFFIX)]
+        assert len(backups) == 1
+        with open(self._backup_path(), "r", encoding="utf-8") as f:
+            assert f.read() == body
+
+    def test_broken_file_keeps_last_good_snapshot(self):
+        from plugin.framework.config import _cache
+
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            json.dump({"text_model": "my-snapshot-model"}, f)
+        reset_config_for_tests()
+        assert get_config("text_model") == "my-snapshot-model"
+
+        broken = "{ invalid json body"
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            f.write(broken)
+        _cache.mtime_last_checked = 0.0
+        assert get_config("text_model") == "my-snapshot-model"
+        with open(self.config_path, "r", encoding="utf-8") as f:
+            assert f.read() == broken
+
+    def test_oserror_on_load_returns_snapshot(self):
+        from plugin.framework.config import _cache
+
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            json.dump({"text_model": "my-snapshot-model"}, f)
+        reset_config_for_tests()
+        assert get_config("text_model") == "my-snapshot-model"
+
+        _cache.mtime_last_checked = 0.0
+        with patch("plugin.framework.config._load_config_dict", side_effect=OSError("disk read failure")):
+            assert get_config("text_model") == "my-snapshot-model"
+        assert isinstance(_cache.data, dict)
+
+    def test_unchanged_broken_file_logs_once(self, caplog):
+        broken = "{ invalid json 1"
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            f.write(broken)
+        reset_config_for_tests()
+        with caplog.at_level(logging.ERROR):
+            for unused in range(3):
+                assert get_config("text_model") == ""
+            errors = [rec for rec in caplog.records if rec.levelno == logging.ERROR]
+            assert len(errors) == 1
+
+            broken2 = "{ invalid json 2"
+            with open(self.config_path, "w", encoding="utf-8") as f:
+                f.write(broken2)
+            assert get_config("text_model") == ""
+            errors2 = [rec for rec in caplog.records if rec.levelno == logging.ERROR]
+            assert len(errors2) == 2
 
     def test_config_trailing_comma_auto_repair(self):
         broken = '{"text_model": "gpt",}'
@@ -397,16 +492,86 @@ class TestConfigSyncFileIO:
                 set_api_key_for_endpoint("https://api.openai.com", "sk-new")
         assert (get_api_key_for_endpoint("https://api.openai.com")) == ("")
 
-    def test_remove_config_skips_write_when_remaining_invalid(self):
+    def test_remove_config_heals_out_of_range_neighbor(self):
         from plugin.framework.config import remove_config
 
         with open(self.config_path, "w", encoding="utf-8") as f:
-            json.dump({"temperature": 1.5, "text_model": "keep-me"}, f)
+            json.dump({
+                "temperature": 1.5,
+                "text_model": "keep-me",
+                "api_keys_by_endpoint": {"https://api.openai.com": "sk-keep"},
+            }, f)
         reset_config_for_tests()
         remove_config("text_model")
         data = self._load_written()
-        assert (data.get("text_model")) == ("keep-me")
-        assert (data.get("temperature")) == (1.5)
+        assert "text_model" not in data
+        assert data.get("temperature") == 1.0
+        assert data.get("api_keys_by_endpoint") == {"https://api.openai.com": "sk-keep"}
+
+    def test_set_config_heals_out_of_range_neighbor(self):
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            json.dump({"temperature": 1.5, "text_model": "keep-me"}, f)
+        reset_config_for_tests()
+        set_config("seed", "42")
+        data = self._load_written()
+        assert data.get("seed") == "42"
+        assert data.get("text_model") == "keep-me"
+        assert data.get("temperature") == 1.0
+
+    def test_set_unrelated_dotted_key_keeps_flat_endpoint(self):
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            json.dump({"endpoint": "http://keep.example", "text_model": "m"}, f)
+        reset_config_for_tests()
+        set_config("notamodule.endpoint", "http://other.example")
+        data = self._load_written()
+        assert data.get("endpoint") == "http://keep.example"
+        assert data.get("notamodule.endpoint") == "http://other.example"
+
+    def test_remove_audio_stt_model_drops_legacy_stt_model(self):
+        from plugin.framework.config import remove_config
+
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            json.dump({"audio.stt_model": "whisper-new", "stt_model": "whisper-legacy"}, f)
+        reset_config_for_tests()
+        remove_config("audio.stt_model")
+        data = self._load_written()
+        assert "audio.stt_model" not in data
+        assert "stt_model" not in data
+
+    def test_set_config_omitted_key_old_value_is_schema_default(self):
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            json.dump({"text_model": "test-model"}, f)
+        reset_config_for_tests()
+        with patch("plugin.framework.event_bus.global_event_bus.emit") as emit:
+            set_config("request_timeout", 45)
+            assert emit.call_count == 1
+            assert emit.call_args.kwargs["key"] == "request_timeout"
+            assert emit.call_args.kwargs["value"] == 45
+            assert emit.call_args.kwargs["old_value"] == 120
+
+    def test_set_config_stored_key_old_value_is_stored(self):
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            json.dump({"request_timeout": 30}, f)
+        reset_config_for_tests()
+        with patch("plugin.framework.event_bus.global_event_bus.emit") as emit:
+            set_config("request_timeout", 45)
+            assert emit.call_count == 1
+            assert emit.call_args.kwargs["key"] == "request_timeout"
+            assert emit.call_args.kwargs["value"] == 45
+            assert emit.call_args.kwargs["old_value"] == 30
+
+    def test_remove_config_old_value_is_stored(self):
+        from plugin.framework.config import remove_config
+
+        with open(self.config_path, "w", encoding="utf-8") as f:
+            json.dump({"text_model": "keep"}, f)
+        reset_config_for_tests()
+        with patch("plugin.framework.event_bus.global_event_bus.emit") as emit:
+            remove_config("text_model")
+            assert emit.call_count == 1
+            assert emit.call_args.kwargs["key"] == "text_model"
+            assert emit.call_args.kwargs["value"] is None
+            assert emit.call_args.kwargs["old_value"] == "keep"
 
     def test_get_config_default_resolution(self):
         if os.path.exists(self.config_path):

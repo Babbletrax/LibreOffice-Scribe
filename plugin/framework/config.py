@@ -24,8 +24,10 @@ use ``get_ctx()`` only for UNO operations.
 ``writeragent.json`` lives under the LibreOffice user profile (Linux:
 ``~/.config/libreoffice/{4,24}/user/``; macOS: ``~/Library/Application Support/LibreOffice/4/user/``;
 Windows: ``%APPDATA%\\LibreOffice\\4\\user\\``). LibrePy shares this same file on
-purpose (venv path, session mode, timeouts). Broken JSON is copied to
-``.bak`` when possible; ``json_repair`` fixes small typos on read.
+purpose (venv path, session mode, timeouts). One ``.bak`` is kept per
+distinct corrupt byte string; a different corrupt body adds one stamped file
+and does not overwrite the first ``.bak``. ``json_repair`` fixes small
+typos on read.
 
 Writes omit a key that still matches its default and prefix the file with
 ``//`` comment lines pointing at ``docs/writeragent-config-schema.md`` on
@@ -78,7 +80,9 @@ import shutil
 import tempfile
 import threading
 import time
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, TypeVar
+
+_T = TypeVar("_T", int, float)
 
 from plugin.framework.errors import ConfigError, ConfigValidationError, safe_call
 from plugin.framework.event_bus import global_event_bus
@@ -229,19 +233,60 @@ def _config_backup_path(config_file_path: str) -> str:
 
 def _backup_config_file(config_file_path: str, *, reason: str = "invalid-json") -> str | None:
     """Copy the raw config file before repair or other destructive handling."""
+    # What was wrong: Every parse failure created a new timestamped .bak file,
+    # piling up junk backups on repeated reads of the same corrupt file.
+    # How it happened: _backup_config_file checked only if .bak existed, and if
+    # so immediately allocated a new timestamped filename without checking
+    # whether an existing backup already contained the exact same bytes.
+    # Why this change fixes it: It inspects candidate backups in the same
+    # directory (.bak and .bak.<stamp>); if any already matches the source
+    # file's bytes, that path is returned without creating another copy.
     if not config_file_path or not os.path.exists(config_file_path):
         return None
+    try:
+        with open(config_file_path, "rb") as f:
+            src_bytes = f.read()
+    except OSError:
+        return None
+
     backup_path = _config_backup_path(config_file_path)
-    # A second corruption must not overwrite the only earlier copy.
+    backup_dir = os.path.dirname(backup_path) or "."
+    backup_base = os.path.basename(backup_path)
+
+    # Candidates: unsuffixed backup path, then stamped entries in the same directory.
+    if os.path.exists(backup_path):
+        try:
+            with open(backup_path, "rb") as f:
+                if f.read() == src_bytes:
+                    return backup_path
+        except OSError:
+            pass
+
+    try:
+        entries = os.listdir(backup_dir)
+    except OSError:
+        entries = []
+
+    stamped_candidates = sorted(e for e in entries if e.startswith(backup_base + "."))
+    for name in stamped_candidates:
+        cand_path = os.path.join(backup_dir, name)
+        try:
+            with open(cand_path, "rb") as f:
+                if f.read() == src_bytes:
+                    return cand_path
+        except OSError:
+            pass
+
+    dest_path = backup_path
     if os.path.exists(backup_path):
         stamped = backup_path + "." + time.strftime("%Y%m%d%H%M%S")
         if os.path.exists(stamped):
             stamped = stamped + "." + str(time.time_ns())
-        backup_path = stamped
+        dest_path = stamped
     try:
-        shutil.copy2(config_file_path, backup_path)
-        log.warning("Backed up config %s to %s (%s)", config_file_path, backup_path, reason)
-        return backup_path
+        shutil.copy2(config_file_path, dest_path)
+        log.warning("Backed up config %s to %s (%s)", config_file_path, dest_path, reason)
+        return dest_path
     except OSError:
         log.exception("Failed to backup config %s", config_file_path)
         return None
@@ -326,6 +371,7 @@ def _invalidate_config_cache() -> None:
     _cache.data = None
     _cache.mtime = 0
     _cache.mtime_last_checked = 0.0
+    _cache.error_logged = None
 
 
 def _load_config_dict(config_file_path: str, *, allow_repair: bool = False, persist_repair: bool = False, fail_on_unrepairable: bool = False) -> dict[str, Any]:
@@ -373,16 +419,7 @@ def _load_config_dict(config_file_path: str, *, allow_repair: bool = False, pers
 
 def is_grammar_enabled() -> bool:
     """True if the grammar checker is enabled on the Doc tab (LLM, LanguageTool, Vale, or Harper)."""
-    from plugin.framework.uno_context import is_libreharper
-
-    if is_libreharper():
-        return True
-
-    val = get_config("doc.grammar_proofreader_enabled")
-    if isinstance(val, bool):
-        return val  # Handle old boolean config
-    val_str = str(val).strip().lower()
-    return val_str in ("llm", "languagetool", "vale", "harper", "true")
+    return get_grammar_provider() != "off"
 
 
 def get_grammar_provider() -> str:
@@ -438,6 +475,7 @@ class ConfigCache:
     data: Dict[str, Any] | None = None
     mtime: float = 0
     mtime_last_checked: float = 0.0
+    error_logged: tuple[str, float, int] | tuple[str, None, None] | None = None
 
 
 _cache = ConfigCache()
@@ -497,20 +535,24 @@ def get_config(key: str) -> Any:
     return _copy_config_value(_config_schema._resolve_default(key))
 
 
-def get_config_int(key: str) -> int:
-    """Get a config value as int. All requested keys MUST be in the schema (WriterAgentConfig or MODULES).
-    Throws ConfigError if the key is missing or invalid (use get_config_int_safe to return a default instead)."""
+def _required_number(key: str, parse: Callable[[Any], _T], kind: str) -> _T:
     v = get_config(key)
     # Empty string or None from JSON/UI: use schema default (same as missing key).
     if v == "" or v is None:
         v = _config_schema._resolve_default(key)
-    # _resolve_default returns "" for unknown keys that slip through without a dataclass default.
+    # Unknown keys raise from get_config / _resolve_default. "" is a known key whose value and default are empty; CONFIG_KEY_NOT_FOUND keeps that empty string from being parsed as 0.
     if v == "":
         raise ConfigError(f"Missing config key {key!r}: not a WriterAgentConfig field, MODULES default, or LRU pattern.", "CONFIG_KEY_NOT_FOUND", details={"key": key})
     try:
-        return _config_schema.parse_int_robust(v)
+        return parse(v)
     except ValueError as e:
-        raise ConfigError(f"Config key {key!r} has non-integer value: {v!r}", "CONFIG_TYPE_ERROR") from e
+        raise ConfigError(f"Config key {key!r} has non-{kind} value: {v!r}", "CONFIG_TYPE_ERROR") from e
+
+
+def get_config_int(key: str) -> int:
+    """Get a config value as int. All requested keys MUST be in the schema (WriterAgentConfig or MODULES).
+    Throws ConfigError if the key is missing or invalid (use get_config_int_safe to return a default instead)."""
+    return _required_number(key, _config_schema.parse_int_robust, "integer")
 
 
 def get_config_str(key: str) -> str:
@@ -560,15 +602,7 @@ def get_config_int_safe(key: str) -> int:
 def get_config_float(key: str) -> float:
     """Get a config value as float. ALL requested keys MUST be in the schema.
     Throws ConfigError if key is not found or value is non-float."""
-    v = get_config(key)
-    if v == "" or v is None:
-        v = _config_schema._resolve_default(key)
-    if v == "":
-        raise ConfigError(f"Missing config key {key!r}: not a WriterAgentConfig field, MODULES default, or LRU pattern.", "CONFIG_KEY_NOT_FOUND", details={"key": key})
-    try:
-        return _config_schema.parse_float_robust(v)
-    except ValueError as e:
-        raise ConfigError(f"Config key {key!r} has non-float value: {v!r}", "CONFIG_TYPE_ERROR") from e
+    return _required_number(key, _config_schema.parse_float_robust, "float")
 
 
 def get_config_dict() -> dict[str, Any]:
@@ -616,7 +650,12 @@ def _stage_config_assignment(config_data: dict[str, Any], key: str, value: Any) 
     or the schema default when the key is omitted) leaves the dict alone.
     """
     current_value = _raw_config_value_for_key(config_data, key)
-    previous = None if current_value is _config_schema._MISSING_VALUE else current_value
+    # What was wrong: config:changed events reported old_value=None when a key
+    # was omitted from writeragent.json, even though its effective value was the schema default.
+    # How it happened: _stage_config_assignment assigned previous=None on _MISSING_VALUE.
+    # Why this change fixes it: It resolves previous via _value_for_update, returning
+    # the schema default for omitted keys.
+    previous = _value_for_update(config_data, key)
     # strict: an unparseable write must not look like success by snapping back
     # to the previous value. Load/repair stays non-strict.
     coerced = _config_schema.coerce_config_value(key, value, fallback_value=current_value, strict=True)
@@ -632,10 +671,8 @@ def _stage_config_assignment(config_data: dict[str, Any], key: str, value: Any) 
     ):
         return False, coerced, previous
 
-    for dotted in _config_schema._dotted_fallback_keys(key):
-        config_data.pop(dotted, None)
-    if "." in key and key not in _DUAL_READ_DOTTED_KEYS_KEEP_FLAT:
-        config_data.pop(key.split(".", 1)[1], None)
+    for alias in _alias_keys_for_write(key):
+        config_data.pop(alias, None)
     config_data[key] = coerced
     return True, coerced, previous
 
@@ -648,12 +685,19 @@ def _validated_config_for_write(data: dict[str, Any], keys_label: str) -> _confi
     so a later one-key save would erase keys an earlier writer had stored.
     The file patch is applied separately, and only for keys this call changed.
     """
+    # What was wrong: Writing or removing any valid setting failed if an
+    # unrelated, pre-existing setting in writeragent.json was out-of-range.
+    # How it happened: _validated_config_for_write called validate() with strict
+    # range checks across the whole file, rejecting the entire write.
+    # Why this change fixes it: It validates with coerce_out_of_range=True so
+    # pre-existing neighbor values are coerced into valid bounds while newly
+    # assigned values remain strictly validated in _stage_config_assignment.
     try:
         # deepcopy: validate() mutates nested dicts in place (saved scripts).
         # Sharing them with the loaded file would write those mutations
         # into keys this call did not change.
         cfg = _config_schema.WriterAgentConfig.from_dict(copy.deepcopy(data))
-        cfg.validate()
+        cfg.validate(coerce_out_of_range=True)
         return cfg
     except ConfigValidationError:
         raise
@@ -689,15 +733,23 @@ def _value_for_update(loaded: dict[str, Any], key: str) -> Any:
     return _copy_config_value(raw)
 
 
-def _alias_keys_for_write(key: str) -> tuple[str, ...]:
-    """Other names ``set_config`` drops when it writes *key*.
+def _alias_keys_for_write(key: str, *, honor_keep_flat: bool = True) -> tuple[str, ...]:
+    """Other names ``set_config`` / ``remove`` drops when it writes/removes *key*.
 
-    Dotted fallbacks always go. The unsuffixed flat name goes too, except
-    ``audio.stt_model``, which must keep a pre-move ``stt_model``.
+    What was wrong: Any dotted key blindly deleted the flat name matching its
+    suffix (e.g. setting notamodule.endpoint dropped endpoint).
+    How it happened: _alias_keys_for_write split on dot and popped the suffix
+    without checking if that flat name actually mapped to this dotted key.
+    Why this change fixes it: It only treats the suffix as an alias when the
+    manifest-backed _dotted_fallback_keys(flat) yields this exact dotted key.
     """
     aliases: list[str] = list(_config_schema._dotted_fallback_keys(key))
-    if "." in key and key not in _DUAL_READ_DOTTED_KEYS_KEEP_FLAT:
-        aliases.append(key.split(".", 1)[1])
+    if "." in key:
+        flat = key.split(".", 1)[1]
+        if (not honor_keep_flat or key not in _DUAL_READ_DOTTED_KEYS_KEEP_FLAT) and any(
+            dotted == key for dotted in _config_schema._dotted_fallback_keys(flat)
+        ):
+            aliases.append(flat)
     return tuple(aliases)
 
 
@@ -711,7 +763,7 @@ def _patch_changed_keys(loaded: dict[str, Any], staged: dict[str, Any], changed:
     """
     keys_label = ", ".join(key for key, _coerced, _prev in changed)
     cfg = _validated_config_for_write(staged, keys_label)
-    out = dict(loaded)
+    out = _repaired_file_dict(loaded, cfg)
     effective: list[tuple[str, Any, Any]] = []
     for key, _coerced, previous in changed:
         for alias in _alias_keys_for_write(key):
@@ -853,7 +905,7 @@ class ConfigStore:
             _emit_pending(pending)
         return True
 
-    def remove(self, path: str, key: str, *, emit: bool = True) -> bool:
+    def remove(self, path: str, key: str, *, emit: bool = True, event_key: str | None = None) -> bool:
         """Drop *key* and its aliases. Leave every other key as it was read."""
         if not path or not os.path.exists(path):
             return False
@@ -867,40 +919,41 @@ class ConfigStore:
             except OSError:
                 log.exception("remove_config skipped: config file could not be read")
                 return False
-            out = dict(loaded)
+            old_value = _value_for_update(loaded, key)
+            aliases = _alias_keys_for_write(key, honor_keep_flat=False)
+            remaining = dict(loaded)
             removed = False
-            if key in out:
-                out.pop(key, None)
+            if key in remaining:
+                remaining.pop(key, None)
                 removed = True
-            for dotted in _config_schema._dotted_fallback_keys(key):
-                if dotted in out:
-                    out.pop(dotted, None)
+            for alias in aliases:
+                if alias in remaining:
+                    remaining.pop(alias, None)
                     removed = True
-            # A dotted key's flat alias is the pre-move name (stt_model for
-            # audio.stt_model). Removing the dotted key removes that alias too.
-            if "." in key:
-                field_name = key.split(".", 1)[1]
-                if field_name in out:
-                    out.pop(field_name, None)
-                    removed = True
-            if not removed or out == loaded:
+            if not removed or remaining == loaded:
                 return False
             try:
-                _validated_config_for_write(out, key)
+                cfg = _validated_config_for_write(remaining, key)
             except ConfigValidationError as e:
                 log.warning("remove_config skipped write: remaining config is invalid: %s", e)
                 return False
             except Exception:
                 log.exception("remove_config validation failed; not writing unvalidated dict")
                 return False
+            to_write = _repaired_file_dict(loaded, cfg)
+            to_write.pop(key, None)
+            for alias in aliases:
+                to_write.pop(alias, None)
+            if to_write == loaded:
+                return False
             try:
-                _write_config_file(path, out)
+                _write_config_file(path, to_write)
                 _invalidate_config_cache()
             except OSError as e:
                 log.exception("Error writing to %s", path)
                 raise ConfigError(f"Failed to remove config key: {e}", "CONFIG_SAVE_ERROR") from e
             if emit:
-                pending = _PendingConfigEvent(key, (key,), None, None, False)
+                pending = _PendingConfigEvent(event_key or key, (key,), None, old_value, False)
         if pending is not None:
             _emit_pending(pending)
         return True
@@ -1004,12 +1057,12 @@ def set_configs(values: dict[str, Any]) -> None:
     _config_store.update_many(values)
 
 
-def remove_config(key: str) -> None:
+def remove_config(key: str, *, event_key: str | None = None) -> None:
     """Remove a config key. Other keys in the file are left as they were read."""
     config_file_path = _config_path()
     if not config_file_path:
         raise ConfigError("Config path is empty", "CONFIG_PATH_ERROR")
-    _config_store.remove(config_file_path, key)
+    _config_store.remove(config_file_path, key, event_key=event_key)
 
 
 def _get_validated_config_dict() -> dict[str, Any]:
@@ -1088,16 +1141,46 @@ def _get_validated_config_dict() -> dict[str, Any]:
 
             _cache.data = out
             _cache.mtime = current_mtime
+            _cache.error_logged = None
             return out
         except ConfigError:
-            log.exception("Config error reading %s", config_file_path)
+            # What was wrong: Read errors on cold cache logged an exception on
+            # every single read, and OSError discarded any good cached snapshot.
+            # How it happened: _cache.data is None on a cold cache, bypassing the
+            # 2-second throttle, and OSError returned {} unconditionally.
+            # Why this change fixes it: Failures are logged at most once per
+            # (path, mtime, size) until changed or cleared, and OSError returns
+            # the last good cached dict if present, matching ConfigError.
+            try:
+                err_id: tuple[str, float, int] | tuple[str, None, None] = (
+                    config_file_path,
+                    os.path.getmtime(config_file_path),
+                    os.path.getsize(config_file_path),
+                )
+            except OSError:
+                err_id = (config_file_path, None, None)
+            if _cache.error_logged != err_id:
+                log.exception("Config error reading %s", config_file_path)
+                _cache.error_logged = err_id
             # Keep the last good snapshot. Caching {} made the session look
             # like a fresh install (empty API keys) until the file was fixed.
             if isinstance(_cache.data, dict):
                 return _cache.data
             return {}
         except OSError:
-            log.exception("Error reading %s", config_file_path)
+            try:
+                err_id = (
+                    config_file_path,
+                    os.path.getmtime(config_file_path),
+                    os.path.getsize(config_file_path),
+                )
+            except OSError:
+                err_id = (config_file_path, None, None)
+            if _cache.error_logged != err_id:
+                log.exception("Error reading %s", config_file_path)
+                _cache.error_logged = err_id
+            if isinstance(_cache.data, dict):
+                return _cache.data
             return {}
 
 

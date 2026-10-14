@@ -17,10 +17,10 @@ from plugin.framework.deal_shim import deal
 
 from plugin.framework.service import ServiceBase
 from plugin.framework.event_bus import global_event_bus
-from plugin.framework.errors import ConfigError, ConfigValidationError
+from plugin.framework.errors import ConfigError
 
-from plugin.framework.config import get_config, set_config, remove_config, get_config_dict, get_current_endpoint, set_api_key_for_endpoint, parse_config_json_text, _config_store, AI_SIMPLE_FIELDS
-from plugin.framework.config_schema import get_manifest_modules
+from plugin.framework.config import get_config, set_config, remove_config, get_config_dict, get_current_endpoint, set_api_key_for_endpoint, parse_config_json_text, _config_store, AI_SIMPLE_FIELDS, _normalize_configured_endpoint_with_selector
+from plugin.framework.config_schema import get_manifest_modules, as_bool
 
 # get_stt_model / set_image_model / set_text_model stay inside the ai.* branches.
 # Importing them here pulls model_fetcher whenever ConfigService is imported.
@@ -211,7 +211,6 @@ class ConfigService(ServiceBase):
     def set(self, key: str, value: Any, caller_module: str | None = None) -> None:
         """Set a config value."""
         self._check_write_access(key, caller_module)
-        old_value = self.get(key)
 
         # Simple mapping: ai.<field> keys from the AI Options page should write
         # into the corresponding top-level settings (endpoint, model, etc.).
@@ -227,14 +226,8 @@ class ConfigService(ServiceBase):
 
             if field in AI_SIMPLE_FIELDS:
                 if field == "endpoint":
-                    from plugin.chatbot.config_ui_helpers import endpoint_from_selector_text
-
-                    # str(None) is the literal "None". That is not an endpoint,
-                    # and set_config would store it. An empty string fails below.
                     endpoint_text = "" if value is None else str(value)
-                    resolved = endpoint_from_selector_text(endpoint_text)
-                    # An empty resolve is a failure. Returning without writing
-                    # looks like success to the caller.
+                    resolved = _normalize_configured_endpoint_with_selector(endpoint_text, as_bool(get_config("is_openwebui")))
                     if not resolved:
                         raise ConfigError("Endpoint text did not resolve to a URL", "CONFIG_INVALID_ENDPOINT", details={"value": value})
                     set_config("endpoint", resolved, event_key=key)
@@ -260,21 +253,19 @@ class ConfigService(ServiceBase):
         # this method emits the one event below (old_value is the manifest
         # default, not the store's missing-key None).
         if self._config_path:
+            # The production read existed to heal via GET before the write,
+            # and the test bus is now the only caller that needs the pre-write value.
+            old_value = self.get(key)
 
             def _replace(_current: Any) -> Any:
                 return value
 
-            try:
-                changed = _config_store.apply(
-                    self._config_path,
-                    [(key, _replace)],
-                    emit=False,
-                    fail_on_unrepairable=False,
-                )
-            except ConfigValidationError:
-                raise
-            except ConfigError:
-                raise
+            changed = _config_store.apply(
+                self._config_path,
+                [(key, _replace)],
+                emit=False,
+                fail_on_unrepairable=False,
+            )
 
             if changed:
                 bus = self._events or global_event_bus
@@ -287,9 +278,30 @@ class ConfigService(ServiceBase):
     def remove(self, key: str, caller_module: str | None = None) -> None:
         """Reset a config key."""
         self._check_write_access(key, caller_module)
+
+        # What was wrong: ConfigService.remove("ai.*") did not mirror get/set
+        # mappings. ai.api_key did not clear the endpoint slot, ai.stt_model
+        # left audio.stt_model, and other fields only cleared by accidental suffix pop.
+        # How it happened: remove() passed the literal key directly to remove_config.
+        # Why this change fixes it: It mirrors set()'s mapping, clearing the API
+        # key slot or removing the mapped canonical key with event_key=key.
+        if key.startswith("ai."):
+            field = key.split(".", 1)[1]
+            if field == "api_key":
+                endpoint = get_current_endpoint()
+                set_api_key_for_endpoint(endpoint, "", event_key=key)
+                return
+            if field in AI_SIMPLE_FIELDS:
+                if field == "stt_model":
+                    remove_config("audio.stt_model", event_key=key)
+                else:
+                    remove_config(field, event_key=key)
+                return
+
         if self._config_path:
             # Same store as production remove_config. emit=False so this
             # method emits the one event (test files have no UNO ctx).
+            old_value = self.get(key)
             try:
                 changed = _config_store.remove(self._config_path, key, emit=False)
             except ConfigError as e:
@@ -297,7 +309,7 @@ class ConfigService(ServiceBase):
                 return
             if changed:
                 bus = self._events or global_event_bus
-                bus.emit("config:changed", key=key, value=None, old_value=None, ctx=None)
+                bus.emit("config:changed", key=key, value=None, old_value=old_value, ctx=None)
         else:
             remove_config(key)
 
