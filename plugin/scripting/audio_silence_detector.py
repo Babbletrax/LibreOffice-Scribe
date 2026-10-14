@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import struct
 from dataclasses import dataclass
 
@@ -29,13 +30,13 @@ log = logging.getLogger(__name__)
 
 # Algorithm tuning (not user config — adjust here if mic edge cases appear).
 MIN_SPEECH_MS = 500
+SPEECH_ONSET_MS = 200
 MIN_SILENCE_FLOOR = 0.003
+LOUD_ONSET_RMS = 0.03
 SPEECH_HYSTERESIS_FACTOR = 1.8
-PEAK_SPEECH_MULTIPLIER = 2.5
+PEAK_SILENCE_FACTOR = 1.5
 NOISE_FLOOR_MULTIPLIER = 1.5
-SILENCE_EMA_ALPHA = 0.1
-BOOTSTRAP_SPEECH_RMS = 0.008
-BOOTSTRAP_SPEECH_PEAK = 0.03
+NOISE_EMA_TAU_SEC = 0.25
 DEFAULT_SILENCE_STOP_MS = 3000
 
 
@@ -52,6 +53,8 @@ class SilenceDetectorConfig:
 
 @dataclass(frozen=True)
 class SilenceDetectorResult:
+    """One chunk's classification plus the running speech and silence counters."""
+
     rms: float
     peak: float
     is_speech: bool
@@ -111,11 +114,12 @@ class SilenceDetector:
     _sample_rate: int
     _silence_ms: int
     _speech_ms: int
-    _silence_threshold: float
-    _speech_threshold: float
-    _thresholds_frozen: bool
+    _noise_ema: float | None
+    _run_samples: int
+    _run_committed: bool
+    _speech_samples: int
+    _silence_samples: int
     _last_reported_silence_ms: int
-    _in_speech: bool
     _session_max_rms: float
     _session_max_peak: float
 
@@ -124,12 +128,12 @@ class SilenceDetector:
         self._sample_rate = sample_rate
         self._silence_ms = 0
         self._speech_ms = 0
-        self._silence_threshold = MIN_SILENCE_FLOOR
-        self._speech_threshold = MIN_SILENCE_FLOOR * SPEECH_HYSTERESIS_FACTOR
-        self._silence_ema: float | None = None
-        self._thresholds_frozen = False
+        self._noise_ema = None
+        self._run_samples = 0
+        self._run_committed = False
+        self._speech_samples = 0
+        self._silence_samples = 0
         self._last_reported_silence_ms = -1
-        self._in_speech = False
         self._session_max_rms = 0.0
         self._session_max_peak = 0.0
 
@@ -137,46 +141,80 @@ class SilenceDetector:
     def silence_ms(self) -> int:
         return self._silence_ms
 
-    def process_chunk(self, pcm: bytes, *, frame_count: int) -> SilenceDetectorResult:
+    @property
+    def _silence_threshold(self) -> float:
+        if self._noise_ema is None:
+            return MIN_SILENCE_FLOOR
+        return max(MIN_SILENCE_FLOOR, self._noise_ema * NOISE_FLOOR_MULTIPLIER)
+
+    @property
+    def _speech_threshold(self) -> float:
+        return self._silence_threshold * SPEECH_HYSTERESIS_FACTOR
+
+    def process_chunk(self, pcm: bytes) -> SilenceDetectorResult:
         # crosshair: off  # stateful RMS/float SMT wrapping already-off pcm_energy_int16 (cover-all 33337516899: 52k lines, 3205 examples). Doable later with a tiny PCM/frame domain.
         if not self._config.enabled:
             return SilenceDetectorResult(
                 rms=0.0, peak=0.0, is_speech=False, silence_ms=0, speech_ms=0, should_stop=False, heard_speech=False
             )
 
-        duration_ms = int(frame_count * 1000 / self._sample_rate) if frame_count > 0 else 0
+        sample_count = len(pcm) // 2
+        if sample_count == 0:
+            heard_speech = self._speech_ms >= MIN_SPEECH_MS
+            should_stop = heard_speech and self._silence_ms >= self._config.silence_stop_ms
+            return SilenceDetectorResult(
+                rms=0.0,
+                peak=0.0,
+                is_speech=False,
+                silence_ms=self._silence_ms,
+                speech_ms=self._speech_ms,
+                should_stop=should_stop,
+                heard_speech=heard_speech,
+            )
+
         rms, peak = pcm_energy_int16(pcm)
         self._session_max_rms = max(self._session_max_rms, rms)
         self._session_max_peak = max(self._session_max_peak, peak)
 
+        # The old code froze the 0.003 floor on the first chunk at or above 0.0054,
+        # including ordinary room noise, so later noise was still speech and auto-stop
+        # never fired. This classifies only energy at or above LOUD_ONSET_RMS, or
+        # energy above the floor learned from quieter chunks, and it ignores runs
+        # shorter than SPEECH_ONSET_MS.
         is_speech = self._is_speech(rms, peak)
-        if not is_speech and self._speech_ms == 0 and not self._thresholds_frozen:
-            self._adapt_pre_speech_floor(rms)
+        self._adapt_floor(rms, is_speech, sample_count)
 
         if is_speech:
-            if not self._in_speech:
-                self._in_speech = True
-                self._last_reported_silence_ms = -1
-                self._thresholds_frozen = True
-                log.info(
-                    "audio VAD: speech started (rms=%.4f peak=%.4f silence_thr=%.4f speech_thr=%.4f)",
-                    rms,
-                    peak,
-                    self._silence_threshold,
-                    self._speech_threshold,
-                )
-            self._speech_ms += duration_ms
-            self._silence_ms = 0
+            self._run_samples += sample_count
+            if self._run_samples * 1000 >= SPEECH_ONSET_MS * self._sample_rate:
+                if not self._run_committed:
+                    self._speech_samples += self._run_samples
+                    self._run_committed = True
+                    self._last_reported_silence_ms = -1
+                    log.info(
+                        "audio VAD: speech started (rms=%.4f peak=%.4f silence_thr=%.4f speech_thr=%.4f)",
+                        rms,
+                        peak,
+                        self._silence_threshold,
+                        self._speech_threshold,
+                    )
+                else:
+                    self._speech_samples += sample_count
+                self._silence_samples = 0
         else:
-            if self._in_speech:
-                self._in_speech = False
+            if self._run_committed:
                 log.info(
                     "audio VAD: speech ended (speech_ms=%d rms=%.4f peak=%.4f)",
                     self._speech_ms,
                     rms,
                     peak,
                 )
-            self._silence_ms += duration_ms
+            self._run_samples = 0
+            self._run_committed = False
+            self._silence_samples += sample_count
+
+        self._speech_ms = self._speech_samples * 1000 // self._sample_rate
+        self._silence_ms = self._silence_samples * 1000 // self._sample_rate
 
         heard_speech = self._speech_ms >= MIN_SPEECH_MS
         should_stop = heard_speech and self._silence_ms >= self._config.silence_stop_ms
@@ -224,25 +262,28 @@ class SilenceDetector:
             return True
         return False
 
-    def _adapt_pre_speech_floor(self, rms: float) -> None:
-        if self._silence_ema is None:
-            self._silence_ema = rms
-        else:
-            alpha = SILENCE_EMA_ALPHA
-            self._silence_ema = (1.0 - alpha) * self._silence_ema + alpha * rms
-        self._silence_threshold = max(MIN_SILENCE_FLOOR, self._silence_ema * NOISE_FLOOR_MULTIPLIER)
-        self._speech_threshold = self._silence_threshold * SPEECH_HYSTERESIS_FACTOR
+    def _adapt_floor(self, rms: float, is_speech: bool, sample_count: int) -> None:
+        if is_speech:
+            return
+        if self._noise_ema is None:
+            self._noise_ema = rms
+            return
+        if rms < self._noise_ema:
+            self._noise_ema = rms
+            return
+        dt = sample_count / self._sample_rate
+        alpha = 1.0 - math.exp(-dt / NOISE_EMA_TAU_SEC)
+        self._noise_ema = (1.0 - alpha) * self._noise_ema + alpha * rms
 
     def _is_speech(self, rms: float, peak: float) -> bool:
-        silence_thr = self._silence_threshold
-        speech_thr = self._speech_threshold
-        peak_thr = max(silence_thr * PEAK_SPEECH_MULTIPLIER, 0.02)
-
-        if rms >= speech_thr or peak >= peak_thr:
+        if rms >= LOUD_ONSET_RMS:
             return True
-        if rms <= silence_thr and peak <= silence_thr * 1.5:
+        if self._noise_ema is None:
             return False
-        if self._speech_ms == 0 and self._silence_ms == 0:
-            return rms >= BOOTSTRAP_SPEECH_RMS or peak >= BOOTSTRAP_SPEECH_PEAK
-        # Ambiguous band: stay in speech only while this segment has not yet counted silence.
-        return self._speech_ms > 0 and self._silence_ms == 0
+        silence_thr = max(MIN_SILENCE_FLOOR, self._noise_ema * NOISE_FLOOR_MULTIPLIER)
+        speech_thr = silence_thr * SPEECH_HYSTERESIS_FACTOR
+        if rms >= speech_thr:
+            return True
+        if rms <= silence_thr and peak <= silence_thr * PEAK_SILENCE_FACTOR:
+            return False
+        return self._run_committed

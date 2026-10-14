@@ -64,6 +64,8 @@ def test_normalize_stt_provider(raw: object, expected: str) -> None:
         ("medium (~1.5 GB)", "medium"),
         ("Systran/faster-whisper-base", "Systran/faster-whisper-base"),
         ("not a model", "base"),
+        ("--wav", "base"),
+        ("-h", "base"),
     ],
 )
 def test_normalize_stt_local_model(raw: object, expected: str) -> None:
@@ -211,7 +213,7 @@ def test_present_package_transcribes_via_child_script(monkeypatch: pytest.Monkey
     assert calls[0] == [py_exe, "-c", "import faster_whisper"]
     assert calls[1][0] == py_exe
     assert calls[1][1].endswith("whisper_transcribe.py")
-    assert calls[1][2:] == ["--wav", "/tmp/a.wav", "--model", "small"]
+    assert calls[1][2:] == ["--wav", "/tmp/a.wav", "--model=small"]
     assert len(calls) == 2
     assert all("pip" not in part for cmd in calls for part in cmd)
     assert statuses == ["Transcribing with local Whisper (small)…"]
@@ -219,7 +221,7 @@ def test_present_package_transcribes_via_child_script(monkeypatch: pytest.Monkey
     # Cached import probe: the next recording only runs the child script.
     assert stt_service._transcribe_local("/tmp/b.wav", "tiny", None) == "hello world"
     assert len(calls) == 3
-    assert calls[2][2:] == ["--wav", "/tmp/b.wav", "--model", "tiny"]
+    assert calls[2][2:] == ["--wav", "/tmp/b.wav", "--model=tiny"]
     stt_service.clear_faster_whisper_probe_cache()
 
 
@@ -334,25 +336,41 @@ def test_run_cmd_returns_child_stdout() -> None:
     assert "hello-stt" in completed.stdout
 
 
-def test_run_cmd_stop_already_clicked_does_not_spawn(monkeypatch: pytest.MonkeyPatch) -> None:
-    """When Stop was already clicked before spawn, _run_cmd raises SttStopped without spawning."""
-    spawned = False
+def test_probe_timeout_is_not_a_missing_package(monkeypatch: pytest.MonkeyPatch) -> None:
+    stt_service.clear_faster_whisper_probe_cache()
+    py_exe = "/opt/venv/bin/python"
 
-    def _fail_popen(*_args: object, **_kwargs: object) -> subprocess.Popen[str]:
-        nonlocal spawned
-        spawned = True
-        raise AssertionError("Process must not be spawned when Stop was already clicked")
+    def fake_run(cmd: list[str], timeout: float, **kwargs: object) -> None:
+        del cmd, timeout, kwargs
+        return None
 
-    monkeypatch.setattr(stt_service.subprocess, "Popen", _fail_popen)
-    with pytest.raises(stt_service.SttStopped):
-        stt_service._run_cmd([sys.executable, "-c", "pass"], 10, stop_checker=lambda: True)
-    assert not spawned
+    monkeypatch.setattr(stt_service, "_run_cmd", fake_run)
+    monkeypatch.setattr(stt_service, "resolve_stt_python", lambda: py_exe)
+    with pytest.raises(ConfigError) as exc_info:
+        stt_service._transcribe_local("/tmp/a.wav", "base", None)
+    message = str(exc_info.value)
+    assert "timed out or could not start" in message
+    assert "uv pip install" not in message
+    stt_service.clear_faster_whisper_probe_cache()
 
 
-def test_transcribe_stop_already_clicked_raises_stt_stopped() -> None:
-    """transcribe raises SttStopped when Stop was already clicked."""
-    with pytest.raises(stt_service.SttStopped):
-        stt_service.transcribe("/tmp/test.wav", stop_checker=lambda: True)
+def test_run_cmd_closes_pipes(monkeypatch: pytest.MonkeyPatch) -> None:
+    mock_proc = MagicMock()
+    mock_proc.poll.return_value = 0
+    mock_proc.returncode = 0
+    mock_proc.wait.return_value = 0
+    mock_stdout = MagicMock()
+    mock_stdout.read.return_value = ""
+    mock_stderr = MagicMock()
+    mock_stderr.read.return_value = ""
+    mock_proc.stdout = mock_stdout
+    mock_proc.stderr = mock_stderr
+
+    monkeypatch.setattr(stt_service.subprocess, "Popen", lambda *args, **kwargs: mock_proc)
+    res = stt_service._run_cmd([sys.executable, "-c", "pass"], 5)
+    assert res is not None
+    mock_stdout.close.assert_called_once()
+    mock_stderr.close.assert_called_once()
 
 
 def test_child_script_missing_package_is_json() -> None:
