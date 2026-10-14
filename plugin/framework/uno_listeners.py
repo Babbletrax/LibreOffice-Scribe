@@ -180,34 +180,6 @@ else:
 # collected wrapper cannot suppress wrapping a later override.
 _CATCH_LOGGED_ATTR = "_writeragent_catch_and_log"
 
-# UNO bridge entry points that subclasses sometimes override on the class dict
-# (skipping the @_catch_and_log base method). Keep in sync with Base* methods.
-_UNO_CALLBACK_NAMES = frozenset(
-    {
-        "disposing",
-        "actionPerformed",
-        "itemStateChanged",
-        "textChanged",
-        "keyPressed",
-        "keyReleased",
-        "mousePressed",
-        "mouseReleased",
-        "mouseEntered",
-        "mouseExited",
-        "focusGained",
-        "focusLost",
-        "windowResized",
-        "windowMoved",
-        "windowShown",
-        "windowHidden",
-        "elementInserted",
-        "elementRemoved",
-        "elementReplaced",
-        "documentEventOccured",
-        "activeSpreadsheetChanged",
-    }
-)
-
 
 class ListenerBoundary(BaseException):
     """Signal that must leave a UNO listener. ``except Exception`` cannot catch it.
@@ -358,16 +330,19 @@ def _catch_and_log(func: Any, failure: Any = _UNSET) -> Any:
 class BaseListener(_BaseParent, _XEventListenerParent):
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
-        # Wrap that override once. UNO calls disposing, not on_disposing.
-        # A subclass that overrides disposing() skips @_catch_and_log, so
-        # an exception before its own try enters the C++ bridge. The base
-        # method is already wrapped.
-        #
-        # Same hole for itemStateChanged / textChanged / etc.: Settings and
-        # MCP listeners inherit BaseListener and define those methods on the
-        # class dict, replacing the wrapped BaseItemListener / BaseTextListener
-        # methods. Wrap every UNO callback present on cls.__dict__.
-        for name in _UNO_CALLBACK_NAMES:
+        # What was wrong: a hand-maintained frozenset missed new callbacks, so a
+        # subclass override entered the bridge without _catch_and_log.
+        # How it happened: adding or wrapping new listener methods required updating _UNO_CALLBACK_NAMES.
+        # Why this change: discover callback names dynamically from base classes on the MRO with _CATCH_LOGGED_ATTR.
+        callback_names: set[str] = set()
+        for base in cls.__mro__:
+            if base is cls:
+                continue
+            for name, attr in base.__dict__.items():
+                if getattr(attr, _CATCH_LOGGED_ATTR, False):
+                    callback_names.add(name)
+
+        for name in callback_names:
             method = cls.__dict__.get(name)
             if method is None or getattr(method, _CATCH_LOGGED_ATTR, False):
                 continue

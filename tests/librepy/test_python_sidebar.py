@@ -64,7 +64,7 @@ def test_format_runtime_status_isolated_embedded():
         patch("plugin.librepy.python_sidebar.python_session_mode", return_value="isolated"),
         patch("plugin.librepy.python_sidebar.get_config_str", return_value=""),
     ):
-        text = format_runtime_status(ctx, None)
+        text = format_runtime_status(ctx)
     assert "Isolated" in text
     assert "embedded" in text.lower() or "LibreOffice" in text
 
@@ -76,9 +76,10 @@ def test_format_runtime_status_shared_with_venv():
         patch("plugin.librepy.python_sidebar.get_config_str", return_value="/tmp/myvenv"),
         patch("plugin.librepy.python_sidebar.resolve_venv_python", return_value="/tmp/myvenv/bin/python"),
     ):
-        text = format_runtime_status(ctx, None)
+        text = format_runtime_status(ctx)
     assert "Shared" in text
     assert "/tmp/myvenv" in text
+
 
 
 def test_workbook_key_for_doc_uses_session_id():
@@ -489,7 +490,149 @@ def test_calc_document_refreshes_calc_panel_and_returns_none_for_writer_frame():
     ):
         doc = ctrl._calc_document()
         assert doc is None
-        assert ctrl._calc_panel is False
+        assert ctrl._calc_panel is True
         mock_ctx_doc.assert_not_called()
+
+
+def test_filter_msgids_translate_at_call():
+    from plugin.librepy.python_sidebar import _FILTER_MSGIDS, _filter_choices
+
+    assert _FILTER_MSGIDS[0][0] == "All"
+    with patch("plugin.librepy.python_sidebar._", side_effect=lambda s: f"T:{s}"):
+        assert _filter_choices()[0] == ("T:All", "all")
+
+
+def test_filter_from_combo_matches_translation_and_msgid():
+    from plugin.librepy.python_sidebar import _filter_from_combo
+
+    with patch("plugin.librepy.python_sidebar._", side_effect=lambda s: f"T:{s}"):
+        combo1 = MagicMock()
+        combo1.getText.return_value = "T:Errors"
+        assert _filter_from_combo(combo1) == "errors"
+
+        combo2 = MagicMock()
+        combo2.getText.return_value = "Errors"
+        assert _filter_from_combo(combo2) == "errors"
+
+
+def test_schedule_refresh_coalesces_until_posted_run():
+    from plugin.librepy.python_sidebar import PythonSidebarController
+
+    ctrl = PythonSidebarController.__new__(PythonSidebarController)
+    ctrl._disposed = False
+    ctrl._refresh_pending = False
+    refresh_calls = 0
+
+    def mock_refresh():
+        nonlocal refresh_calls
+        refresh_calls += 1
+
+    ctrl.refresh = mock_refresh
+
+    posted = []
+    with patch("plugin.framework.queue_executor.post_to_main_thread", side_effect=posted.append):
+        ctrl._schedule_refresh()
+        ctrl._schedule_refresh()
+        assert len(posted) == 1
+        assert ctrl._refresh_pending is True
+
+        # Running the stored callable calls refresh once and clears _refresh_pending
+        fn = posted.pop(0)
+        fn()
+        assert refresh_calls == 1
+        assert ctrl._refresh_pending is False
+
+        # A third _schedule_refresh posts again
+        ctrl._schedule_refresh()
+        assert len(posted) == 1
+        assert ctrl._refresh_pending is True
+
+
+def test_scheduled_refresh_skipped_after_dispose():
+    from plugin.librepy.python_sidebar import PythonSidebarController
+
+    ctrl = PythonSidebarController.__new__(PythonSidebarController)
+    ctrl._disposed = False
+    ctrl._refresh_pending = False
+    mock_refresh = MagicMock()
+    ctrl.refresh = mock_refresh
+    ctrl._store = MagicMock()
+    ctrl._on_diag = object()
+    ctrl._activation_listener = None
+    ctrl.frame = MagicMock()
+    ctrl.resize_listener = None
+
+    posted = []
+    with patch("plugin.framework.queue_executor.post_to_main_thread", side_effect=posted.append):
+        ctrl._schedule_refresh()
+        assert len(posted) == 1
+
+        ctrl.disposing()
+        assert ctrl._disposed is True
+
+        fn = posted.pop(0)
+        fn()
+        mock_refresh.assert_not_called()
+
+
+def test_refresh_keeps_selected_diagnostic():
+    from plugin.librepy.python_sidebar import PythonSidebarController, DiagnosticEntry
+
+    ctrl = PythonSidebarController.__new__(PythonSidebarController)
+    ctrl._disposed = False
+    ctrl._calc_panel = True
+    ctrl.ctx = MagicMock()
+    ctrl.frame = MagicMock()
+    fake_doc = MagicMock()
+    ctrl._calc_document = MagicMock(return_value=fake_doc)
+    ctrl._frame_is_calc = MagicMock(return_value=True)
+
+    entry_a = DiagnosticEntry(workbook_key="k1", code="code_a", status="ok", timestamp=100.0, address="Sheet1.A1")
+    entry_b = DiagnosticEntry(workbook_key="k1", code="code_b", status="error", message="err_b", timestamp=200.0, address="Sheet1.B1")
+    entry_new = DiagnosticEntry(workbook_key="k1", code="code_c", status="ok", timestamp=300.0, address="Sheet1.C1")
+
+    ctrl._diags = [entry_a, entry_b]
+    ctrl._cells = []
+    ctrl._suppress_diag_nav = False
+
+    diag_ctrl = MagicMock()
+    diag_ctrl.getSelectedItemPos.return_value = 1  # entry_b was selected at index 1
+    detail_ctrl = MagicMock()
+    filter_combo = MagicMock()
+    filter_combo.getText.return_value = "All"
+    status_ctrl = MagicMock()
+    cells_list = MagicMock()
+
+    controls = {
+        "status": status_ctrl,
+        "cells_list": cells_list,
+        "diag_list": diag_ctrl,
+        "diag_detail": detail_ctrl,
+        "filter_combo": filter_combo,
+    }
+    ctrl._ctrl = lambda name: controls.get(name, MagicMock())
+
+    ctrl._store = MagicMock()
+    # Rebuild with the same entries plus a newer one at index 0
+    ctrl._store.list_entries.return_value = [entry_new, entry_a, entry_b]
+
+    # Verify navigation does not run during selectItemPos
+    def on_select_item(pos, sel):
+        assert ctrl._suppress_diag_nav is True
+    diag_ctrl.selectItemPos.side_effect = on_select_item
+
+    with (
+        patch("plugin.librepy.python_sidebar.list_python_cells_in_doc", return_value=[]),
+        patch("plugin.librepy.python_sidebar.format_runtime_status", return_value="status_txt"),
+    ):
+        ctrl.refresh()
+
+    assert ctrl._suppress_diag_nav is False
+    # entry_b was moved to index 2; selectItemPos was called with the restored index 2
+    diag_ctrl.selectItemPos.assert_called_once_with(2, True)
+    # Detail text is the previously selected entry (entry_b), not _diags[0] (entry_new)
+    assert "err_b" in str(detail_ctrl.setText.call_args)
+    assert "code_c" not in str(detail_ctrl.setText.call_args)
+
 
 
