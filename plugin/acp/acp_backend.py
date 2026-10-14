@@ -32,7 +32,7 @@ from typing import Any, Optional, Dict, List, Tuple
 
 from plugin.acp.base import AgentBackend
 from plugin.acp.acp_connection import ACPConnection
-from plugin.framework.async_stream import StreamQueueKind
+from plugin.framework.stream_batch import StreamQueueKind
 from plugin.framework.errors import format_error_payload
 from plugin.framework.worker_pool import run_in_background
 from plugin.version import EXTENSION_VERSION

@@ -9,7 +9,8 @@ import queue
 
 import pytest
 
-from plugin.framework.async_stream import StreamQueueKind, run_stream_drain_loop
+from plugin.framework.stream_batch import StreamQueueKind
+from plugin.framework.async_stream import run_stream_drain_loop
 from tests.framework.stream_test_helpers import DummyToolkit
 
 

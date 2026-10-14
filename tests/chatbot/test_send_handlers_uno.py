@@ -12,7 +12,7 @@ import os
 from unittest.mock import MagicMock, patch
 
 from plugin.chatbot.send_handlers import SendHandlersMixin, _direct_image_source_arg
-from plugin.framework.async_stream import StreamQueueKind
+from plugin.framework.stream_batch import StreamQueueKind
 from plugin.testing_runner import native_test
 from plugin.tests.testing_utils import with_native_doc
 from plugin.writer.images.image_tools import insert_image_at_locator

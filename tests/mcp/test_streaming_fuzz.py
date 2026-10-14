@@ -2,7 +2,7 @@ import pytest
 import json
 from unittest.mock import MagicMock, patch
 
-from plugin.framework.async_stream import StreamQueueKind
+from plugin.framework.stream_batch import StreamQueueKind
 from plugin.framework.client.llm_client import LlmClient
 
 def _make_sse_lines(*chunks, done=True):

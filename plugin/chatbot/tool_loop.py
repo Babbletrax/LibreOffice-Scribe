@@ -24,7 +24,8 @@ if TYPE_CHECKING:
     from plugin.framework.client.llm_client import LlmClient
     from plugin.chatbot.panel import ChatSession
 
-from plugin.framework.async_stream import BatchingStreamQueue, StreamQueueKind, defer_until_drain_done, run_stream_drain_loop
+from plugin.framework.stream_batch import BatchingStreamQueue, StreamQueueKind
+from plugin.framework.async_stream import defer_until_drain_done, run_stream_drain_loop
 from plugin.framework.logging import agent_log, update_activity_state
 from plugin.framework.errors import format_error_message, is_disposed_exception, suppress_disposed, UnoObjectError
 from plugin.framework.client.errors import (
@@ -51,7 +52,6 @@ from plugin.framework.config_schema import as_bool
 
 from plugin.framework.worker_pool import run_in_background
 from plugin.framework.uno_context import get_toolkit
-from plugin.framework.i18n import _
 from plugin.chatbot.tool_loop_actions import (
     ToolLoopEffectInterpreter,
     TurnController,
@@ -651,7 +651,7 @@ class ToolCallingMixin:
                     if batched: batched.flush()
                     emit((StreamQueueKind.STREAM_DONE, response))
             except Exception as e:
-                from plugin.framework.async_stream import BlockingWaitStopped
+                from plugin.framework.blocking_wait import BlockingWaitStopped
                 if isinstance(e, BlockingWaitStopped):
                     if batched: batched.flush()
                     emit((StreamQueueKind.STOPPED,))
@@ -744,7 +744,7 @@ class ToolCallingMixin:
                     if batched: batched.flush()
                     emit((StreamQueueKind.FINAL_DONE, "".join(last_streamed)))
             except Exception as e:
-                from plugin.framework.async_stream import BlockingWaitStopped
+                from plugin.framework.blocking_wait import BlockingWaitStopped
                 if isinstance(e, BlockingWaitStopped):
                     if batched: batched.flush()
                     emit((StreamQueueKind.STOPPED,))
@@ -991,15 +991,9 @@ class ToolCallingMixin:
                 log.debug("Failed to read 'chatbot.show_search_thinking' from config: %s", e)
                 show_search_thinking = False
 
+            # Bugfix: toolkit None used to abort a chat that the event-driven drain does
+            # not pump; the first LLM worker used to start before the drain was armed.
             toolkit = get_toolkit(self.ctx)
-            if toolkit is None:
-
-                msg = "\n[" + _("Error: Toolkit unavailable") + "]\n"
-                self._append_response(msg)
-                persist_assistant_on_turn(self, content=msg.strip())
-                self._terminal_status = "Error"
-                self._set_status("Error")
-                return
 
             # Check once whether execute_tool_fn accepts status_callback
             sig = inspect.signature(execute_tool_fn)
@@ -1007,9 +1001,7 @@ class ToolCallingMixin:
 
             # --- Thinking display state (mirrors run_stream_drain_loop behavior) ---
 
-            # --- Kick off the first LLM stream (producer batching at 250 ms) ---
             self._refresh_active_tools_for_session()
-            self._spawn_llm_worker(spawn_queue(turn), self._active_client, self._active_max_tokens, self._active_tools, self._sm_state.round_num, query_text=self._active_query_text)
 
             def _flush_active_batcher() -> None:
                 # Stop used to clear this batcher in finally without a last
@@ -1030,6 +1022,14 @@ class ToolCallingMixin:
                 show_search_thinking=show_search_thinking,
                 on_approval_required=self._on_tool_loop_approval_required,
                 flush_pending=_flush_active_batcher,
+                on_drain_started=lambda: self._spawn_llm_worker(
+                    spawn_queue(turn),
+                    self._active_client,
+                    self._active_max_tokens,
+                    self._active_tools,
+                    self._sm_state.round_num,
+                    query_text=self._active_query_text,
+                ),
             )
 
             def _after_tool_drain() -> None:

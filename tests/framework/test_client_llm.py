@@ -1540,7 +1540,7 @@ def test_anthropic_does_not_merge_tool_result_into_user_text(client):
 
 
 def test_anthropic_stream_tool_use_accumulates(client):
-    from plugin.framework.async_stream import accumulate_delta
+    from plugin.framework.stream_delta import accumulate_delta
 
     events = [
         {"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "t1", "name": "do_work", "input": {}}},

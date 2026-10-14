@@ -63,7 +63,7 @@ from .base_provider_shim import merge_openrouter_chat_extra as merge_openrouter_
 from .response_normalizers import prepare_chat_messages, strip_leaked_chat_template_control_tokens
 
 # accumulate_delta merges streaming deltas into message_snapshot; coalesce_split_tool_calls repairs OpenRouter empty-name split tool_calls.
-from plugin.framework.async_stream import accumulate_delta, coalesce_split_tool_calls
+from plugin.framework.stream_delta import accumulate_delta, coalesce_split_tool_calls
 from plugin.framework.constants import USER_AGENT
 
 from plugin.framework.logging import init_logging, redact_sensitive_payload_for_log

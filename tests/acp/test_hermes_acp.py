@@ -16,7 +16,7 @@ from plugin.framework.worker_pool import run_in_background
 
 from plugin.chatbot.send_handlers import _agent_backend_label
 
-from plugin.framework.async_stream import StreamQueueKind
+from plugin.framework.stream_batch import StreamQueueKind
 from plugin.acp.acp_connection import ACPConnection, _Pending
 from plugin.acp.builtin import BuiltinBackend
 from plugin.acp.hermes_simple import HermesBackend

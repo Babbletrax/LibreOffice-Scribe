@@ -12,7 +12,7 @@ from unittest.mock import MagicMock, patch
 
 from plugin.acp.acp_backend import ACPBackend
 from plugin.acp.vibe_simple import VibeBackend
-from plugin.framework.async_stream import StreamQueueKind
+from plugin.framework.stream_batch import StreamQueueKind
 
 
 class TestVibeIdentity:

@@ -10,10 +10,8 @@ import time
 from unittest.mock import MagicMock, patch
 
 
-from plugin.framework.async_stream import (
-    StreamQueueKind,
-    run_stream_drain_loop,
-)
+from plugin.framework.stream_batch import StreamQueueKind
+from plugin.framework.async_stream import run_stream_drain_loop
 from plugin.framework.worker_pool import run_in_background
 from tests.framework.stream_test_helpers import DummyToolkit
 
@@ -347,26 +345,68 @@ def test_non_tuple_terminal_skips_wrapper_stream_done():
     _run(StreamQueueKind.STREAM_DONE)
 
 
-def test_run_async_worker_with_drain_toolkit_failure_formats_error():
-    """No-toolkit path must pass format_error_payload dict to on_error_fn."""
+def test_run_async_worker_with_drain_toolkit_none_still_runs():
+    """No-toolkit path runs normally without error."""
     from plugin.framework.async_stream import run_async_worker_with_drain
 
     ctx = MagicMock()
     errors = []
+    done_calls = []
+
+    def worker(q):
+        q.put((StreamQueueKind.STREAM_DONE, {"ok": True}))
 
     with patch("plugin.framework.uno_context.get_toolkit", return_value=None):
         run_async_worker_with_drain(
             ctx,
-            lambda _q: None,
+            worker,
             None,
-            None,
+            on_done_fn=lambda item: done_calls.append(item),
             on_error_fn=lambda err: errors.append(err),
             name="test-worker",
         )
 
-    assert len(errors) == 1
-    assert isinstance(errors[0], dict)
-    assert "Failed to create toolkit for test-worker" in errors[0].get("message", "")
+    assert errors == []
+    assert len(done_calls) == 1
+    assert done_calls[0] == (StreamQueueKind.STREAM_DONE, {"ok": True})
+
+
+def test_run_async_worker_with_drain_failed_event_arm_does_not_start_worker():
+    """When event arm fails, on_error_fn is called and the worker is never started."""
+    from plugin.framework.async_stream import run_async_worker_with_drain, set_drain_scheduler_override
+    from plugin.framework.async_drain_guard import reset_sentry_state
+
+    class _FailingPostRearm:
+        def __init__(self) -> None:
+            self.closed = 0
+
+        def post(self, fn: object) -> None:
+            raise RuntimeError("arm boom")
+
+        def post_after(self, delay: float, fn: object) -> None:
+            del delay, fn
+
+        def close(self) -> None:
+            self.closed += 1
+
+    worker_started = [False]
+    errors = []
+    prev_override = set_drain_scheduler_override(lambda: _FailingPostRearm())
+    reset_sentry_state()
+    try:
+        run_async_worker_with_drain(
+            MagicMock(),
+            lambda _q: worker_started.__setitem__(0, True),
+            None,
+            None,
+            on_error_fn=lambda err: errors.append(err),
+            name="failing-arm-worker",
+        )
+        assert worker_started[0] is False
+        assert len(errors) == 1
+    finally:
+        set_drain_scheduler_override(prev_override)
+        reset_sentry_state()
 
 
 def test_on_done_body_type_error_mentioning_positional_argument_is_not_retried():
