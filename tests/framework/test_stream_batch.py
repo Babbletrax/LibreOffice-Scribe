@@ -1,8 +1,7 @@
 import queue
 import threading
 
-from plugin.framework.async_stream import StreamQueueKind
-from plugin.framework.stream_batch import BatchingStreamQueue
+from plugin.framework.stream_batch import BatchingStreamQueue, StreamQueueKind
 
 
 def test_batching_stream_queue_basic_join_and_flush():
@@ -202,3 +201,33 @@ class TestBatchingStreamQueueTimerRace:
         assert len(timer_calls) == 1, (
             f"_schedule_timer was called {len(timer_calls)} times on THINKING path; expected 1."
         )
+
+
+def test_emit_pending_join_error_does_not_duplicate_earlier_run():
+    raw = queue.Queue()
+    bq = BatchingStreamQueue(raw, batch_interval=10.0)
+
+    bq.put((StreamQueueKind.CHUNK, "good"))
+    bq.put((StreamQueueKind.THINKING, 123))
+    bq.flush()
+
+    items = []
+    while not raw.empty():
+        items.append(raw.get_nowait())
+    assert items == [(StreamQueueKind.CHUNK, "good")]
+
+    bq.flush()
+    assert raw.empty()
+
+    # Second case: CHUNK "a", THINKING 123, CHUNK "b" after a kind switch
+    raw2 = queue.Queue()
+    bq2 = BatchingStreamQueue(raw2, batch_interval=10.0)
+    bq2.put((StreamQueueKind.CHUNK, "a"))
+    bq2.put((StreamQueueKind.THINKING, 123))
+    bq2.put((StreamQueueKind.CHUNK, "b"))
+    bq2.flush()
+
+    items2 = []
+    while not raw2.empty():
+        items2.append(raw2.get_nowait())
+    assert items2 == [(StreamQueueKind.CHUNK, "a"), (StreamQueueKind.CHUNK, "b")]

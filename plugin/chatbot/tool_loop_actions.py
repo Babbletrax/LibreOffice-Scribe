@@ -28,7 +28,7 @@ from plugin.chatbot.tool_loop_state import (
     UpdateActivityStateEffect,
     UpdateDocumentContextEffect,
 )
-from plugin.framework.async_stream import StreamQueueKind
+from plugin.framework.stream_batch import StreamQueueKind
 from plugin.framework.client.model_fetcher import set_native_audio_support
 from plugin.framework.html_stripper import StreamingHTMLStripper
 from plugin.framework.config import get_config_bool

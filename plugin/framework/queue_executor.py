@@ -401,7 +401,7 @@ def llm_request_lane(timeout: float | None = None, status_callback: Callable[[st
     while time.monotonic() < deadline:
         cancellation = get_current_send_cancellation()
         if cancellation and cancellation.is_cancelled():
-            from plugin.framework.async_stream import BlockingWaitStopped
+            from plugin.framework.blocking_wait import BlockingWaitStopped
             raise BlockingWaitStopped("stopped")
 
         if _LLM_REQUEST_LOCK.acquire(timeout=0.25):

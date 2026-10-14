@@ -525,7 +525,7 @@ def test_force_compact_skips_host_thinking_status(test_instance):
 
 def test_llm_worker_run_never_calls_set_status(test_instance):
     from plugin.chatbot.compaction import CompactResult
-    from plugin.framework.async_stream import StreamQueueKind
+    from plugin.framework.stream_batch import StreamQueueKind
 
     captured = {}
 
@@ -585,7 +585,7 @@ def test_llm_worker_run_never_calls_set_status(test_instance):
 
 def test_llm_worker_run_force_compact_and_aborted_stops(test_instance):
     from plugin.chatbot.compaction import CompactResult
-    from plugin.framework.async_stream import StreamQueueKind
+    from plugin.framework.stream_batch import StreamQueueKind
 
     captured = {}
 

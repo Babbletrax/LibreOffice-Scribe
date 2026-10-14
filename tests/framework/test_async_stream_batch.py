@@ -11,11 +11,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from plugin.framework.async_stream import (
-    BatchingStreamQueue,
-    StreamQueueKind,
-    run_stream_drain_loop,
-)
+from plugin.framework.stream_batch import BatchingStreamQueue, StreamQueueKind
+from plugin.framework.async_stream import run_stream_drain_loop
 from plugin.framework.worker_pool import run_in_background
 from tests.framework.stream_test_helpers import DummyToolkit
 

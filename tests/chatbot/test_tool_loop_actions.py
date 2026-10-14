@@ -17,7 +17,7 @@ from plugin.chatbot.tool_loop_state import (  # noqa: E402
     TriggerNextToolEffect,
     UpdateDocumentContextEffect,
 )
-from plugin.framework.async_stream import StreamQueueKind  # noqa: E402
+from plugin.framework.stream_batch import StreamQueueKind  # noqa: E402
 
 
 class FakeSession:
@@ -599,7 +599,7 @@ def test_clear_or_second_send_does_not_apply_chunks_onto_the_first_turn():
         persist_assistant_on_turn,
         put_for_turn,
     )
-    from plugin.framework.async_stream import StreamQueueKind
+    from plugin.framework.stream_batch import StreamQueueKind
 
     class Session:
         def __init__(self) -> None:
@@ -645,7 +645,7 @@ def test_abort_discards_a_late_write():
     import queue
 
     from plugin.chatbot.tool_loop_actions import abort_turn, begin_send_turn, put_for_turn
-    from plugin.framework.async_stream import StreamQueueKind
+    from plugin.framework.stream_batch import StreamQueueKind
 
     class Session:
         def __init__(self) -> None:
@@ -675,7 +675,7 @@ def test_second_send_replaces_the_turn():
     import queue
 
     from plugin.chatbot.tool_loop_actions import begin_send_turn, put_for_turn
-    from plugin.framework.async_stream import StreamQueueKind
+    from plugin.framework.stream_batch import StreamQueueKind
 
     class Session:
         def __init__(self) -> None:
@@ -1183,7 +1183,7 @@ def test_tool_worker_keeps_spawn_scope_after_next_send():
 def test_spawn_tool_worker_effect_respects_bound_stop(monkeypatch):
     from unittest.mock import MagicMock
     from plugin.chatbot.tool_loop_actions import ToolLoopEffectInterpreter, SpawnToolWorkerEffect
-    from plugin.framework.async_stream import StreamQueueKind
+    from plugin.framework.stream_batch import StreamQueueKind
 
     mock_host = MagicMock()
     mock_host._active_execute_tool_fn = MagicMock(return_value={"status": "ok"})
@@ -1342,7 +1342,7 @@ def test_cleanup_audio_handles_remove_failure(monkeypatch):
 def test_put_for_turn_signature_and_behavior():
     """put_for_turn takes (turn, item) and enqueues on alive turn or returns False when aborted."""
     from plugin.chatbot.tool_loop_actions import TurnController, put_for_turn
-    from plugin.framework.async_stream import StreamQueueKind
+    from plugin.framework.stream_batch import StreamQueueKind
 
     q = queue.Queue()
     turn = TurnController(None, "chat")

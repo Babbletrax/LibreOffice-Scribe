@@ -19,7 +19,8 @@ import logging
 from typing import TYPE_CHECKING, Protocol, Any, Callable, TypeVar
 
 from plugin.framework.i18n import _
-from plugin.framework.async_stream import StreamQueueKind, defer_until_drain_done, run_async_worker_with_drain
+from plugin.framework.stream_batch import StreamQueueKind
+from plugin.framework.async_stream import defer_until_drain_done, run_async_worker_with_drain
 from plugin.framework.blocking_wait import run_blocking_in_thread
 from plugin.framework.errors import (
     AgentParsingError,
@@ -801,7 +802,7 @@ class SendHandlersMixin:
                 with llm_request_lane(status_callback=status_cb, resume_status=_("Thinking...")):
                     adapter.send(queue=q, user_message=query_text, document_context=doc_context, document_url=document_url, system_prompt=lean_system_prompt, mcp_url=mcp_url, stop_checker=stop_checker)
             except Exception as e:
-                from plugin.framework.async_stream import BlockingWaitStopped
+                from plugin.framework.blocking_wait import BlockingWaitStopped
                 if isinstance(e, BlockingWaitStopped):
                     q.put((StreamQueueKind.STOPPED,))
                 else:
