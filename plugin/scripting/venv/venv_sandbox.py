@@ -81,6 +81,18 @@ def _record_isolated_init_access_unlocked(init_session_id: str) -> None:
 _CURRENT_SANDBOX_SESSION: ContextVar[str | None] = ContextVar(
     "sandbox_session_id", default=None
 )
+_CURRENT_SANDBOX_SCOPED_DIR: ContextVar[str | None] = ContextVar(
+    "sandbox_scoped_dir", default=None
+)
+
+
+def current_sandbox_scoped_dir() -> str | None:
+    """Host document folder for this sandboxed execute, or ``None``.
+
+    Set from the ``bindings`` argument, not from ``executor.state``.
+    A cell assignment to ``scoped_dir`` must not retarget the DuckDB jail.
+    """
+    return _CURRENT_SANDBOX_SCOPED_DIR.get()
 # Distinct from the session id: isolated executes set the id to None, and host
 # callers never enter run_sandboxed_code. DuckDB uses this to refuse a cell
 # that names another workbook's catalog.
@@ -1570,6 +1582,15 @@ def run_sandboxed_code(
     # init_session_id (calc:…:init); binding that would share DuckDB across cells.
     active_token = _SANDBOX_EXECUTE.set(True)
     token = _CURRENT_SANDBOX_SESSION.set(session_id)
+    # session_duckdb().execute does not receive scoped_dir; the jail reads
+    # this variable. It is set before _ensure_init_executed and _run_on_executor,
+    # so the timeout fallback's copy_context() already carries it.
+    host_folder: str | None = None
+    if isinstance(bindings, dict):
+        raw_folder = bindings.get("scoped_dir")
+        if isinstance(raw_folder, str) and raw_folder.strip():
+            host_folder = raw_folder
+    dir_token = _CURRENT_SANDBOX_SCOPED_DIR.set(host_folder)
     try:
         init_sid = init_session_id if isinstance(init_session_id, str) and init_session_id.strip() else None
         init_digest = _resolve_init_digest(init_script, init_script_hash)
@@ -1611,5 +1632,6 @@ def run_sandboxed_code(
         _inject_session_duckdb(executor)
         return _run_on_executor(executor, code)
     finally:
+        _CURRENT_SANDBOX_SCOPED_DIR.reset(dir_token)
         _CURRENT_SANDBOX_SESSION.reset(token)
         _SANDBOX_EXECUTE.reset(active_token)

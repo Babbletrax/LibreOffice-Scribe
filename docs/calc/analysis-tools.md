@@ -19,7 +19,7 @@ See [specialized-toolsets.md](specialized-toolsets.md) for delegation mechanics 
 - Available in analysis domain chat or Run Python Script → SQL Helpers.
 - Shared kernel: `session_duckdb()` / in-cell `query_folder_sql` reuse one catalog until Reset. Chat tools stay per-request.
 - **Row cap:** results longer than **200 rows** (`MAX_TABLE_ROWS`) set `truncated=true`, `total_rows`, `row_cap`, plus a `warning` / `flags` / `message` and `tables[0].truncated`. RPS writes the analysis-style “(showing first rows; N total)” note. This is not the full result — add `LIMIT` or aggregate.
-- **Firewall:** `COPY` / `EXPORT` / `ATTACH` / `INSTALL` / `LOAD` and path/URI escapes fail with `READONLY_VIOLATION`. In-memory `CREATE VIEW` / register stay allowed. Prefer `run_sql` / `session_duckdb()` from `=PY()` (same contract); raw `import duckdb` is unguarded.
+- **Firewall:** `COPY` / `EXPORT` / `ATTACH` / `DETACH` / `INSTALL` / `FORCE INSTALL` / `LOAD` / `SET` / `RESET` / `UPDATE EXTENSIONS` and path or URI escapes fail with `READONLY_VIOLATION`. Persistent sessions with a known document folder set `allowed_directories` to that folder and then turn off external access. In-memory `CREATE` / `UPDATE` / register stay allowed. Prefer `run_sql` / `session_duckdb()` from `=PY()`. `run_sql(sql)` returns the honesty dict; pass `files` or `preloaded` for an uncapped DataFrame. Raw `import duckdb` is unguarded.
 - **Ingress:** preloaded sheet/office grids fail loud at `scripting.python_max_data_cells` (table name + cell count), same as `=PY()`.
 Full plan and status: [duckdb-dev-plan.md](duckdb-dev-plan.md).
 

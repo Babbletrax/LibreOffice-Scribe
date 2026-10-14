@@ -100,6 +100,19 @@ def test_query_folder_sql_missing_package(monkeypatch, tmp_path):
     res = query_folder_sql(str(tmp_path), "select 1", [])
     assert res["status"] == "error"
     assert "MISSING_PACKAGE" in res["code"]
+    assert "query_folder_sql" in res["message"]
+
+
+def test_run_sql_missing_package_names_run_sql(monkeypatch, tmp_path):
+    real = __import__
+    def fake_import(name, *a, **k):
+        if name == "duckdb":
+            raise ImportError("no duckdb")
+        return real(name, *a, **k)
+    monkeypatch.setattr("builtins.__import__", fake_import)
+    with pytest.raises(SqlError, match="run_sql") as exc_info:
+        run_sql("select 1", files=["a.csv"], scoped_dir=str(tmp_path))
+    assert "query_folder_sql" not in str(exc_info.value)
 
 
 def test_query_folder_sql_requires_scoped_and_files(tmp_path):
@@ -1004,6 +1017,19 @@ def test_scanner_single_pass_tokenizer_regression():
     assert _looks_like_write_or_escape("CREATE SECRET sec (TYPE S3)") is True
     assert _looks_like_write_or_escape("CREATE OR REPLACE SECRET sec (TYPE S3)") is True
     assert _looks_like_write_or_escape("CREATE TEMPORARY SECRET sec (TYPE S3)") is True
+    assert _looks_like_write_or_escape("FORCE INSTALL httpfs") is True
+    assert _looks_like_write_or_escape("UPDATE EXTENSIONS") is True
+    assert _looks_like_write_or_escape("UPDATE EXTENSIONS (httpfs)") is True
+    assert _looks_like_write_or_escape("RESET allowed_directories") is True
+    assert _looks_like_write_or_escape("SELECT 1; RESET memory_limit") is True
+    assert _looks_like_write_or_escape("/* c */ FORCE INSTALL httpfs") is True
+    assert _looks_like_write_or_escape("UPDATE sales SET x = 1") is False
+    assert _looks_like_write_or_escape("SELECT reset FROM t") is False
+
+
+def test_double_quoted_read_csv_absolute_is_blocked():
+    assert _looks_like_write_or_escape('SELECT * FROM read_csv("/etc/passwd")') is True
+    assert _looks_like_write_or_escape('SELECT "/path/with/slash" FROM t') is True
 
 
 def test_defense_in_depth_external_access_lock(tmp_path: Path):
@@ -1096,5 +1122,109 @@ def test_host_duckdb_sql_exports_and_constants():
     assert host_duckdb.MAX_TABLE_ROWS == MAX_TABLE_ROWS
     assert str(MAX_TABLE_ROWS) in host_duckdb._SQL_ROW_CAP_NOTE
     assert "SqlError" in host_duckdb._SQL_VENV_EXPORTS
+
+
+def test_run_sql_scoped_dir_alone_is_honesty_dict(tmp_path: Path):
+    res = run_sql("SELECT 1 AS n", scoped_dir=str(tmp_path))
+    assert isinstance(res, dict)
+    assert res["status"] == "ok"
+    assert res["helper"] == "run_sql"
+    assert res["rows"] == [[1]]
+
+
+def test_injected_run_sql_uses_con_on_saved_doc(_clean_duckdb_sessions, tmp_path: Path):
+    from plugin.scripting.venv.venv_sandbox import run_sandboxed_code
+
+    code = """
+con = session_duckdb()
+con.execute("CREATE VIEW v AS SELECT 9 AS n")
+out = run_sql("SELECT n FROM v", con)
+result = [out["status"], out["rows"][0][0]]
+"""
+    res = run_sandboxed_code(
+        code,
+        session_id=None,
+        bindings={"scoped_dir": str(tmp_path)},
+    )
+    assert res["status"] == "ok", res
+    assert res["result"] == ["ok", 9]
+
+
+def test_injected_run_sql_copy_is_error_dict(_clean_duckdb_sessions, tmp_path: Path):
+    from plugin.scripting.venv.venv_sandbox import run_sandboxed_code
+
+    code = """
+out = run_sql("COPY (SELECT 1) TO 'out.csv'")
+result = [out["status"], out["code"], out["helper"]]
+"""
+    res = run_sandboxed_code(
+        code,
+        session_id="calc:test-copy",
+        bindings={"scoped_dir": str(tmp_path)},
+    )
+    assert res["status"] == "ok", res
+    assert res["result"] == ["error", "READONLY_VIOLATION", "run_sql"]
+
+
+def test_folder_mode_ignores_caller_connection(tmp_path: Path):
+    df = run_sql("SELECT 1 AS n", con=object(), files=[], scoped_dir=str(tmp_path))
+    assert len(df) == 1
+    assert int(df.iloc[0, 0]) == 1
+
+
+def test_saved_doc_jails_then_reads_sibling_csv(_clean_duckdb_sessions, tmp_path: Path):
+    from plugin.scripting.venv.venv_sandbox import run_sandboxed_code
+
+    _write_csv(tmp_path / "sales.csv", "val\n10\n")
+    code = """
+leaked = False
+try:
+    session_duckdb().execute("SELECT * FROM read_csv('etc/passwd')")
+    leaked = True
+except Exception:
+    leaked = False
+df = run_sql("SELECT val FROM sales", files=["sales.csv"])
+result = [leaked, int(df.iloc[0, 0])]
+"""
+    res = run_sandboxed_code(
+        code,
+        session_id="calc:jail-then-read",
+        bindings={"scoped_dir": str(tmp_path)},
+    )
+    assert res["status"] == "ok", res
+    assert res["result"] == [False, 10]
+
+
+def test_persist_without_folder_still_reads_files_later(_clean_duckdb_sessions, tmp_path: Path):
+    _write_csv(tmp_path / "sales.csv", "val\n42\n")
+    sid = "calc:no-folder-then-file"
+    session_duckdb(session_id=sid).execute("CREATE TABLE mem AS SELECT 1 AS x")
+    res1 = query_folder_sql(str(tmp_path), "SELECT val FROM 'sales.csv'", files=["sales.csv"], session_id=sid)
+    assert res1["status"] == "ok", res1
+    assert res1["rows"][0][0] == 42
+    res2 = query_folder_sql(None, "SELECT x FROM mem", session_id=sid)
+    assert res2["status"] == "ok", res2
+    assert res2["rows"][0][0] == 1
+
+
+def test_old_duckdb_persist_skips_jail(_clean_duckdb_sessions, tmp_path: Path, monkeypatch):
+    from plugin.scripting.venv.venv_sandbox import run_sandboxed_code
+
+    monkeypatch.setattr("plugin.scripting.venv.duckdb_sql._duckdb_version_tuple", lambda: (1, 2))
+    code = "result = session_duckdb().execute(\"SELECT current_setting('enable_external_access')\").fetchone()[0]"
+    res = run_sandboxed_code(
+        code,
+        session_id="calc:old-duckdb",
+        bindings={"scoped_dir": str(tmp_path)},
+    )
+    assert res["status"] == "ok", res
+    assert res["result"] is True
+
+
+def test_files_used_drops_duplicate_basename(tmp_path: Path):
+    _write_csv(tmp_path / "item.csv", "id\n1\n")
+    res = query_folder_sql(str(tmp_path), "SELECT 1", files=["item.csv"])
+    assert res["status"] == "ok", res
+    assert res["files_used"] == ["item.csv", "item"]
 
 
