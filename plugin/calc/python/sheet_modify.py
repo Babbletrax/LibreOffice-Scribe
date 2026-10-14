@@ -23,10 +23,11 @@ sheet, not whichever component is currently active.
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import logging
 import threading
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Iterator
 
 import unohelper
 from com.sun.star.util import XModifyListener
@@ -37,27 +38,38 @@ log = logging.getLogger(__name__)
 # The file URL is empty for every unsaved workbook and changes on Save-As.
 _PENDING_TIMERS: dict[tuple[str, str], threading.Timer] = {}
 _PENDING_LOCK = threading.Lock()
-# setFormula / clearContents during a pass re-enters modified(); skip.
-_DISPATCHING = False
+# Modify dispatch depth: prevents re-entrant modified() dispatch during pass or spill writes.
+_DISPATCH_DEPTH = 0
 _MODIFY_DELAY_SEC = 0.1
+
+
+@contextmanager
+def sheet_modify_scope() -> Iterator[None]:
+    """Track sheet modify re-entrancy depth across operations."""
+    global _DISPATCH_DEPTH
+    _DISPATCH_DEPTH += 1
+    try:
+        yield
+    finally:
+        _DISPATCH_DEPTH -= 1
 
 
 def reset_sheet_modify_runtime_for_tests() -> None:
     """Drop debounce timers and the re-entrancy flag. Tests only."""
-    global _DISPATCHING
+    global _DISPATCH_DEPTH
     with _PENDING_LOCK:
-        for timer in _PENDING_TIMERS.values():
+        for timer in list(_PENDING_TIMERS.values()):
             try:
                 timer.cancel()
             except Exception:
                 pass
         _PENDING_TIMERS.clear()
-    _DISPATCHING = False
+    _DISPATCH_DEPTH = 0
 
 
 def is_sheet_modify_dispatching() -> bool:
-    """True while a debounced pass is applying UNO writes."""
-    return _DISPATCHING
+    """True while a debounced pass or spill write is applying UNO writes."""
+    return _DISPATCH_DEPTH > 0
 
 
 def _sheet_key(doc_identity: str, sheet_name: str) -> tuple[str, str]:
@@ -206,6 +218,9 @@ def migrate_sheet_rename(
     if not old_sheet_name or not new_sheet_name or old_sheet_name == new_sheet_name:
         return
 
+    # Bugfix: What was wrong: migrate_sheet_rename migrated keys across unrelated workbooks when doc_key or identity was empty.
+    # How it happened: The filter expression used (not doc_key or k[0] in ...) and (not identity or ...), treating an empty identity as a wildcard matching all keys.
+    # Why this change fixes it: We collect non-empty IDs; if no valid IDs exist for the document, we log a warning and skip that map without rekeying other workbooks' entries.
     identity = _doc_identity(doc) if doc is not None else ""
     url = _doc_url_of(doc) if doc is not None else ""
 
@@ -222,40 +237,52 @@ def migrate_sheet_rename(
         )
 
         doc_key = _spill_registry_doc_key(doc) if doc is not None else ""
-        with _SPILL_REGISTRY_LOCK:
-            keys_to_migrate = [
-                k for k in list(SPILL_REGISTRY.keys())
-                if k[1] == old_sheet_name and (not doc_key or k[0] in (doc_key, identity, url))
-            ]
-            for k in keys_to_migrate:
-                val = SPILL_REGISTRY.pop(k)
-                SPILL_REGISTRY[(k[0], new_sheet_name, k[2], k[3])] = val
-        if doc is not None:
-            save_spill_registry_for_doc(doc)
+        spill_ids = {x for x in (doc_key, identity, url) if x}
+        if not spill_ids:
+            log.warning("migrate_sheet_rename: no workbook identity found; skipping SPILL_REGISTRY migration")
+        else:
+            with _SPILL_REGISTRY_LOCK:
+                keys_to_migrate = [
+                    k for k in list(SPILL_REGISTRY.keys())
+                    if k[1] == old_sheet_name and k[0] in spill_ids
+                ]
+                for k in keys_to_migrate:
+                    val = SPILL_REGISTRY.pop(k)
+                    SPILL_REGISTRY[(k[0], new_sheet_name, k[2], k[3])] = val
+            if doc is not None:
+                save_spill_registry_for_doc(doc)
     except Exception:
         log.exception("migrate_sheet_rename: failed to migrate SPILL_REGISTRY")
+
+    other_ids = {x for x in (identity, url) if x}
 
     # Rekey SHEET_MODIFY_LISTENERS
     try:
         from plugin.calc.python.function import SHEET_MODIFY_LISTENERS
 
-        for skey in list(SHEET_MODIFY_LISTENERS.keys()):
-            if skey[1] == old_sheet_name and (not identity or skey[0] in (identity, url)):
-                disp = SHEET_MODIFY_LISTENERS.pop(skey)
-                if hasattr(disp, "sheet_name"):
-                    disp.sheet_name = new_sheet_name
-                SHEET_MODIFY_LISTENERS[(skey[0], new_sheet_name)] = disp
-                if dispatcher is None and isinstance(disp, SheetModifyDispatcher):
-                    dispatcher = disp
+        if not other_ids:
+            log.warning("migrate_sheet_rename: no workbook identity found; skipping SHEET_MODIFY_LISTENERS migration")
+        else:
+            for skey in list(SHEET_MODIFY_LISTENERS.keys()):
+                if skey[1] == old_sheet_name and skey[0] in other_ids:
+                    disp = SHEET_MODIFY_LISTENERS.pop(skey)
+                    if hasattr(disp, "sheet_name"):
+                        disp.sheet_name = new_sheet_name
+                    SHEET_MODIFY_LISTENERS[(skey[0], new_sheet_name)] = disp
+                    if dispatcher is None and isinstance(disp, SheetModifyDispatcher):
+                        dispatcher = disp
     except Exception:
         log.exception("migrate_sheet_rename: failed to migrate SHEET_MODIFY_LISTENERS")
 
     # Rekey _PENDING_TIMERS
-    with _PENDING_LOCK:
-        for pkey in list(_PENDING_TIMERS.keys()):
-            if pkey[1] == old_sheet_name and (not identity or pkey[0] in (identity, url)):
-                timer = _PENDING_TIMERS.pop(pkey)
-                _PENDING_TIMERS[(pkey[0], new_sheet_name)] = timer
+    if not other_ids:
+        log.warning("migrate_sheet_rename: no workbook identity found; skipping _PENDING_TIMERS migration")
+    else:
+        with _PENDING_LOCK:
+            for pkey in list(_PENDING_TIMERS.keys()):
+                if pkey[1] == old_sheet_name and pkey[0] in other_ids:
+                    timer = _PENDING_TIMERS.pop(pkey)
+                    _PENDING_TIMERS[(pkey[0], new_sheet_name)] = timer
 
     # Rekey geometric records and persist
     try:
@@ -284,13 +311,12 @@ def run_sheet_modify_pass(ctx: Any, doc: Any, sheet: Any, *, doc_url: str = "", 
     Spill: ``CalcSpillModifyListener.modified`` (``SPILL_REGISTRY`` walk only).
     Geometric: own ``list_python_cells_on_sheet`` via ``reconcile_geometric_sheet``.
     """
-    global _DISPATCHING
     from plugin.calc.python.geometric_recalc import is_geometric_repairing
     from plugin.framework.thread_guard import on_main_thread
 
     if not on_main_thread():
         return
-    if _DISPATCHING or is_geometric_repairing():
+    if is_sheet_modify_dispatching() or is_geometric_repairing():
         return
     if doc is None:
         from plugin.calc.python.function import _get_calc_doc
@@ -302,31 +328,30 @@ def run_sheet_modify_pass(ctx: Any, doc: Any, sheet: Any, *, doc_url: str = "", 
         return
     url = doc_url or _doc_url_of(doc)
     name = sheet_name or _sheet_name_of(sheet)
-    _DISPATCHING = True
-    try:
-        from plugin.calc.python.function import CalcSpillModifyListener, _spill_registry_doc_key
-
-        # Job 1 — spill orphan cleanup. Walks SPILL_REGISTRY only.
-        # Pass the lifecycle id the spill registry uses. The URL is empty
-        # for every unsaved book, so matching on it hits the wrong book.
+    with sheet_modify_scope():
         try:
-            registry_id = _spill_registry_doc_key(doc) if doc is not None else url
-            CalcSpillModifyListener(ctx, registry_id, name).modified(SimpleNamespace(Source=sheet))
-        except Exception:
-            log.exception("Error in spill orphan cleanup (%s)", name)
+            from plugin.calc.python.function import CalcSpillModifyListener, _spill_registry_doc_key
 
-        # Job 2 — geometric list-diff. Own discovery; skip when flag is off.
-        try:
-            from plugin.calc.python.geometric_recalc import geometric_flag_enabled, reconcile_geometric_sheet
+            # Job 1 — spill orphan cleanup. Walks SPILL_REGISTRY only.
+            # Pass the lifecycle id the spill registry uses. The URL is empty
+            # for every unsaved book, so matching on it hits the wrong book.
+            try:
+                registry_id = _spill_registry_doc_key(doc) if doc is not None else url
+                CalcSpillModifyListener(ctx, registry_id, name).modified(SimpleNamespace(Source=sheet))
+            except Exception:
+                log.exception("Error in spill orphan cleanup (%s)", name)
 
-            if geometric_flag_enabled() and doc is not None:
-                reconcile_geometric_sheet(ctx, doc, sheet)
+            # Job 2 — geometric list-diff. Own discovery; skip when flag is off.
+            try:
+                from plugin.calc.python.geometric_recalc import geometric_flag_enabled, reconcile_geometric_sheet
+
+                if geometric_flag_enabled() and doc is not None:
+                    reconcile_geometric_sheet(ctx, doc, sheet)
+            except Exception:
+                log.exception("Error in geometric sheet modify pass (%s)", name)
         except Exception:
-            log.exception("Error in geometric sheet modify pass (%s)", name)
-    except Exception:
-        log.exception("Error in sheet modify pass (%s)", name)
-    finally:
-        _DISPATCHING = False
+            log.exception("Error in sheet modify pass (%s)", name)
+
 
 
 def dispatch_sheet_modified(
@@ -343,7 +368,7 @@ def dispatch_sheet_modified(
 
     if not on_main_thread():
         return
-    if _DISPATCHING or is_geometric_repairing():
+    if is_sheet_modify_dispatching() or is_geometric_repairing():
         return
     sheet = getattr(event, "Source", None)
     if sheet is None:

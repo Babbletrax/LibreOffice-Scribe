@@ -52,7 +52,7 @@ def test_calc_image_result_inserts_on_sheet():
     assert "image_paths" not in out
     assert "active sheet" in out["message"]
     assert main_thread.call_count == 1
-    insert.assert_called_once_with(ctx.ctx, _IMAGE_PAYLOAD, doc=target, image_index=0, image_path="/tmp/plot.svg")
+    insert.assert_called_once_with(ctx.ctx, _IMAGE_PAYLOAD, doc=target, image_index=0, image_path="/tmp/plot.svg", image_count=1)
     mock_unlink.assert_called_once_with("/tmp/plot.svg")
 
 
@@ -80,7 +80,7 @@ def test_stdout_and_result_survives_image_result():
 
     assert out["status"] == "ok"
     assert out["stdout"] == "printed output\n"
-    assert out["result"] == 42
+    assert out["result"] == ["<image>", 42]
 
 
 def test_write_image_payload_to_temp_not_called_from_egress_when_image_path_supplied():
@@ -424,6 +424,40 @@ def test_subsequent_call_replaces_slot_0_and_leaves_slot_1():
     assert page.added == []
 
 
+def test_image_count_removes_higher_slot():
+    """image_index=0, image_count=1 removes WriterAgentPlot_2 at that cell and leaves user image and other plot."""
+    cell = CalcCellStub(col=3, row=6)
+    other = CalcCellStub(col=0, row=0)
+    slot0 = _AnchoredShape(_DRAW_GRAPHIC_SERVICE, _PLOT_SHAPE_NAME_PREFIX, cell)
+    slot1 = _AnchoredShape(_DRAW_GRAPHIC_SERVICE, f"{_PLOT_SHAPE_NAME_PREFIX}_2", cell)
+    user_img = _AnchoredShape(_DRAW_GRAPHIC_SERVICE, "UserPhoto", cell)
+    other_plot = _AnchoredShape(_DRAW_GRAPHIC_SERVICE, f"{_PLOT_SHAPE_NAME_PREFIX}_2", other)
+    page = _DrawPage([slot0, slot1, user_img, other_plot])
+
+    ctx = MagicMock()
+    target = MagicMock(name="target")
+    sheet = MagicMock()
+    sheet.DrawPage = page
+    target.getCurrentController.return_value = None
+    with (
+        patch("plugin.scripting.document_scripts.get_calc_document_from_ctx", return_value=MagicMock(name="front")),
+        patch(
+            "plugin.calc.python.formula_locator_cache.locate_formula_cell_in_doc",
+            return_value=(sheet, cell, (cell._row, cell._col)),
+        ),
+        patch("plugin.calc.python.image_egress.write_image_payload_to_temp", return_value="/tmp/chart.svg"),
+        patch("uno.systemPathToFileUrl", return_value="file:///tmp/chart.svg"),
+        patch("plugin.calc.calc_utils.get_cell_geometry", return_value=(MagicMock(), MagicMock(Width=5000, Height=4000))),
+    ):
+        target.createInstance.return_value = MagicMock()
+        insert_image_result_on_sheet(ctx, _IMAGE_PAYLOAD, code="plt.show()", doc=target, image_index=0, image_count=1)
+
+    assert slot1 not in page.shapes
+    assert slot0 in page.shapes
+    assert user_img in page.shapes
+    assert other_plot in page.shapes
+
+
 def test_temp_image_removed_after_graphic_url_and_on_failure(tmp_path):
     """GraphicURL still sees the file; the file is gone after the setter returns or fails."""
     png = tmp_path / "plot.png"
@@ -478,8 +512,78 @@ def test_temp_image_removed_after_graphic_url_and_on_failure(tmp_path):
     assert shape not in page.shapes
 
 
-def test_anchor_failure_logs_warning_and_succeeds(caplog):
-    """Failure during Anchor / geometry positioning logs a warning, but returns successfully."""
+def test_svg_aspect_not_stretched():
+    from com.sun.star.awt import Size
+
+    svg_data = b'<svg xmlns="http://www.w3.org/2000/svg" width="8in" height="4in"></svg>'
+    svg_payload = {
+        "__wa_payload__": PAYLOAD_IMAGE,
+        "format": "svg",
+        "data": svg_data,
+    }
+    cell = CalcCellStub(col=3, row=6)
+    page = _DrawPage([])
+    ctx = MagicMock()
+    target = MagicMock(name="target")
+    sheet = MagicMock()
+    sheet.DrawPage = page
+    target.getCurrentController.return_value = None
+    shape = _AnchoredShape(_DRAW_GRAPHIC_SERVICE, _PLOT_SHAPE_NAME_PREFIX, cell)
+    target.createInstance.return_value = shape
+
+    with (
+        patch("plugin.scripting.document_scripts.get_calc_document_from_ctx", return_value=MagicMock(name="front")),
+        patch(
+            "plugin.calc.python.formula_locator_cache.locate_formula_cell_in_doc",
+            return_value=(sheet, cell, (cell._row, cell._col)),
+        ),
+        patch("plugin.calc.python.image_egress.write_image_payload_to_temp", return_value="/tmp/chart.svg"),
+        patch("uno.systemPathToFileUrl", return_value="file:///tmp/chart.svg"),
+        patch("plugin.calc.calc_utils.get_cell_geometry", return_value=(MagicMock(), MagicMock(Width=5000, Height=4000))),
+    ):
+        insert_image_result_on_sheet(ctx, svg_payload, code="plt.show()", doc=target, image_index=0)
+
+    assert shape.props.get("Size") == Size(10000, 5000)
+
+
+def test_png_aspect():
+    import struct
+    from com.sun.star.awt import Size
+
+    # 8-byte signature + 4 bytes length + 4 bytes IHDR + 8 bytes (w=100, h=50)
+    png_data = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + struct.pack(">II", 100, 50) + b"\x08\x06\x00\x00\x00\x00\x00\x00\x00"
+    png_payload = {
+        "__wa_payload__": PAYLOAD_IMAGE,
+        "format": "png",
+        "data": png_data,
+    }
+    cell = CalcCellStub(col=3, row=6)
+    page = _DrawPage([])
+    ctx = MagicMock()
+    target = MagicMock(name="target")
+    sheet = MagicMock()
+    sheet.DrawPage = page
+    target.getCurrentController.return_value = None
+    shape = _AnchoredShape(_DRAW_GRAPHIC_SERVICE, _PLOT_SHAPE_NAME_PREFIX, cell)
+    target.createInstance.return_value = shape
+
+    with (
+        patch("plugin.scripting.document_scripts.get_calc_document_from_ctx", return_value=MagicMock(name="front")),
+        patch(
+            "plugin.calc.python.formula_locator_cache.locate_formula_cell_in_doc",
+            return_value=(sheet, cell, (cell._row, cell._col)),
+        ),
+        patch("plugin.calc.python.image_egress.write_image_payload_to_temp", return_value="/tmp/chart.png"),
+        patch("uno.systemPathToFileUrl", return_value="file:///tmp/chart.png"),
+        patch("plugin.calc.calc_utils.get_cell_geometry", return_value=(MagicMock(), MagicMock(Width=5000, Height=4000))),
+    ):
+        insert_image_result_on_sheet(ctx, png_payload, code="plt.show()", doc=target, image_index=0)
+
+    assert shape.props.get("Size") == Size(10000, 5000)
+
+
+def test_anchor_failure_removes_new_shape_and_raises():
+    """setPropertyValue('Anchor') raises, draw_page.remove was called, ImageEgressError propagates."""
     ctx = MagicMock()
     doc = MagicMock()
     sheet = MagicMock()
@@ -497,19 +601,62 @@ def test_anchor_failure_logs_warning_and_succeeds(caplog):
     sheets.getByIndex.return_value = sheet
     doc.getSheets.return_value = sheets
     shape = MagicMock()
+
+    def _set_prop(prop, val):
+        if prop == "Anchor":
+            raise RuntimeError("anchor error")
+
+    shape.setPropertyValue.side_effect = _set_prop
     doc.createInstance.return_value = shape
 
     with (
         patch("plugin.calc.python.image_egress.write_image_payload_to_temp", return_value="/tmp/plot.svg"),
         patch("uno.systemPathToFileUrl", return_value="file:///tmp/plot.svg"),
         patch("plugin.calc.python.image_egress._unlink_temp_image"),
-        patch("plugin.calc.calc_utils.get_cell_geometry", side_effect=RuntimeError("geometry error")),
+        patch("plugin.calc.calc_utils.get_cell_geometry", return_value=(MagicMock(), MagicMock(Width=5000, Height=4000))),
+        pytest.raises(ImageEgressError, match="could not anchor plot to the formula cell"),
     ):
-        import logging
-        with caplog.at_level(logging.WARNING):
-            insert_image_result_on_sheet(ctx, _IMAGE_PAYLOAD, doc=doc)
+        insert_image_result_on_sheet(ctx, _IMAGE_PAYLOAD, doc=doc)
 
-    assert any("could not anchor to cell" in record.message for record in caplog.records)
+    assert shape not in page.shapes
+
+
+def test_off_main_failure_annotates_and_does_not_raise():
+    """When off-main with notify_cell=True, an ImageEgressError sets an annotation and does not raise."""
+    ctx = MagicMock()
+    doc = MagicMock()
+    sheet = MagicMock()
+    cell = CalcCellStub(col=0, row=0)
+    ann = MagicMock()
+    ann_text = []
+    ann.setString.side_effect = lambda t: ann_text.append(t)
+    ann.getString.return_value = ""
+    cell.getAnnotation = lambda: ann
+
+    annotations = MagicMock()
+    inserted_annotations = []
+    annotations.insertNew.side_effect = lambda addr, text: inserted_annotations.append(text)
+    sheet.getAnnotations.return_value = annotations
+
+    posted_calls = []
+
+    with (
+        patch("plugin.framework.thread_guard.on_main_thread", return_value=False),
+        patch("plugin.framework.queue_executor.post_to_main_thread", side_effect=lambda fn: posted_calls.append(fn)),
+        patch(
+            "plugin.calc.python.formula_locator_cache.locate_formula_cell_in_doc",
+            return_value=(sheet, cell, (0, 0)),
+        ),
+        patch(
+            "plugin.calc.python.image_egress._insert_image_result_on_sheet_impl",
+            side_effect=ImageEgressError("test egress failure"),
+        ),
+    ):
+        insert_image_result_on_sheet(ctx, _IMAGE_PAYLOAD, code="plt.show()", doc=doc, notify_cell=True)
+        assert len(posted_calls) == 1
+        posted_calls[0]()
+
+    assert any("WriterAgent image: test egress failure" in t for t in inserted_annotations + ann_text)
 
 
 def test_reused_shape_not_removed_on_failure():

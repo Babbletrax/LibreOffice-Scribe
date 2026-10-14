@@ -180,7 +180,7 @@ Ingress blanks can poison naive `np.sum` / `np.mean` — prefer `nan*` helpers w
 - `float('nan')` / `np.nan` → raw NaN → cascading error cell.
 - `±inf` passes through (may also error in formulas). **Not a missing-value sentinel.**
 - `decimal.Decimal` and `fractions.Fraction` → `float` (precision loss is accepted; Calc only has doubles). Column kind must stay `"float"`, not `"int"` (truncation is not accepted). A text cell earlier in the same grid does not turn a later Decimal or Fraction into text.
-- **Int fidelity:** the `split_grid` buffer is float64. Integers outside ±2^53 round on pack and unpack. Account numbers and 64-bit IDs should travel as strings. There is no int64 wire lane (Calc cells are doubles anyway).
+- **Int fidelity:** the `split_grid` buffer is float64. Integers outside ±2^53 round on pack and unpack. Account numbers and 64-bit IDs should travel as strings. There is no int64 wire lane (Calc cells are doubles anyway). On egress, an integer that overflows float64 is written as its decimal text; `NaN` is unchanged.
 - **Size threshold (mixed `None`):** a Python `None` in a mixed result below `BINARY_MIN_CELLS` stays `None` and spills as a blank. The same `None` at or above the threshold is a NaN hole in `split_grid`. Host unpack keeps that hole as `float('nan')`, so the sheet shows a Calc error. Child unpack of a mixed envelope still restores `None`. The buffer has no separate blank bit; do not collapse host NaN to `None` to hide the threshold.
 - For a visible non-error marker, return a string:
 

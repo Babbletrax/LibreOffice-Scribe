@@ -104,25 +104,12 @@ class TestGuardUnoBoundaries:
         mock_desktop.assert_not_called()
         mock_guard.assert_not_called()
 
-    def test_get_calc_doc_wraps_enumerated_model(self) -> None:
+    def test_get_calc_doc_non_spreadsheet_returns_none(self) -> None:
         class _NotCalc:
             pass
 
-        calc_model = MagicMock(name="enum_calc")
-        calc_model.getSheets = MagicMock()
-        ctrl = MagicMock()
-        ctrl.getModel.return_value = calc_model
-        elem = MagicMock(spec=["getController"])
-        elem.getController.return_value = ctrl
-
-        enum = MagicMock()
-        enum.hasMoreElements.side_effect = [True, False]
-        enum.nextElement.return_value = elem
-        comps = MagicMock()
-        comps.createEnumeration.return_value = enum
         desktop = MagicMock()
         desktop.getCurrentComponent.return_value = _NotCalc()
-        desktop.getComponents.return_value = comps
 
         with (
             patch("plugin.framework.thread_guard.on_main_thread", return_value=True),
@@ -132,8 +119,9 @@ class TestGuardUnoBoundaries:
             from plugin.calc.python.function import _get_calc_doc
 
             out = _get_calc_doc(MagicMock())
-        assert (out) is (calc_model)
-        mock_guard.assert_called_once_with(calc_model)
+        assert out is None
+        desktop.getComponents.assert_not_called()
+        mock_guard.assert_not_called()
 
     def test_export_graphic_to_bytes_uses_get_ctx_when_ctx_none(self) -> None:
         guarded_ctx = MagicMock(name="guarded_ctx")
