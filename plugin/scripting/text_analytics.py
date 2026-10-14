@@ -14,7 +14,7 @@ import logging
 from collections import Counter
 from typing import TYPE_CHECKING, Any
 
-from plugin.scripting._lazy_venv import install_lazy_dir, make_getattr
+from plugin.scripting._lazy_venv import install_lazy_exports
 from plugin.scripting.helper_domain import (
     DomainFacadeConfig,
     header_prefix,
@@ -26,8 +26,7 @@ if TYPE_CHECKING:
 
 _TEXT_VENV_EXPORTS = frozenset({"analyze_text", "check_diagnostics", "run_text_analytics"})
 
-__getattr__ = make_getattr("text_analytics", _TEXT_VENV_EXPORTS)
-install_lazy_dir(globals(), _TEXT_VENV_EXPORTS)
+install_lazy_exports(globals(), "text_analytics", _TEXT_VENV_EXPORTS)
 
 
 from plugin.scripting.calc_functions_common import TEXT_ANALYTICS_HELPER_NAMES as HELPER_NAMES
