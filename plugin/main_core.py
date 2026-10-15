@@ -66,9 +66,10 @@ def bootstrap(ctx: Any | None = None) -> None:
     global _initialized, _bootstrapping
     if _initialized:
         return
-    from plugin.framework.thread_guard import on_main_thread
+    from plugin.framework.thread_guard import on_python_main_thread
 
-    if not on_main_thread():
+    # A status-listener Dummy upcall is allowed to touch UNO, and it must not enter bootstrap.
+    if not on_python_main_thread():
         return
     # What was wrong: a non-reentrant Lock wrapped this whole body.
     # How it happened: off-thread callers already return, so the lock excluded
