@@ -283,7 +283,7 @@ class GetDocumentContent(ToolBase):
             )
         except Exception as exc:
             # A closed document is not an ok read with the changes omitted.
-            reraise_if_disposed(exc)
+            reraise_if_disposed(exc, object_type="Document")
             log.exception("get_document_content: could not collect tracked changes")
             _note_unlisted_tracked_changes(result)
         log.debug(
