@@ -285,6 +285,12 @@ class WriterDocStub:
             def __init__(self, el):
                 self.el = el
 
+            def getStart(self):
+                return self.el[0] if self.el else self
+
+            def getEnd(self):
+                return self.el[-1] if self.el else self
+
             def createEnumeration(self):
                 class EnumStub:
                     def __init__(self, el):
@@ -332,6 +338,12 @@ class WriterDocStub:
 
     def loadStylesFromURL(self, url, props):
         self._load_styles_calls.append((url, props))
+
+    def lockControllers(self):
+        pass
+
+    def unlockControllers(self):
+        pass
 
 class MockDocument:
     def __init__(self):
