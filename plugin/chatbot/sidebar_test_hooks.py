@@ -991,6 +991,11 @@ def handle_debug_sidebar_command(command: str) -> None:
         _post_to_soffice_vcl(_load_visible_calc_factory, sl=sl)
         _write_debug_snapshot(sl)
         return
+    # Packet O: fake vision backend inside soffice (the OCR venv is not installed in CI).
+    if op.startswith("FAKE_VISION_"):
+        _apply_fake_vision(op[len("FAKE_VISION_"):].lower())
+        _write_debug_snapshot(sl)
+        return
     if op == "KICK_PEERS":
         # Packet P URP: queues live in soffice; the test-process kick is a no-op.
         # Post to VCL via _post_to_soffice_vcl so peer sends drain on the
@@ -2951,6 +2956,126 @@ def next_hello_ok(*, listener: Any = None, timeout: float = 60.0) -> bool:
         return True
     log.warning("next_hello_ok: idle but transcript did not look like a hello reply")
     return False
+
+
+# --- Packet O: fake vision OCR backend (runs inside soffice) -----------------
+#
+# The trusted OCR venv (Docling / PaddleOCR) is not installed in CI. These modes
+# replace only the venv boundary -- ``vision_runner.run_vision`` and the venv
+# gate ``vision_availability.vision_venv_configured`` -- so the sidebar,
+# delegate gateway, per-image discovery, export and insert all run for real.
+# Every fake call is logged to a JSON state file the URP test process reads.
+
+_FAKE_VISION_NAME = "writeragent_fake_vision.json"
+_FAKE_VISION_LOCK = threading.Lock()
+_FAKE_VISION_ORIG: dict[tuple[Any, str], Any] = {}
+_FAKE_VISION_STATE: dict[str, Any] = {}
+FAKE_VISION_MODES = ("ok", "fail_second", "timeout", "slow", "export_fail", "unavailable", "off")
+
+
+def fake_vision_state_path() -> str:
+    return os.path.join(tempfile.gettempdir(), _FAKE_VISION_NAME)
+
+
+def read_fake_vision_state() -> dict[str, Any]:
+    """URP side: ``{"mode", "calls": [{"image_name", "status"}...]}`` or ``{}``."""
+    try:
+        with open(fake_vision_state_path(), encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_fake_vision_state() -> None:
+    path = fake_vision_state_path()
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(_FAKE_VISION_STATE, f)
+    os.replace(tmp, path)
+
+
+def fake_ocr_text(image_name: str) -> str:
+    """The text the fake backend 'reads' from *image_name*."""
+    return f"OCR_TEXT_{image_name}"
+
+
+def _apply_fake_vision(mode: str) -> None:
+    _require_debug()
+    if mode not in FAKE_VISION_MODES:
+        raise ValueError(f"unknown fake vision mode {mode!r}")
+    import plugin.vision.vision_availability as availability
+    import plugin.vision.vision_runner as runner
+    import plugin.writer.images.image_tools as image_tools
+
+    with _FAKE_VISION_LOCK:
+        for (module, attr), orig in list(_FAKE_VISION_ORIG.items()):
+            setattr(module, attr, orig)
+        _FAKE_VISION_ORIG.clear()
+        _FAKE_VISION_STATE.clear()
+        if mode == "off":
+            try:
+                os.remove(fake_vision_state_path())
+            except OSError:
+                pass
+            return
+        _FAKE_VISION_STATE.update({"mode": mode, "calls": []})
+        _write_fake_vision_state()
+
+        def _patch(module: Any, attr: str, value: Any) -> None:
+            _FAKE_VISION_ORIG[(module, attr)] = getattr(module, attr)
+            setattr(module, attr, value)
+
+        _patch(availability, "vision_venv_configured", lambda ctx=None: mode != "unavailable")
+        if mode == "export_fail":
+            # Fail inside the real resolve_vision_image_bytes so its own error surfaces.
+            def _no_export(*_a: Any, **_k: Any) -> Any:
+                raise RuntimeError("fake export failure")
+
+            _patch(runner, "export_graphic_object_to_bytes", _no_export)
+            _patch(image_tools, "export_graphic_object_to_bytes", _no_export)
+
+        def _fake_run_vision(ctx: Any, spec: Any, image: Any = None, *, context: dict[str, Any] | None = None,
+                             stop_checker: Any = None) -> dict[str, Any]:
+            name = str((context or {}).get("image_name") or "")
+            with _FAKE_VISION_LOCK:
+                index = len(_FAKE_VISION_STATE["calls"])
+                result: dict[str, Any]
+                if mode == "timeout":
+                    result = {"status": "error", "code": "VISION_ERROR", "message": "Vision timed out after 120s"}
+                elif mode == "fail_second" and index == 1:
+                    result = {"status": "error", "code": "VISION_ERROR", "message": f"fake OCR crash on {name}"}
+                else:
+                    result = {"status": "ok"}
+            if mode == "slow":
+                deadline = time.monotonic() + 6.0
+                while time.monotonic() < deadline:
+                    if stop_checker is not None and stop_checker():
+                        result = {"status": "error", "code": "USER_STOPPED", "message": "Cancelled by user."}
+                        break
+                    time.sleep(0.05)
+            if result["status"] == "ok":
+                text = fake_ocr_text(name)
+                result = {"status": "ok", "helper": "extract_structure", "full_text": text, "html": f"<p>{text}</p>"}
+            with _FAKE_VISION_LOCK:
+                _FAKE_VISION_STATE["calls"].append({"image_name": name, "status": result["status"],
+                                                    "bytes": len(image or b"")})
+                _write_fake_vision_state()
+            return result
+
+        _patch(runner, "run_vision", _fake_run_vision)
+
+
+def set_fake_vision(mode: str, *, ctx: Any = None) -> dict[str, Any]:
+    """URP client: switch the soffice fake vision backend (``FAKE_VISION_MODES``)."""
+    _require_debug()
+    if mode not in FAKE_VISION_MODES:
+        raise ValueError(f"unknown fake vision mode {mode!r}")
+    execute_debug_sidebar_op("FAKE_VISION_" + mode.upper(), ctx=ctx)
+    state = read_fake_vision_state()
+    if mode != "off" and state.get("mode") != mode:
+        raise AssertionError(f"fake vision {mode!r} not installed in soffice: {state}")
+    return state
 
 
 def get_writer_graphics_count(*, ctx: Any = None) -> int:

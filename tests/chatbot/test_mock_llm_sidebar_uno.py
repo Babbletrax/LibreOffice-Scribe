@@ -1737,6 +1737,61 @@ def _restore_writer_after_calc(ctx, writer, calc, saved_controls, saved_listener
         _session.listener = saved_listener
 
 
+def _make_unique_png_bytes(r: int, g: int, b: int) -> bytes:
+    """Minimal 1x1 RGB PNG so each embedded graphic exports distinct bytes."""
+    import struct
+    import zlib
+
+    def chunk(tag: bytes, data: bytes) -> bytes:
+        crc = zlib.crc32(tag + data) & 0xFFFFFFFF
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", crc)
+
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    idat = zlib.compress(bytes([0, r, g, b]))
+    iend = b""
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr) + chunk(b"IDAT", idat) + chunk(b"IEND", iend)
+
+
+def _write_test_png(r: int, g: int, b: int) -> str:
+    import tempfile
+
+    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
+        tmp.write(_make_unique_png_bytes(r, g, b))
+        return tmp.name
+
+
+def _insert_test_image(ctx, doc, r: int = 255, g: int = 0, b: int = 0, *, text_cursor=None):
+    """Insert a distinct 1x1 PNG into Writer (at *text_cursor* or the view cursor) and select it."""
+    from plugin.writer.images.image_tools import insert_image_at_locator
+
+    path = _write_test_png(r, g, b)
+    try:
+        graphic = insert_image_at_locator(ctx, doc, path, width_mm=20, height_mm=20, text_cursor=text_cursor)
+        assert graphic is not None, "failed to insert fixture image"
+        doc.getCurrentController().select(graphic)
+        return graphic
+    finally:
+        os.remove(path)
+
+
+def _insert_calc_test_image(ctx, calc) -> str:
+    """Insert a cell-anchored PNG shape on Calc sheet 1, select it, return its name."""
+    from plugin.writer.images.image_tools import insert_image_at_locator
+
+    path = _write_test_png(0, 128, 255)
+    try:
+        shape = insert_image_at_locator(ctx, calc, path, width_mm=20, height_mm=20)
+        assert shape is not None, "failed to insert Calc fixture image"
+        if not shape.getName():
+            shape.setName("OcrFixture1")
+        # Calc OCR inserts below the graphic's anchor cell; Insert > Image anchors to a cell.
+        shape.setPropertyValue("Anchor", calc.getSheets().getByIndex(0).getCellByPosition(1, 1))
+        calc.getCurrentController().select(shape)
+        return shape.getName()
+    finally:
+        os.remove(path)
+
+
 @native_test
 def test_e12_calc_list_sheets(ctx):
     from plugin.chatbot.sidebar_test_hooks import current_component, open_calc_document
@@ -2850,6 +2905,221 @@ def test_k4_process_death_does_not_compact_retry(ctx):
     _assert_errorish(body, "API error", "llama-server", "overflowed", "terminated")
     _hello_ok()
 
+
+
+# =============================================================================
+# Packet O: Vision OCR
+# =============================================================================
+#
+# The OCR venv is not installed in CI, so each case installs a fake backend in
+# soffice (sidebar_test_hooks.set_fake_vision): only run_vision / the venv gate
+# are replaced; delegation, per-image discovery, export and insert are real.
+
+
+class _OVision:
+    def __init__(self, mode: str) -> None:
+        self.mode = mode
+
+    def __enter__(self) -> "_OVision":
+        from plugin.chatbot.sidebar_test_hooks import set_fake_vision
+
+        set_fake_vision(self.mode)
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        from plugin.chatbot.sidebar_test_hooks import set_fake_vision
+
+        set_fake_vision("off")
+
+
+def _o_calls() -> list[dict[str, Any]]:
+    from plugin.chatbot.sidebar_test_hooks import read_fake_vision_state
+
+    return list(read_fake_vision_state().get("calls") or [])
+
+
+def _o_text(ctx) -> str:
+    return _writer_body(ctx)
+
+
+@native_test
+def test_o1_ocr_embedded_image(ctx):
+    from plugin.chatbot.sidebar_test_hooks import current_component, fake_ocr_text
+
+    _reset_mock_runtime()
+    _set_writer_body(ctx, WELCOME_BODY)
+    doc = current_component(ctx)
+    name = _insert_test_image(ctx, doc).getName()
+    with _OVision("ok"):
+        _send_and_wait("OCR image", timeout=60.0)
+        calls = _o_calls()
+    assert [c["image_name"] for c in calls] == [name], f"O1 expected one OCR of {name}, got {calls}"
+    assert calls[0]["bytes"] > 0, "O1 the image export sent no bytes"
+    assert _o_text(ctx).count(fake_ocr_text(name)) == 1, f"O1 OCR text not inserted once: {_o_text(ctx)!r}"
+    assert "ocr complete" in _transcript().lower(), f"O1 no completion in transcript: {_transcript()[-400:]}"
+    _hello_ok()
+
+
+@native_test
+def test_o2_ocr_calc_graphic(ctx):
+    from plugin.chatbot.sidebar_test_hooks import current_component, open_calc_document
+
+    _reset_mock_runtime()
+    writer = current_component(ctx)
+    saved_controls = getattr(_session, "controls", None)
+    saved_listener = getattr(_session, "listener", None)
+    calc = None
+    try:
+        calc = open_calc_document(ctx)
+        _adopt_calc_sidebar(ctx, calc)
+        name = _insert_calc_test_image(ctx, calc)
+        with _OVision("ok"):
+            _send_and_wait("OCR image", timeout=60.0)
+            calls = _o_calls()
+        assert [c["image_name"] for c in calls] == [name], f"O2 expected one Calc OCR of {name}, got {calls}"
+        assert "ocr complete" in _transcript().lower(), f"O2 no completion: {_transcript()[-400:]}"
+        _hello_ok()
+    finally:
+        _restore_writer_after_calc(ctx, writer, calc, saved_controls, saved_listener)
+
+
+def _o_failed_cleanly(case: str, ctx, needle: str) -> None:
+    from plugin.chatbot.sidebar_test_hooks import fake_ocr_text
+
+    assert fake_ocr_text("") not in _o_text(ctx), f"{case} OCR text was inserted: {_o_text(ctx)!r}"
+    tail = _transcript()[-800:]
+    assert needle.lower() in tail.lower(), f"{case} expected {needle!r} in transcript: {tail}"
+    assert "Traceback" not in tail, f"{case} traceback in transcript: {tail}"
+
+
+@native_test
+def test_o3_ocr_unavailable(ctx):
+    from plugin.chatbot.sidebar_test_hooks import current_component
+
+    _reset_mock_runtime()
+    _set_writer_body(ctx, WELCOME_BODY)
+    _insert_test_image(ctx, current_component(ctx))
+    with _OVision("unavailable"):
+        _send_and_wait("OCR image", timeout=60.0)
+        calls = _o_calls()
+    assert calls == [], f"O3 OCR ran with the venv unavailable: {calls}"
+    _o_failed_cleanly("O3", ctx, "OCR")
+    _hello_ok()
+
+
+@native_test
+def test_o4_ocr_timeout(ctx):
+    from plugin.chatbot.sidebar_test_hooks import current_component
+
+    _reset_mock_runtime()
+    _set_writer_body(ctx, WELCOME_BODY)
+    _insert_test_image(ctx, current_component(ctx))
+    with _OVision("timeout"):
+        _send_and_wait("OCR image", timeout=60.0)
+        calls = _o_calls()
+    assert len(calls) == 1 and calls[0]["status"] == "error", f"O4 expected one timed-out OCR: {calls}"
+    _o_failed_cleanly("O4", ctx, "timed out")
+    _hello_ok()
+
+
+@native_test
+def test_o5_stop_during_ocr(ctx):
+    from plugin.chatbot.sidebar_test_hooks import current_component, fake_ocr_text
+
+    _reset_mock_runtime()
+    _set_writer_body(ctx, WELCOME_BODY)
+    _insert_test_image(ctx, current_component(ctx))
+    with _OVision("slow"):
+        before = _start_until_stop_enabled("OCR image", delay_ms=40)
+        time.sleep(1.5)  # inside the 6s fake OCR
+        _stop_and_wait_idle(before)
+        time.sleep(6.5)  # past the fake OCR: a late result must not insert
+        calls = _o_calls()
+    # Stop reaches the running OCR (its stop_checker), which ends as USER_STOPPED.
+    assert len(calls) == 1 and calls[0]["status"] == "error", f"O5 Stop did not cancel the running OCR: {calls}"
+    assert fake_ocr_text("") not in _o_text(ctx), f"O5 OCR text inserted after Stop: {_o_text(ctx)!r}"
+    _hello_ok()
+
+
+@native_test
+def test_o6_ocr_export_fail(ctx):
+    from plugin.chatbot.sidebar_test_hooks import current_component
+
+    _reset_mock_runtime()
+    _set_writer_body(ctx, WELCOME_BODY)
+    _insert_test_image(ctx, current_component(ctx))
+    with _OVision("export_fail"):
+        _send_and_wait("OCR image", timeout=60.0)
+        calls = _o_calls()
+    assert calls == [], f"O6 OCR ran without exported bytes: {calls}"
+    _o_failed_cleanly("O6", ctx, "could not be exported")
+    _hello_ok()
+
+
+@native_test
+def test_o7_two_ocr_back_to_back(ctx):
+    from plugin.chatbot.sidebar_test_hooks import current_component, fake_ocr_text
+
+    _reset_mock_runtime()
+    _set_writer_body(ctx, WELCOME_BODY)
+    doc = current_component(ctx)
+    graphic = _insert_test_image(ctx, doc)
+    name = graphic.getName()
+    with _OVision("ok"):
+        _send_and_wait("OCR image", timeout=60.0)
+        doc.getCurrentController().select(graphic)
+        mid = _transcript()
+        _send_and_wait("OCR image", timeout=60.0)
+        calls = _o_calls()
+    assert [c["image_name"] for c in calls] == [name, name], f"O7 expected two OCR runs: {calls}"
+    assert _o_text(ctx).count(fake_ocr_text(name)) == 2, f"O7 expected one insert per run: {_o_text(ctx)!r}"
+    tail = _transcript()[len(mid):] if _transcript().startswith(mid) else _transcript()
+    assert tail.lower().count("ocr complete") == 1, f"O7 duplicate output in second turn: {tail[-400:]}"
+    _hello_ok()
+
+
+@native_test
+def test_o8_multi_image_selection_ocr(ctx):
+    """3 images with text between, one range selection, one OCR send; image 2 fails."""
+    from plugin.chatbot.sidebar_test_hooks import current_component, fake_ocr_text
+
+    _reset_mock_runtime()
+    _set_writer_body(ctx, "Between1 ")
+    doc = current_component(ctx)
+    text = doc.getText()
+    names = []
+    for i, rgb in enumerate(((255, 0, 0), (0, 255, 0), (0, 0, 255)), start=2):
+        cursor = text.createTextCursor()
+        cursor.gotoEnd(False)
+        names.append(_insert_test_image(ctx, doc, *rgb, text_cursor=cursor).getName())
+        cursor = text.createTextCursor()
+        cursor.gotoEnd(False)
+        text.insertString(cursor, f" Between{i} ", False)
+    rng = text.createTextCursor()
+    rng.gotoStart(False)
+    rng.gotoEnd(True)
+    doc.getCurrentController().select(rng)
+
+    with _OVision("fail_second"):
+        _send_and_wait("OCR image", timeout=120.0)
+        calls = _o_calls()
+
+    assert [c["image_name"] for c in calls] == names, (
+        f"O8 every image must be OCR'd once, in document order (a failed image must not block the rest): "
+        f"names={names} calls={calls}"
+    )
+    body = _o_text(ctx)
+    for i in range(1, 5):
+        assert body.count(f"Between{i}") == 1, f"O8 Between{i} must appear exactly once: {body!r}"
+    ok1, bad2, ok3 = (fake_ocr_text(n) for n in names)
+    assert bad2 not in body, f"O8 failed image 2 produced text: {body!r}"
+    i1, i3 = body.find(ok1), body.find(ok3)
+    assert i1 != -1 and i3 != -1, f"O8 OCR results for images 1 and 3 must be inserted: {body!r}"
+    assert body.find("Between1") < i1 < body.find("Between2") < body.find("Between3") < i3 < body.find("Between4"), (
+        f"O8 OCR results must sit after their own image, in document order: {body!r}"
+    )
+    assert names[1] in _transcript()[-1500:], f"O8 transcript must name the failed image: {_transcript()[-600:]}"
+    _hello_ok()
 
 
 # --- Packet M: event-driven stream drain (SolarMutex regression guards) ---

@@ -138,6 +138,7 @@ _SCENARIO_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     # Packet P: specialized-inner peer (#673). peer_wait locks the Scrolly hang.
     ("peer_wait", re.compile(r"\b(wait after accepted|do not finish peer)\b", re.IGNORECASE)),
     ("peer_total", re.compile(r"\b(add a total row|ask the budget workbook|peer total)\b", re.IGNORECASE)),
+    ("ocr", re.compile(r"\bocr image\b", re.IGNORECASE)),
     ("single_edit", re.compile(r"\b(single agent edit)\b", re.IGNORECASE)),
     ("adjacent_edits", re.compile(r"\b(adjacent agent edits)\b", re.IGNORECASE)),
     ("three_edits", re.compile(r"\b(three agent edits)\b", re.IGNORECASE)),
@@ -180,6 +181,7 @@ SCENARIO_IDS = frozenset(
         "tree",
         "parallel",
         "mutate",
+        "ocr",
         "image_one",
         "image_two",
         "fail_http",
@@ -1264,6 +1266,10 @@ def _specialized_inner_completion(
         )
     if empty:
         return _finish("")
+    if scenario == "ocr" and "extract_structure_from_image" in tool_names:
+        if "extract_structure_from_image" in called:
+            return _finish("Mock OCR task complete.")
+        return Completion(tool_name="extract_structure_from_image", tool_args={}, finish_reason="tool_calls")
     if scenario in ("image_one", "image_two") and "image_generate" in tool_names:
         if "image_generate" in called:
             return _finish("Mock image task complete.")
@@ -1509,6 +1515,14 @@ def _scenario_user_turn(
         return _specialized_inner_completion(messages, tool_names, config) if _is_specialized_inner(tool_names) else Completion(
             content=_html_chat(user_text, turn), reasoning=reasoning
         )
+    if scenario == "ocr":
+        # Packet O: OCR is the specialized "vision" domain (extract_structure_from_image).
+        if "extract_structure_from_image" in tool_names:
+            return _tool_or_html(tool_names, "extract_structure_from_image", {}, user_text, turn)
+        delegate = _delegate_for_tools(tool_names)
+        if delegate:
+            return _tool_or_html(tool_names, delegate, {"domain": "vision", "task": user_text}, user_text, turn)
+        return Completion(content=_html_chat(user_text, turn), reasoning=reasoning)
     return None
 
 
