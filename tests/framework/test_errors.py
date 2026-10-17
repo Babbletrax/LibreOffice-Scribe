@@ -783,6 +783,9 @@ def test_uno_read_wraps_real_disposal_and_defaults_otherwise():
         with pytest.raises(DocumentDisposedError) as exc_info:
             uno_read(boom(exc), None)
         assert exc_info.value.__cause__ is exc
+    with pytest.raises(DocumentDisposedError) as exc_info:
+        uno_read(boom(DisposedException("dead")), None, object_type="TextRange")
+    assert exc_info.value.object_type == "TextRange"
     with pytest.raises(KeyboardInterrupt):
         uno_read(boom(KeyboardInterrupt()), None)
 
