@@ -278,13 +278,13 @@ def _range_is_paragraph(text_range: Any) -> bool:
     Treating those portions as paragraphs used to inject a ``\\n`` between runs.
     """
     try:
-        if text_range.supportsService(_PARAGRAPH_SERVICE):
+        if text_range.supportsService(_PARAGRAPH_SERVICE) is True:
             return True
     except Exception as exc:
         reraise_if_disposed(exc, object_type="TextRange")
     try:
         enum = text_range.createEnumeration()
-        if not enum.hasMoreElements():
+        if enum.hasMoreElements() is not True:
             return False
         return _portion_type(enum.nextElement()) is not None
     except Exception as exc:
@@ -318,7 +318,7 @@ def _visible_portions(
         return
     in_delete = False
     seen = 0
-    while portion_enum.hasMoreElements():
+    while portion_enum.hasMoreElements() is True:
         if limit is not None and seen >= limit:
             # Cap hit with more portions waiting — caller can warn that paint is partial.
             if truncated_out is not None:
@@ -381,8 +381,6 @@ def get_string_without_tracked_deletions(text_range: Any) -> str:
     ``TextPortionType``) concatenates visible portions without a mid-``\\n``.
     A document or multi-paragraph range still joins paragraphs with ``\\n``.
     """
-    if hasattr(text_range, "_mock_return_value") or type(text_range).__name__ in ("Mock", "MagicMock"):
-        return text_range.getString()
     try:
         if _range_is_paragraph(text_range):
             return _paragraph_visible_text(text_range)
@@ -393,7 +391,7 @@ def get_string_without_tracked_deletions(text_range: Any) -> str:
     parts: list[str] = []
     try:
         first_para = True
-        while para_enum.hasMoreElements():
+        while para_enum.hasMoreElements() is True:
             para = para_enum.nextElement()
             if not first_para:
                 parts.append("\n")
@@ -512,8 +510,6 @@ def collect_tracked_changes(text_range: Any, max_per_change: int = 300, max_chan
     TextTable cells are walked; headers and frames are not in the body XText this
     function is given (content.py passes ``getText()``)."""
     out: list[dict[str, str]] = []
-    if hasattr(text_range, "_mock_return_value") or type(text_range).__name__ in ("Mock", "MagicMock"):
-        return out
     try:
         para_enum = text_range.createEnumeration()
     except Exception as exc:
@@ -541,7 +537,7 @@ def collect_tracked_changes(text_range: Any, max_per_change: int = 300, max_chan
 
     def _walk_portions(portion_enum: Any) -> None:
         nonlocal in_delete, in_insert
-        while portion_enum.hasMoreElements() and len(out) < max_changes:
+        while portion_enum.hasMoreElements() is True and len(out) < max_changes:
             portion = portion_enum.nextElement()
             ptype = _portion_type(portion)
             if ptype is None:
@@ -574,7 +570,7 @@ def collect_tracked_changes(text_range: Any, max_per_change: int = 300, max_chan
                 ins_buf.append(chunk)
 
     def _walk_elements(enum: Any) -> None:
-        while enum.hasMoreElements() and len(out) < max_changes:
+        while enum.hasMoreElements() is True and len(out) < max_changes:
             el = enum.nextElement()
             if _is_text_table(el):
                 # A table's createEnumeration does not yield portions, so the old
