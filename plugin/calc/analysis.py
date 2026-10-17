@@ -155,7 +155,6 @@ class GoalSeekTool(ToolBaseDummy):
             # dead document.
             if is_disposed_exception(e):
                 raise
-            log.exception("Goal Seek failed")
             raise ToolExecutionError(str(e)) from e
 
 
@@ -334,7 +333,6 @@ class SolverTool(ToolBaseDummy):
             # Same dispose guard as Goal Seek: do not wrap a dead document.
             if is_disposed_exception(e):
                 raise
-            log.exception("Solver failed")
             raise ToolExecutionError(str(e)) from e
 
 
