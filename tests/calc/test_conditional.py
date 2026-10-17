@@ -10,6 +10,8 @@
 
 from unittest.mock import MagicMock, patch
 
+from com.sun.star.lang import IllegalArgumentException
+
 from plugin.calc.conditional import (
     AddConditionalFormat,
     ListConditionalFormats,
@@ -82,7 +84,7 @@ def test_list_conditional_formats_error_handling():
     ctx.doc = doc
 
     bridge = MagicMock()
-    bridge.get_active_sheet.side_effect = Exception("Failed to get sheet")
+    bridge.get_active_sheet.side_effect = IllegalArgumentException("Failed to get sheet")
 
     tool = ListConditionalFormats()
 
