@@ -93,9 +93,6 @@ def _writer_char_count(model: Any) -> int:
             else:
                 step //= 2
         return count
-    except DocumentDisposedError:
-        # safe_call maps disposal to DocumentDisposedError; do not swallow it.
-        raise
     except UnoObjectError:
         logging.getLogger(__name__).exception("_writer_char_count failed")
         return 0
@@ -144,9 +141,6 @@ def _char_offset_of_position(model: Any, target_start: Any, doc_len: int) -> int
                     offset += 1
                 return offset
         return doc_len
-    except DocumentDisposedError:
-        # safe_call maps disposal to DocumentDisposedError; do not swallow it.
-        raise
     except UnoObjectError:
         logging.getLogger(__name__).exception("_char_offset_of_position failed")
         return 0
@@ -170,9 +164,6 @@ def _get_writer_selection_positions(model: Any) -> tuple[Any, Any, Any] | None:
             return None
         text = safe_call(rng.getText, "Get range text")
         return text, safe_call(rng.getStart, "Get range start"), safe_call(rng.getEnd, "Get range end")
-    except DocumentDisposedError:
-        # safe_call maps disposal to DocumentDisposedError; do not swallow it.
-        raise
     except UnoObjectError:
         return None
 
@@ -199,9 +190,6 @@ def get_selection_range(model: Any) -> tuple[int, int]:
             # so selection markers are not injected.
             return (0, 0)
         return (start_offset, end_offset)
-    except DocumentDisposedError:
-        # safe_call maps disposal to DocumentDisposedError; do not swallow it.
-        raise
     except UnoObjectError:
         logging.getLogger(__name__).exception("get_selection_range failed")
         return (0, 0)
@@ -478,9 +466,6 @@ def build_heading_tree(model: Any) -> HeadingTreeNode:
                 outline_level = 0
                 try:
                     outline_level = safe_call(element.getPropertyValue, "Get OutlineLevel", "OutlineLevel")
-                except DocumentDisposedError:
-                    # safe_call maps disposal to DocumentDisposedError; do not record level 0.
-                    raise
                 except UnoObjectError as e:
                     logging.getLogger(__name__).debug("build_heading_tree could not get OutlineLevel: %s", e)
 
@@ -507,8 +492,10 @@ def build_heading_tree(model: Any) -> HeadingTreeNode:
     except UnoObjectError:
         # What was wrong: any UNO failure, including a closed document, became an
         # empty root, which callers read as "no headings".
-        # How: DocumentDisposedError subclasses UnoObjectError, and this handler
-        # returned a successful empty tree.
+        # How: this handler swallowed UnoObjectError and returned a successful empty
+        # tree. DocumentDisposedError directly subclasses WriterAgentException (not
+        # UnoObjectError), so disposal propagates unhandled while UnoObjectError is
+        # logged and re-raised here.
         # Why: a failed walk is not an empty outline.
         logging.getLogger(__name__).exception("build_heading_tree error")
         raise
@@ -686,9 +673,6 @@ def get_document_end(model: Any, max_chars: int = 4000) -> str:
         if len(full) <= max_chars:
             return full
         return full[-max_chars:]
-    except DocumentDisposedError:
-        # safe_call maps disposal to DocumentDisposedError; do not swallow it.
-        raise
     except UnoObjectError:
         logging.getLogger(__name__).exception("get_document_end failed")
         return ""
@@ -786,9 +770,6 @@ def get_document_length(model: Any) -> int:
         safe_call(cursor.gotoEnd, "Cursor gotoEnd", True)
         length = len(normalize_linebreaks(safe_call(cursor.getString, "Cursor getString")))
         return length
-    except DocumentDisposedError:
-        # safe_call maps disposal to DocumentDisposedError; do not swallow it.
-        raise
     except UnoObjectError:
         logging.getLogger(__name__).exception("get_document_length failed")
         return 0
@@ -895,9 +876,6 @@ def get_text_cursor_at_range(model: Any, start_offset: int, end_offset: int) -> 
                 break
             remaining -= n
         return cursor
-    except DocumentDisposedError:
-        # safe_call maps disposal to DocumentDisposedError; do not swallow it.
-        raise
     except UnoObjectError:
         logging.getLogger(__name__).exception("get_text_cursor_at_range failed")
         return None

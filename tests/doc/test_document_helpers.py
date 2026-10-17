@@ -1,12 +1,17 @@
 """resolve_locator must not turn an unresolved writer locator into paragraph 0."""
 
 import sys
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-from plugin.doc.document_helpers import DocumentService, resolve_locator
-from plugin.framework.errors import ToolExecutionError
+from plugin.doc.document_helpers import (
+    DocumentService,
+    get_document_context_for_chat,
+    get_full_document_text,
+    resolve_locator,
+)
+from plugin.framework.errors import DocumentDisposedError, ToolExecutionError
 from plugin.tests.testing_utils import ElementStub, WriterDocStub
 
 
@@ -361,7 +366,6 @@ def test_stale_bookmark_anchor_is_not_paragraph_zero():
     with pytest.raises(ToolExecutionError, match="Bookmark '_mcp_stale' anchor is not in the document"):
         resolve_locator(doc, "bookmark:_mcp_stale")
 
-from unittest.mock import patch
 
 @patch.object(DocumentService, 'find_paragraph_element')
 def test_get_page_for_paragraph_uses_find_element(mock_find):
@@ -541,11 +545,6 @@ def test_get_page_count_handles_nested_xtext_cursor():
     mock_body.createTextCursorByRange.assert_not_called()
 
 def test_get_full_document_text_disposed():
-    from plugin.doc.document_helpers import get_full_document_text
-    from plugin.framework.errors import DocumentDisposedError
-    from unittest.mock import MagicMock
-    import pytest
-
     model = MagicMock()
     model.supportsService.side_effect = DocumentDisposedError("stale")
 
@@ -554,13 +553,7 @@ def test_get_full_document_text_disposed():
 
 
 def test_get_document_context_for_chat_writer_disposed():
-    from plugin.doc.document_helpers import get_document_context_for_chat
-    from plugin.framework.errors import DocumentDisposedError
-    from unittest.mock import MagicMock, patch
-    import pytest
-
     model = MagicMock()
-    model.supportsService.return_value = True
     model.supportsService.side_effect = lambda s: s == "com.sun.star.text.TextDocument"
 
     with patch("plugin.doc.text_helpers._writer_char_count", side_effect=DocumentDisposedError("stale")):

@@ -4,6 +4,7 @@ import pytest
 
 from plugin.doc.text_helpers import (
     _visible_portions,
+    _writer_char_count,
     apply_chapter_number,
     chapter_number_from_para,
     clone_text_range,
@@ -14,6 +15,7 @@ from plugin.doc.text_helpers import (
     normalize_file_url,
     normalize_linebreaks,
 )
+from plugin.framework.errors import DocumentDisposedError
 
 
 class _LabelPara:
@@ -535,11 +537,6 @@ def test_visible_text_midwalk_failure_keeps_deletion_free_prefix():
     assert "DELETED" not in got
 
 def test_writer_char_count_disposed():
-    from plugin.doc.text_helpers import _writer_char_count
-    from plugin.framework.errors import DocumentDisposedError
-    from unittest.mock import MagicMock
-    import pytest
-
     model = MagicMock()
     model.getText.side_effect = DocumentDisposedError("stale")
 

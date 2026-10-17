@@ -185,11 +185,11 @@ def get_calc_context_for_chat(model: Any, max_context: int = 8000, ctx: Any = No
                         ctx_str += ", ".join([str(c["value"]) if c["value"] is not None else "" for c in row]) + "\n"
 
         return ctx_str
+    except DocumentDisposedError:
+        raise
     except UnoObjectError:
         logging.getLogger(__name__).exception("get_calc_context_for_chat error")
         return "[Unable to read Calc spreadsheet context. The document may be locked or initializing.]"
-    except DocumentDisposedError:
-        raise
     except Exception:
         logging.getLogger(__name__).exception("get_calc_context_for_chat exception")
         return "[Unable to read Calc spreadsheet context. The document may be locked or initializing.]"

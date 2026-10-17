@@ -48,6 +48,9 @@ EXPECTED_DEFAULT_IDS = [
     "xiaomi/mimo-v2.6-pro",
     "prism-ml/ternary-bonsai-2-27b",
     "cohere/command-a-plus",
+    "reflection/beam-1.0-501b-a23b",
+    "nvidia/nemotron-3.5-super-vl",
+    "liquid/lfm-2.5-24b-a2b",
 ]
 
 EXPECTED_GOLD_ONLY_IDS: list[str] = []

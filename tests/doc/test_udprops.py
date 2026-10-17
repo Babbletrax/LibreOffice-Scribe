@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
+import pytest
+
 from plugin.doc.udprops import get_document_property, set_document_property
+from plugin.framework.errors import DocumentDisposedError
 
 
 def test_get_document_property_missing_api_returns_default():
@@ -47,11 +52,6 @@ def test_set_document_property_trace_names_each_uno_step(capsys, monkeypatch):
     assert "set_document_property: setPropertyValue done" in err
 
 def test_get_document_property_disposed():
-    from plugin.doc.udprops import get_document_property
-    from plugin.framework.errors import DocumentDisposedError
-    from unittest.mock import MagicMock
-    import pytest
-
     doc = MagicMock()
     doc.getDocumentProperties.side_effect = DocumentDisposedError("stale")
 
@@ -60,11 +60,6 @@ def test_get_document_property_disposed():
 
 
 def test_set_document_property_disposed():
-    from plugin.doc.udprops import set_document_property
-    from plugin.framework.errors import DocumentDisposedError
-    from unittest.mock import MagicMock
-    import pytest
-
     doc = MagicMock()
     doc.getDocumentProperties.side_effect = DocumentDisposedError("stale")
 

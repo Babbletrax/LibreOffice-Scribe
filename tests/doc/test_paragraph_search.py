@@ -1,7 +1,11 @@
 """Unit tests for paragraph range helpers moved out of document_helpers."""
 
-from plugin.doc.paragraph_search import find_paragraph_for_range, get_paragraph_ranges, search_paragraph_texts
+from unittest.mock import MagicMock
+
 import pytest
+
+from plugin.doc.paragraph_search import find_paragraph_for_range, get_paragraph_ranges, search_paragraph_texts
+from plugin.framework.errors import DocumentDisposedError
 
 
 class _Enum:
@@ -166,11 +170,6 @@ def test_find_picks_matching_table_when_two_share_a_gap():
     assert second.start_calls == 0
 
 def test_find_paragraph_for_range_disposed():
-    from plugin.doc.paragraph_search import find_paragraph_for_range
-    from plugin.framework.errors import DocumentDisposedError
-    from unittest.mock import MagicMock
-    import pytest
-
     match_range = MagicMock()
     match_range.getText.side_effect = DocumentDisposedError("stale")
 

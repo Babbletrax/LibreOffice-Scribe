@@ -373,11 +373,11 @@ def get_active_document(ctx: Any | None = None) -> Any:
         return _guard_returned_uno(doc)
     except DocumentDisposedError:
         # Re-raise disposal so callers cannot treat a dying document as
-        # "no document". DocumentDisposedError subclasses UnoObjectError;
-        # returning None for every UnoObjectError (safe_call wraps
-        # DisposedException that way) makes a document that died mid-call
-        # look like nothing is open. None stays the answer when
-        # get_desktop() is None or the component itself is missing.
+        # "no document". DocumentDisposedError directly subclasses
+        # WriterAgentException (not UnoObjectError); re-raising here prevents
+        # the broader Exception handler below from swallowing disposal. None
+        # stays the answer when get_desktop() is None or the component itself
+        # is missing.
         raise
     except UnoObjectError:
         log.warning("get_active_document UnoObjectError", exc_info=True)
