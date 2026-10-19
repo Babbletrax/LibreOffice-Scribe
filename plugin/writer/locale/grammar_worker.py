@@ -24,7 +24,6 @@ from typing import Any
 
 from . import grammar_proofread_cache, grammar_proofread_json, grammar_proofread_locale, grammar_persistence, grammar_proofread_text
 from .grammar_obs import emit_grammar_status, grammar_obs
-from .grammar_persistence import get_cached_document_locales as _get_cached_document_locales
 from .grammar_proofread_locale import grammar_bcp47_tags_match, normalize_detected_bcp47
 from .grammar_proofread_text import slice_preview_debug
 from .grammar_work_queue import GrammarWorkItem, GrammarWorkQueue, next_enqueue_seq, grammar_queue
@@ -326,7 +325,16 @@ def run_grammar_check(
         grammar_obs("worker_grammar_done", chunk_len=len(chunk), results_len=len(results), elapsed_ms=elapsed_ms, bcp47=bcp47)
         if completion.apply_locale_after_success:
             for item, text in chunk:
-                grammar_persistence.apply_language_change(ec.ctx, item.doc_id, text, bcp47, start_pos=getattr(item, 'n_start', 0))
+                applied = grammar_persistence.apply_language_change(
+                    ec.ctx,
+                    item.doc_id,
+                    text,
+                    bcp47,
+                    start_pos=getattr(item, 'n_start', 0),
+                    paragraph_text=getattr(item, 'paragraph_text', ""),
+                )
+                if not applied:
+                    grammar_obs("apply_language_change_skip", doc_id=item.doc_id, sentence=text, bcp47=bcp47)
 
 
     except Exception as e:
@@ -887,7 +895,8 @@ def _worker_build_chunks(
                 detect_items.append((item, text))
 
         if detect_items:
-            locales_in_use = _get_cached_document_locales(ctx, detect_items[0][0].doc_id)
+            doc_locales = grammar_persistence.grammar_registry.get_doc_locales(detect_items[0][0].doc_id)
+            locales_in_use = sorted(doc_locales | {detect_items[0][0].grammar_bcp47})
             detect_lang_instruction = f" Choose from the following locales currently used in the document, or provide a new one if none match: {', '.join(locales_in_use)}."
 
         return _chunkify(plain_items), _chunkify(detect_items), detect_lang_instruction
