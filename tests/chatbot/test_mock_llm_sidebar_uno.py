@@ -1715,10 +1715,18 @@ def _restore_writer_after_calc(ctx, writer, calc, saved_controls, saved_listener
         close_component,
         current_component,
         desktop_from_ctx,
+        find_calc_component,
         wait_for_chat_dialog_controls,
     )
 
     close_component(calc)
+    # Wait for the Calc window to finish closing before focusing Writer. Focusing
+    # right away crashed LibreOffice once (Calc's half-closed view got the
+    # deactivate call, TabBar::GetPageCount in the E23 stack).
+    deadline = time.monotonic() + 10.0
+    while calc is not None and time.monotonic() < deadline and find_calc_component(ctx) is not None:
+        time.sleep(0.1)
+    time.sleep(0.3)
     if writer is not None:
         try:
             frame = writer.getCurrentController().getFrame()
@@ -4247,10 +4255,10 @@ def test_i2_image_generation_calc(ctx):
     try:
         calc = open_calc_document(ctx)
         _adopt_calc_sidebar(ctx, calc)
-        before = get_draw_graphics_count(ctx=ctx)
+        before = get_draw_graphics_count(ctx=ctx, doc=calc)
         _send_and_wait("generate an image", timeout=60.0)
         assert _image_posts() == 1, f"I2 expected one image POST from Calc, captures={_captures()[-4:]}"
-        after = get_draw_graphics_count(ctx=ctx)
+        after = get_draw_graphics_count(ctx=ctx, doc=calc)
         assert after == before + 1, f"I2 expected exactly 1 image inserted into Calc, got {after - before}"
         _hello_ok()
     finally:
