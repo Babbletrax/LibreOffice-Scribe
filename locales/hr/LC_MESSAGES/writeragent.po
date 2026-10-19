@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-07 23:17-0400\n"
+"POT-Creation-Date: 2026-10-19 12:57-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: Croatian <LL@li.org>\n"
@@ -76,6 +76,10 @@ msgstr "Prvo otvorite Writer dokument."
 msgid "Run code cell"
 msgstr "Pokreni ćeliju s kodom"
 
+#: plugin/notebook/notebook_controls.py
+msgid "Code"
+msgstr "Kod"
+
 #: plugin/embeddings/search_ui.py
 msgid "just now"
 msgstr "upravo sada"
@@ -94,6 +98,14 @@ msgstr "prije {0}h"
 #, python-brace-format
 msgid "{0}d ago"
 msgstr "prije {0}d"
+
+#: plugin/embeddings/search_ui.py
+msgid "Failed to open search dialog."
+msgstr "Nije uspjelo otvaranje dijaloškog okvira za pretraživanje."
+
+#: plugin/embeddings/search_ui.py plugin/xdl_strings.py
+msgid "Search Nearby Files"
+msgstr "Pretraži obližnje datoteke"
 
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: No active document"
@@ -188,29 +200,29 @@ msgid "Rebuild failed: "
 msgstr "Ponovna izgradnja nije uspjela: "
 
 #: plugin/framework/errors.py
-#, python-brace-format
-msgid "TLS/SSL Error: {0}"
-msgstr "TLS/SSL pogreška: {0}"
-
-#: plugin/framework/errors.py plugin/framework/client/errors.py
 msgid "Invalid API Key. Please check your settings."
 msgstr "Nevažeći API ključ. Molimo provjerite svoje postavke."
 
-#: plugin/framework/errors.py plugin/framework/client/errors.py
+#: plugin/framework/errors.py
 msgid "API access Forbidden. Your key may lack permissions for this model."
 msgstr ""
 "Pristup API-ju je zabranjen. Vašem ključu možda nedostaju dozvole za ovaj "
 "model."
 
-#: plugin/framework/errors.py plugin/framework/client/errors.py
+#: plugin/framework/errors.py
 msgid "Endpoint not found (404). Check your URL and Model name."
 msgstr ""
 "Krajnja točka nije pronađena (404). Provjerite svoj URL i naziv modela."
 
-#: plugin/framework/errors.py plugin/framework/client/errors.py
+#: plugin/framework/errors.py
 msgid "Rate limited (429). Wait a moment and try again."
 msgstr ""
 "Ograničen broj zahtjeva (429). Pričekajte trenutak i pokušajte ponovno."
+
+#: plugin/framework/errors.py
+#, python-brace-format
+msgid "TLS/SSL Error: {0}"
+msgstr "TLS/SSL pogreška: {0}"
 
 #: plugin/framework/errors.py
 #, python-brace-format
@@ -379,6 +391,22 @@ msgstr ""
 msgid "Provider busy, retrying in {0}s…"
 msgstr "Pružatelj usluge je zauzet, ponovni pokušaj za {0}s…"
 
+#: plugin/framework/client/request_controls.py
+#, python-brace-format
+msgid "Provider asked to wait {0}s, which is above the {1}s retry cap."
+msgstr ""
+"Pružatelj usluge traži čekanje od {0}s, što je iznad ograničenja ponovnog "
+"pokušaja od {1}s."
+
+#: plugin/framework/client/request_controls.py
+#, python-brace-format
+msgid "Spacing free-model requests, next send in {0}s…"
+msgstr "Razmak između zahtjeva slobodnog modela, sljedeće slanje za {0}s…"
+
+#: plugin/framework/client/anthropic_shim.py
+msgid "Anthropic model is not set. Choose a model in Settings."
+msgstr "Anthropic model nije postavljen. Odaberite model u Postavkama."
+
 #: plugin/framework/main_shared.py plugin/calc/python/cell_editor_ui.py
 #: plugin/writer/math/latex_dialog.py plugin/chatbot/panel.py
 #: plugin/chatbot/external_editor.py plugin/chatbot/send_handlers.py
@@ -419,6 +447,14 @@ msgstr ""
 #: plugin/audio/stt_service.py
 msgid "Transcribing audio..."
 msgstr "Transkribiranje zvuka..."
+
+#: plugin/audio/stt_service.py
+msgid ""
+"Could not check whether faster-whisper is installed. The Settings → Python "
+"interpreter timed out or could not start."
+msgstr ""
+"Nije bilo moguće provjeriti je li faster-whisper instaliran. Postavke → "
+"Python tumač su istekle ili se nisu mogle pokrenuti."
 
 #: plugin/audio/stt_service.py
 #, python-brace-format
@@ -543,7 +579,6 @@ msgstr "Preuzimanje rječnika za japanski fonemizator…"
 
 #: plugin/calc/python/editor_context_menu.py plugin/librepy/sidebar_menus.py
 #: plugin/chatbot/hamburger_menu.py plugin/chatbot/panel_factory.py
-#: plugin/main.py
 msgid "Edit Python in Cell..."
 msgstr "Uredi Python u ćeliji..."
 
@@ -590,10 +625,6 @@ msgid "Ready"
 msgstr "Spremno"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/scripting/editor_ui_strings.py
-msgid "A1:C1  or  A1:C1, C1:C5"
-msgstr "A1:C1 ili A1:C1, C1:C5"
-
-#: plugin/calc/python/cell_editor_ui.py plugin/scripting/editor_ui_strings.py
 msgid "Data ranges apply only when saving as a =PY() formula."
 msgstr "Rasponi podataka primjenjuju se samo pri spremanju kao =PY() formula."
 
@@ -606,7 +637,6 @@ msgid "Saving…"
 msgstr "Spremanje…"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/calc/python/editor.py
-#: plugin/scripting/editor_ui_strings.py
 msgid "Saved without =PY()."
 msgstr "Spremljeno bez =PY()."
 
@@ -650,6 +680,11 @@ msgstr ""
 "Nije bilo moguće prepisati xl() literalne raspone u =PY argumente podataka: "
 "%s"
 
+#: plugin/calc/python/editor.py
+#, python-brace-format
+msgid "Saved code in {0}."
+msgstr "Kod spremljen u {0}."
+
 #: plugin/calc/python/editor.py plugin/xdl_strings.py
 msgid "Python cell editor"
 msgstr "Python uređivač ćelija"
@@ -660,7 +695,8 @@ msgid "Save without =PY()"
 msgstr "Spremi bez =PY()"
 
 #: plugin/calc/python/editor.py plugin/scripting/editor_ui_strings.py
-#: plugin/scripting/python_runner.py plugin/xdl_strings.py
+#: plugin/scripting/python_runner_ui.py plugin/scripting/python_runner.py
+#: plugin/xdl_strings.py
 msgid "Save"
 msgstr "Spremi"
 
@@ -799,17 +835,10 @@ msgstr "Postavke Pythona"
 msgid "Could not open Settings."
 msgstr "Nije bilo moguće otvoriti Postavke."
 
-#: plugin/librepy/python_sidebar.py plugin/xdl_strings.py
-msgid "All"
-msgstr "Sve"
-
-#: plugin/librepy/python_sidebar.py
-msgid "Errors"
-msgstr "Pogreške"
-
-#: plugin/librepy/python_sidebar.py plugin/scripting/python_runner_ui.py
-msgid "Output"
-msgstr "Izlaz"
+#: plugin/librepy/settings.py plugin/chatbot/module_config_dialog.py
+#: plugin/chatbot/dialog_views.py
+msgid "Invalid Setting"
+msgstr "Nevažeća postavka"
 
 #: plugin/librepy/python_sidebar.py
 msgid "Shared kernel"
@@ -847,15 +876,15 @@ msgstr ""
 "Venv: nedostaje python na {path}"
 
 #: plugin/librepy/python_sidebar.py
-msgid "(no =PY() cells on active sheet)"
-msgstr "(nema =PY() ćelija na aktivnom listu)"
-
-#: plugin/librepy/python_sidebar.py
 msgid "(no diagnostics yet)"
 msgstr "(još nema dijagnostike)"
 
+#: plugin/librepy/python_sidebar.py
+msgid "(no =PY() cells on active sheet)"
+msgstr "(nema =PY() ćelija na aktivnom listu)"
+
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/chatbot/panel_factory.py plugin/main.py
+#: plugin/chatbot/panel_factory.py
 msgid "Run Python Script..."
 msgstr "Pokreni Python skriptu..."
 
@@ -865,43 +894,38 @@ msgid "Insert LaTeX Math..."
 msgstr "Umetni LaTeX formulu..."
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py
 msgid "Text Analytics..."
 msgstr "Analiza teksta..."
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
 #: plugin/chatbot/dialog_views.py plugin/chatbot/panel_factory.py
-#: plugin/main.py plugin/xdl_strings.py
+#: plugin/xdl_strings.py
 msgid "Settings"
 msgstr "Postavke"
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py
 msgid "Vision OCR Settings..."
 msgstr "Postavke Vision OCR-a..."
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py
 msgid "Reset Python Session"
 msgstr "Ponovno pokreni Python sesiju"
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py
 msgid "Run All"
 msgstr "Pokreni sve"
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py
 msgid "Run From Here"
 msgstr "Pokreni odavde"
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py plugin/xdl_strings.py
+#: plugin/xdl_strings.py
 msgid "Stop"
 msgstr "Zaustavi"
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/dialogs.py
-#: plugin/chatbot/hamburger_menu.py plugin/main.py plugin/xdl_strings.py
+#: plugin/chatbot/hamburger_menu.py plugin/xdl_strings.py
 msgid "Report bug..."
 msgstr "Prijavi pogrešku..."
 
@@ -916,6 +940,95 @@ msgstr "Prihvati cijelu promjenu (agent)"
 #: plugin/writer/change_context_menu.py
 msgid "Reject whole change (agent)"
 msgstr "Odbij cijelu promjenu (agent)"
+
+#: plugin/writer/inline_review.py
+msgid "No agent changes to review in this document."
+msgstr "Nema promjena agenta za pregled u ovom dokumentu."
+
+#: plugin/writer/inline_review.py
+#, python-format
+msgid "%d overlapping agent changes accepted together."
+msgstr "%d preklapajućih promjena agenta prihvaćeno zajedno."
+
+#: plugin/writer/inline_review.py
+#, python-format
+msgid "%d overlapping agent changes rejected together."
+msgstr "%d preklapajućih promjena agenta odbijeno zajedno."
+
+#: plugin/writer/inline_review.py
+msgid "Change accepted."
+msgstr "Izmjena prihvaćena."
+
+#: plugin/writer/inline_review.py
+msgid "Change rejected."
+msgstr "Izmjena odbijena."
+
+#: plugin/writer/inline_review.py
+msgid ""
+"Couldn't read this document's tracked changes reliably just now -- nothing "
+"was changed. Please try again."
+msgstr ""
+"Trenutačno nije bilo moguće pouzdano pročitati praćene izmjene u ovom "
+"dokumentu – ništa nije promijenjeno. Molimo pokušajte ponovno."
+
+#: plugin/writer/inline_review.py
+msgid ""
+"Started resolving changes but couldn't confirm the result -- some may have "
+"been resolved. Please review remaining changes in Edit > Track Changes > "
+"Manage."
+msgstr ""
+"Započeto je rješavanje izmjena, ali rezultat nije bilo moguće potvrditi – "
+"neke su možda riješene. Molimo pregledajte preostale izmjene u Uređivanje > "
+"Praćenje izmjena > Upravljanje."
+
+#: plugin/writer/inline_review.py
+msgid ""
+"Nothing was changed. Resolve remaining changes from Edit > Track Changes > "
+"Manage."
+msgstr ""
+"Ništa nije promijenjeno. Riješite preostale izmjene u Uređivanje > Praćenje "
+"izmjena > Upravljanje."
+
+#: plugin/writer/inline_review.py
+msgid ""
+"None could be resolved here -- each overlaps with one of your own tracked "
+"changes. Resolve them from Edit > Track Changes > Manage."
+msgstr ""
+"Ovdje se nijedna nije mogla riješiti – svaka se preklapa s jednom od vaših "
+"vlastitih praćenih izmjena. Riješite ih u Uređivanje > Praćenje izmjena > "
+"Upravljanje."
+
+#: plugin/writer/inline_review.py
+#, python-format
+msgid ""
+"Resolved %(resolved)d of %(total)d. The rest overlap with your own tracked "
+"changes -- resolve those from Edit > Track Changes > Manage."
+msgstr ""
+"Riješeno %(resolved)d od %(total)d. Ostale se preklapaju s vašim vlastitim "
+"praćenim izmjenama – riješite ih u Uređivanje > Praćenje izmjena > "
+"Upravljanje."
+
+#: plugin/writer/inline_review.py
+msgid ""
+"Could not resolve this change here -- it may share a paragraph with one of "
+"your tracked changes or another agent change. Resolve it from Edit > Track "
+"Changes > Manage."
+msgstr ""
+"Ovu izmjenu nije bilo moguće riješiti ovdje – možda dijeli odlomak s jednom "
+"od vaših praćenih izmjena ili drugom izmjenom agenta. Riješite je u "
+"Uređivanje > Praćenje izmjena > Upravljanje."
+
+#: plugin/writer/inline_review.py
+msgid "Put the cursor on a highlighted agent change first."
+msgstr "Prvo postavite pokazivač na istaknutu izmjenu agenta."
+
+#: plugin/writer/inline_review.py
+msgid "Review agent changes"
+msgstr "Pregledaj izmjene agenta"
+
+#: plugin/writer/inline_review.py
+msgid "Resolve agent changes"
+msgstr "Razriješi promjene agenta"
 
 #: plugin/writer/review_click_popup.py
 msgid "Accept this change"
@@ -948,6 +1061,14 @@ msgstr ""
 "promjena."
 
 #: plugin/writer/edit_review.py
+#, python-brace-format
+msgid ""
+"Failed to collapse the streamed continuation into a single tracked change: "
+"{0}"
+msgstr ""
+"Nije uspjelo sažimanje strujanog nastavka u jednu praćenu promjenu: {0}"
+
+#: plugin/writer/edit_review.py
 msgid ""
 "Failed to collapse the streamed continuation into a single tracked change. "
 "The text was kept, but may not be reviewable."
@@ -966,6 +1087,10 @@ msgstr ""
 #: plugin/writer/editselection.py
 msgid "WriterAgent: Extend Selection"
 msgstr "WriterAgent: Proširi odabir"
+
+#: plugin/writer/editselection.py
+msgid "Select text first"
+msgstr "Prvo odaberite tekst"
 
 #: plugin/writer/editselection.py
 msgid "WriterAgent: Edit Selection"
@@ -1018,6 +1143,10 @@ msgid ""
 msgstr ""
 "Nije bilo moguće identificirati odabranu formulu. Kliknite u tekst, zatim "
 "umetnite novu formulu."
+
+#: plugin/writer/math/latex_dialog.py
+msgid "Could not convert formula to LaTeX. Enter formula manually."
+msgstr "Nije moguće pretvoriti formulu u LaTeX. Unesite formulu ručno."
 
 #: plugin/writer/math/latex_dialog.py
 msgid "Unknown conversion error"
@@ -1300,10 +1429,6 @@ msgstr "zašto"
 msgid "you"
 msgstr "vi"
 
-#: plugin/chatbot/module_config_dialog.py plugin/chatbot/dialog_views.py
-msgid "Invalid Setting"
-msgstr "Nevažeća postavka"
-
 #: plugin/chatbot/dialogs.py
 msgid "Agent requests approval"
 msgstr "Agent traži odobrenje"
@@ -1325,24 +1450,23 @@ msgstr "Kopirano!"
 msgid "Copy URL"
 msgstr "Kopiraj URL"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Extend Selection"
 msgstr "Proširi odabir"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Edit Selection"
 msgstr "Uredi odabir"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Convert Sheet to Python..."
 msgstr "Pretvori list u Python..."
 
 #: plugin/chatbot/hamburger_menu.py plugin/chatbot/panel_factory.py
-#: plugin/main.py
 msgid "Search Nearby Files..."
 msgstr "Pretraži obližnje datoteke..."
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Toggle MCP Server"
 msgstr "Uključi/isključi MCP poslužitelj"
 
@@ -1354,37 +1478,33 @@ msgstr "MCP poslužitelj (pokrenut)"
 msgid "MCP Server (Stopped)"
 msgstr "MCP poslužitelj (zaustavljen)"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Run format tests"
 msgstr "Pokreni testove oblikovanja"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Run calc tests"
 msgstr "Pokreni testove za Calc"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Run Calc API integration tests"
 msgstr "Pokreni testove integracije Calc API-ja"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Run draw tests"
 msgstr "Pokreni testove za Draw"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Evaluation Dashboard"
 msgstr "Nadzorna ploča procjene"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Debug"
 msgstr "Otklanjanje pogrešaka"
 
 #: plugin/chatbot/tool_loop.py plugin/chatbot/panel.py
 msgid "[Voice message]"
 msgstr "[Glasovna poruka]"
-
-#: plugin/chatbot/tool_loop.py
-msgid "Error: Toolkit unavailable"
-msgstr "Pogreška: Alatna traka nije dostupna"
 
 #: plugin/chatbot/chat_sidebar_mode.py plugin/xdl_strings.py
 msgid "Chat"
@@ -1410,7 +1530,7 @@ msgstr "Brainstorming"
 msgid "Writing Plan"
 msgstr "Plan pisanja"
 
-#: plugin/chatbot/chat_sidebar_mode.py
+#: plugin/chatbot/chat_sidebar_mode.py plugin/chatbot/dialog_views.py
 msgid "PPT-Master"
 msgstr "PPT-Master"
 
@@ -1650,11 +1770,6 @@ msgstr "[Pogreška transkripcije: {0}]"
 #, python-brace-format
 msgid "[Document context error: {0}]"
 msgstr "[Pogreška konteksta dokumenta: {0}]"
-
-#: plugin/chatbot/send_handlers.py
-#, python-brace-format
-msgid "[Agent backend '{0}' not found.]"
-msgstr "[Pozadinski agent '{0}' nije pronađen.]"
 
 #: plugin/chatbot/send_handlers.py
 #, python-brace-format
@@ -1936,19 +2051,13 @@ msgstr "Nova Python skripta"
 msgid "Script name:"
 msgstr "Naziv skripte:"
 
-#: plugin/scripting/script_dialogs.py
-msgid "Script name cannot start with a reserved prefix."
-msgstr "Naziv skripte ne može započeti rezerviranim prefiksom."
+#: plugin/scripting/script_dialogs.py plugin/scripting/editor_ui_strings.py
+msgid "Attach to this document (no document is open)"
+msgstr "Priloži ovom dokumentu (nema otvorenog dokumenta)"
 
 #: plugin/scripting/script_dialogs.py plugin/scripting/editor_ui_strings.py
-#: plugin/xdl_strings.py
-msgid "Attach to this document"
-msgstr "Pridruži ovom dokumentu"
-
-#: plugin/scripting/script_dialogs.py plugin/scripting/editor_ui_strings.py
-#: plugin/scripting/document_scripts.py
-msgid "Script name cannot be empty."
-msgstr "Naziv skripte ne može biti prazan."
+msgid "Attach to this document (this document is read-only)"
+msgstr "Priloži ovom dokumentu (ovaj dokument je samo za čitanje)"
 
 #: plugin/scripting/editor_ui_strings.py
 msgid "Running…"
@@ -1975,25 +2084,33 @@ msgstr "Odustani"
 msgid "Data:"
 msgstr "Podaci:"
 
+#: plugin/scripting/editor_ui_strings.py
+msgid "A1:C1  or  A1:C1, C1:C5"
+msgstr "A1:C1 ili A1:C1, C1:C5"
+
 #: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
 msgid "New"
 msgstr "Novo"
+
+#: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
+msgid "Attach to this document"
+msgstr "Pridruži ovom dokumentu"
+
+#: plugin/scripting/editor_ui_strings.py
+msgid "Attach to this document (this document changed)"
+msgstr "Priloži ovom dokumentu (ovaj dokument je promijenjen)"
 
 #: plugin/scripting/editor_ui_strings.py
 msgid "Create"
 msgstr "Stvori"
 
+#: plugin/scripting/editor_ui_strings.py plugin/scripting/document_scripts.py
+msgid "Script name cannot be empty."
+msgstr "Naziv skripte ne može biti prazan."
+
 #: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
 msgid "Script:"
 msgstr "Skripta:"
-
-#: plugin/scripting/editor_ui_strings.py
-msgid "Attach"
-msgstr "Pridruži"
-
-#: plugin/scripting/editor_ui_strings.py
-msgid "Attach to Document"
-msgstr "Priloži dokumentu"
 
 #: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
 msgid "Save As..."
@@ -2016,11 +2133,11 @@ msgid "My Scripts"
 msgstr "Moje skripte"
 
 #: plugin/scripting/editor_ui_strings.py plugin/scripting/document_scripts.py
-#: plugin/scripting/python_runner_ui.py
-msgid "Built-in helpers are read-only. Use Copy to My Scripts to customize."
+msgid ""
+"Built-in helpers are read-only. Use Save As to copy one into My Scripts."
 msgstr ""
-"Ugrađeni pomoćnici su samo za čitanje. Koristite Kopiraj u Moje skripte za "
-"prilagodbu."
+"Ugrađeni pomoćnici su samo za čitanje. Koristite Spremi kao za kopiranje u "
+"Moje skripte."
 
 #: plugin/scripting/editor_ui_strings.py plugin/scripting/document_scripts.py
 msgid ""
@@ -2034,20 +2151,6 @@ msgstr ""
 #, python-brace-format
 msgid "Loaded script '{0}'."
 msgstr "Učitana skripta '{0}'."
-
-#: plugin/scripting/editor_ui_strings.py plugin/scripting/document_scripts.py
-msgid "No document is open to attach scripts."
-msgstr "Nijedan dokument nije otvoren za pridruživanje skripti."
-
-#: plugin/scripting/editor_ui_strings.py
-#, python-brace-format
-msgid "Attaching script '{0}'..."
-msgstr "Pridruživanje skripte '{0}'..."
-
-#: plugin/scripting/editor_ui_strings.py
-#, python-brace-format
-msgid "Copying script '{0}' to My Scripts..."
-msgstr "Kopiranje skripte '{0}' u Moje skripte..."
 
 #: plugin/scripting/editor_ui_strings.py
 #, python-brace-format
@@ -2063,19 +2166,11 @@ msgstr "Brisanje skripte '{0}'..."
 msgid "Built-in helpers cannot be deleted."
 msgstr "Ugrađeni pomoćnici se ne mogu izbrisati."
 
-#: plugin/scripting/editor_ui_strings.py
-msgid "Enter script name:"
-msgstr "Unesite naziv skripte:"
-
 #: plugin/scripting/editor_ui_strings.py plugin/scripting/python_runner_ui.py
 #, python-brace-format
 msgid "A script named '{0}' already exists in this document. Overwrite?"
 msgstr ""
 "Skripta naziva '{0}' već postoji u ovom dokumentu. Želite li je prebrisati?"
-
-#: plugin/scripting/editor_ui_strings.py
-msgid "Copy to My Scripts as:"
-msgstr "Kopiraj u Moje skripte kao:"
 
 #: plugin/scripting/editor_ui_strings.py plugin/scripting/python_runner_ui.py
 #, python-brace-format
@@ -2083,11 +2178,6 @@ msgid "A script named '{0}' already exists in My Scripts. Overwrite?"
 msgstr ""
 "Skripta pod nazivom '{0}' već postoji u Mojim skriptama. Želite li je "
 "prebrisati?"
-
-#: plugin/scripting/editor_ui_strings.py
-#, python-brace-format
-msgid "Save script '{0}' to this document?"
-msgstr "Spremiti skriptu '{0}' u ovaj dokument?"
 
 #: plugin/scripting/editor_ui_strings.py
 #, python-brace-format
@@ -2100,6 +2190,25 @@ msgstr ""
 "Odaberite raspon podataka ili unesite A1 adresu (umetnuto kao podaci)."
 
 #: plugin/scripting/document_scripts.py
+msgid "Stored document scripts are unreadable, so they were left unchanged."
+msgstr ""
+"Pohranjene skripte dokumenta su nečitljive, stoga su ostavljene "
+"nepromijenjene."
+
+#: plugin/scripting/document_scripts.py
+#, python-brace-format
+msgid ""
+"Stored document scripts are in an unsupported format (version {0}), so they "
+"were left unchanged."
+msgstr ""
+"Pohranjene skripte dokumenta su u nepodržanom formatu (verzija {0}), stoga "
+"su ostavljene nepromijenjene."
+
+#: plugin/scripting/document_scripts.py
+msgid "Document is read-only or properties cannot be written."
+msgstr "Dokument je samo za čitanje ili se svojstva ne mogu zapisati."
+
+#: plugin/scripting/document_scripts.py
 #, python-brace-format
 msgid "Document scripts are too large to store in the document ({0} bytes)."
 msgstr "Skripte dokumenta su prevelike za pohranu u dokument ({0} bajtova)."
@@ -2107,10 +2216,6 @@ msgstr "Skripte dokumenta su prevelike za pohranu u dokument ({0} bajtova)."
 #: plugin/scripting/document_scripts.py plugin/scripting/python_runner_ui.py
 msgid "No document is open to save scripts."
 msgstr "Nijedan dokument nije otvoren za spremanje skripti."
-
-#: plugin/scripting/document_scripts.py
-msgid "Document is read-only or properties cannot be written."
-msgstr "Dokument je samo za čitanje ili se svojstva ne mogu zapisati."
 
 #: plugin/scripting/document_scripts.py
 msgid ""
@@ -2146,6 +2251,23 @@ msgstr "Ovaj dokument"
 
 #: plugin/scripting/document_scripts.py
 #, python-brace-format
+msgid ""
+"Could not save '{0}' to this document ({1}). Saved it to My Scripts instead."
+msgstr ""
+"Nije bilo moguće spremiti '{0}' u ovaj dokument ({1}). Umjesto toga "
+"spremljeno je u Moje skripte."
+
+#: plugin/scripting/document_scripts.py
+#, python-brace-format
+msgid ""
+"Could not save '{0}' to this document ({1}). A script named '{0}' already "
+"exists in My Scripts."
+msgstr ""
+"Nije bilo moguće spremiti '{0}' u ovaj dokument ({1}). Skripta pod nazivom "
+"'{0}' već postoji u Mojim skriptama."
+
+#: plugin/scripting/document_scripts.py
+#, python-brace-format
 msgid "Script '{0}' does not exist in My Scripts."
 msgstr "Skripta '{0}' ne postoji u Mojim skriptama."
 
@@ -2163,16 +2285,6 @@ msgstr "Nijedan dokument nije otvoren."
 
 #: plugin/scripting/document_scripts.py
 #, python-brace-format
-msgid "A script named '{0}' already exists in My Scripts. {1}"
-msgstr "Skripta pod nazivom '{0}' već postoji u Mojim skriptama. {1}"
-
-#: plugin/scripting/document_scripts.py
-#, python-brace-format
-msgid "Saved script '{0}' to My Scripts. {1}"
-msgstr "Skripta '{0}' spremljena u Moje skripte. {1}"
-
-#: plugin/scripting/document_scripts.py
-#, python-brace-format
 msgid "Saved script '{0}' to this document."
 msgstr "Skripta '{0}' spremljena u ovaj dokument."
 
@@ -2180,21 +2292,6 @@ msgstr "Skripta '{0}' spremljena u ovaj dokument."
 #, python-brace-format
 msgid "Saved script '{0}'."
 msgstr "Skripta '{0}' je spremljena."
-
-#: plugin/scripting/document_scripts.py
-#, python-brace-format
-msgid "Attached script '{0}' to this document."
-msgstr "Skripta '{0}' je pridružena ovom dokumentu."
-
-#: plugin/scripting/document_scripts.py
-#, python-brace-format
-msgid "A script named '{0}' already exists in My Scripts."
-msgstr "Skripta pod nazivom '{0}' već postoji u Mojim skriptama."
-
-#: plugin/scripting/document_scripts.py
-#, python-brace-format
-msgid "Copied script '{0}' to My Scripts."
-msgstr "Skripta '{0}' je kopirana u Moje skripte."
 
 #: plugin/scripting/document_scripts.py
 #, python-brace-format
@@ -2206,7 +2303,7 @@ msgstr "Izbrisana je skripta dokumenta '{0}'."
 msgid "Deleted script '{0}'."
 msgstr "Izbrisana je skripta '{0}'."
 
-#: plugin/scripting/document_scripts.py
+#: plugin/scripting/document_scripts.py plugin/scripting/text_analytics_ui.py
 msgid "The document was closed."
 msgstr "Dokument je zatvoren."
 
@@ -2215,19 +2312,12 @@ msgid "The document is no longer open."
 msgstr "Dokument više nije otvoren."
 
 #: plugin/scripting/python_runner_ui.py
+msgid "Script preparation failed."
+msgstr "Priprema skripte nije uspjela."
+
+#: plugin/scripting/python_runner_ui.py
 msgid "PythonScriptDialog could not be loaded from the extension."
 msgstr "PythonScriptDialog se nije mogao učitati iz proširenja."
-
-#: plugin/scripting/python_runner_ui.py
-#, python-format
-msgid "Cannot save to My Scripts: a script named '%s' already exists."
-msgstr ""
-"Nije moguće spremiti u Moje skripte: skripta pod nazivom '%s' već postoji."
-
-#: plugin/scripting/python_runner_ui.py
-#, python-format
-msgid "%s Saved to My Scripts instead."
-msgstr "%s Spremljeno u Moje skripte."
 
 #: plugin/scripting/python_runner_ui.py
 #, python-format
@@ -2288,13 +2378,9 @@ msgstr "Skripta uspješno izvršena."
 msgid "Success"
 msgstr "Uspjeh"
 
-#: plugin/scripting/venv_probe_ui.py
-msgid "Venv OK"
-msgstr "Venv u redu"
-
-#: plugin/scripting/venv_probe_ui.py
-msgid "Venv check failed"
-msgstr "Provjera Venv-a nije uspjela"
+#: plugin/scripting/python_runner_ui.py
+msgid "Output"
+msgstr "Izlaz"
 
 #: plugin/scripting/venv_probe_ui.py plugin/xdl_strings.py
 msgid "Testing Python environment..."
@@ -2307,6 +2393,14 @@ msgstr "Gotovo"
 #: plugin/scripting/venv_probe_ui.py
 msgid "Failed"
 msgstr "Neuspjelo"
+
+#: plugin/scripting/venv_probe_ui.py
+msgid "Venv OK"
+msgstr "Venv u redu"
+
+#: plugin/scripting/venv_probe_ui.py
+msgid "Venv check failed"
+msgstr "Provjera Venv-a nije uspjela"
 
 #: plugin/scripting/editor_host.py
 msgid ""
@@ -2332,12 +2426,20 @@ msgid "The script list update timed out."
 msgstr "Vrijeme za ažuriranje popisa skripti je isteklo."
 
 #: plugin/scripting/editor_host.py
+msgid "The script list update failed."
+msgstr "Ažuriranje popisa skripti nije uspjelo."
+
+#: plugin/scripting/editor_host.py
 msgid "Script execution failed."
 msgstr "Izvršavanje skripte nije uspjelo."
 
 #: plugin/scripting/editor_host.py
 msgid "Saving the script timed out."
 msgstr "Vrijeme za spremanje skripte je isteklo."
+
+#: plugin/scripting/editor_host.py
+msgid "Saving the script failed."
+msgstr "Spremanje skripte nije uspjelo."
 
 #: plugin/scripting/editor_host.py
 msgid "the initialization script"
@@ -2379,9 +2481,12 @@ msgid "Could not talk to the Python editor."
 msgstr "Nije bilo moguće komunicirati s Python uređivačem."
 
 #: plugin/scripting/venv_diagnostics.py
-msgid "On Linux also install system PortAudio: sudo pacman -S portaudio"
+msgid ""
+"On Linux also install the system PortAudio package from your distribution "
+"(sounddevice needs it; the package name differs)."
 msgstr ""
-"Na Linuxu također instalirajte sistemski PortAudio: sudo pacman -S portaudio"
+"Na Linuxu također instalirajte sistemski PortAudio paket iz svoje "
+"distribucije (sounddevice ga treba; naziv paketa se razlikuje)."
 
 #: plugin/scripting/venv_diagnostics.py
 msgid "Audio probe timed out (sounddevice import failed or hung)."
@@ -2492,10 +2597,6 @@ msgid "Vector Search Libraries"
 msgstr "Biblioteke vektorskog pretraživanja"
 
 #: plugin/scripting/venv_diagnostics.py
-msgid "Audio Recording"
-msgstr "Snimanje zvuka"
-
-#: plugin/scripting/venv_diagnostics.py
 msgid "To install remaining packages:"
 msgstr "Za instalaciju preostalih paketa:"
 
@@ -2563,49 +2664,37 @@ msgid "Could not load the analytics dialog."
 msgstr "Nije bilo moguće učitati dijaloški okvir za analizu."
 
 #: plugin/scripting/text_analytics_ui.py
-msgid "Checking spaCy / textdescriptives / transformers installation..."
-msgstr "Provjera instalacije spaCy / textdescriptives / transformers..."
-
-#: plugin/scripting/text_analytics_ui.py
-#, python-brace-format
-msgid ""
-"Error from the Text Analytics worker:\n"
-"{err}\n"
-"\n"
-"The features in this dialog require these packages in the python it is using:\n"
-"  • spacy + a model          (entities, key phrases, basic stats)\n"
-"  • textdescriptives         (real Readability scores)\n"
-"  • transformers + torch     (Sentiment using the multilingual model)\n"
-"\n"
-"Install them with:\n"
-"  {install}\n"
-"\n"
-"The worker reported the module as missing. Verify the packages are installed in the exact python executable the worker resolved for your configured venv."
-msgstr ""
-"Pogreška radnog procesa za analizu teksta:\n"
-"{err}\n"
-"\n"
-"Značajke u ovom dijaloškom okviru zahtijevaju sljedeće pakete u Pythonu koji se koristi:\n"
-"  • spacy + model          (entiteti, ključne fraze, osnovna statistika)\n"
-"  • textdescriptives         (stvarne ocjene čitljivosti)\n"
-"  • transformers + torch     (analiza sentimenta pomoću višejezičnog modela)\n"
-"\n"
-"Instalirajte ih pomoću:\n"
-"  {install}\n"
-"\n"
-"Radni proces je prijavio da modul nedostaje. Provjerite jesu li paketi instalirani u točnoj Python izvršnoj datoteci koju je radni proces razriješio za vaš konfigurirani venv."
+msgid "Could not read the scope checkbox."
+msgstr "Nije bilo moguće pročitati potvrdni okvir opsega."
 
 #: plugin/scripting/text_analytics_ui.py
 msgid "Open a Writer document to analyze."
 msgstr "Otvorite Writer dokument za analizu."
 
 #: plugin/scripting/text_analytics_ui.py
+msgid "Nothing is selected."
+msgstr "Ništa nije odabrano."
+
+#: plugin/scripting/text_analytics_ui.py
 msgid "Not enough text in the chosen scope."
 msgstr "Nema dovoljno teksta u odabranom opsegu."
 
 #: plugin/scripting/text_analytics_ui.py
+msgid "Checking spaCy / textdescriptives / transformers installation..."
+msgstr "Provjera instalacije spaCy / textdescriptives / transformers..."
+
+#: plugin/scripting/text_analytics_ui.py
 msgid "Analyzing..."
 msgstr "Analiziram..."
+
+#: plugin/scripting/text_analytics_ui.py
+#, python-brace-format
+msgid ""
+"Error from the Text Analytics worker:\n"
+"{err}"
+msgstr ""
+"Pogreška radnika za analizu teksta:\n"
+"{err}"
 
 #: plugin/scripting/text_analytics_ui.py
 #, python-format
@@ -2619,6 +2708,11 @@ msgstr ""
 "Možda nedostaju potrebni paketi u vašem konfiguriranom venv-u (Postavke → Python). Kliknite Provjeri Venv u ovom dijaloškom okviru ili koristite puni Test u Postavke → Python za pojedinosti o spacy, textdescriptives, transformers, torch itd."
 
 #: plugin/scripting/text_analytics_ui.py
+#, python-format
+msgid "Error: %s"
+msgstr "Pogreška: %s"
+
+#: plugin/scripting/text_analytics_ui.py
 msgid "No Writer document to insert into."
 msgstr "Nema Writer dokumenta u koji bi se umetnulo."
 
@@ -2627,8 +2721,10 @@ msgid "Run an analysis first."
 msgstr "Prvo pokrenite analizu."
 
 #: plugin/scripting/text_analytics_ui.py
-msgid "Nothing useful to insert from the last result."
-msgstr "Ništa korisno za umetanje iz zadnjeg rezultata."
+msgid ""
+"Switch back to the document that was analyzed, or run the analysis again."
+msgstr ""
+"Vratite se na dokument koji je analiziran ili ponovno pokrenite analizu."
 
 #: plugin/scripting/text_analytics_ui.py
 #, python-format
@@ -2751,8 +2847,12 @@ msgstr ""
 "Datoteka → Otvori Jupyter bilježnicu (.ipynb)."
 
 #: plugin/scripting/session_manager.py
-msgid "Could not resolve notebook Python session."
-msgstr "Nije bilo moguće razriješiti Python sesiju bilježnice."
+msgid ""
+"This notebook has no Python worker session yet. The execution counter was "
+"reset."
+msgstr ""
+"Ova bilježnica još nema sesiju Python radnika. Brojač izvršavanja je "
+"poništen."
 
 #: plugin/scripting/session_manager.py
 msgid "Notebook Python session reset for this document."
@@ -2769,6 +2869,10 @@ msgid ""
 msgstr ""
 "Ponovno postavljanje Python sesije primjenjuje se na Calc proračunske "
 "tablice. Otvorite Calc radnu knjigu i pokušajte ponovno."
+
+#: plugin/scripting/session_manager.py
+msgid "This spreadsheet has no Python worker session yet."
+msgstr "Ova proračunska tablica još nema sesiju Python radnika."
 
 #: plugin/scripting/session_manager.py
 msgid "Could not restore the initialization script."
@@ -2799,6 +2903,10 @@ msgstr ""
 "postavljanje radne knjige."
 
 #: plugin/scripting/session_manager.py
+msgid "This document has no Python worker session yet."
+msgstr "Ovaj dokument još nema sesiju Python radnika."
+
+#: plugin/scripting/session_manager.py
 msgid "Python session reset for this document."
 msgstr "Python sesija za ovaj dokument je poništena."
 
@@ -2807,6 +2915,34 @@ msgid "Reset Python Session applies to Writer, Calc, and Draw documents."
 msgstr ""
 "Ponovno pokretanje Python sesije primjenjuje se na Writer, Calc i Draw "
 "dokumente."
+
+#: plugin/scripting/session_manager.py
+msgid ""
+"Several Calc spreadsheets are open and none is focused. Switch to the "
+"spreadsheet to reset and try again."
+msgstr ""
+"Otvoreno je nekoliko Calc proračunskih tablica i nijedna nije u fokusu. "
+"Prebacite se na proračunsku tablicu za poništavanje i pokušajte ponovno."
+
+#: plugin/scripting/session_manager.py
+msgid ""
+"Several Writer documents are open and none is focused. Switch to the "
+"document to reset and try again."
+msgstr ""
+"Otvoreno je nekoliko Writer dokumenata i nijedan nije u fokusu. Prebacite se"
+" na dokument za poništavanje i pokušajte ponovno."
+
+#: plugin/scripting/session_manager.py
+msgid ""
+"Several Draw documents are open and none is focused. Switch to the document "
+"to reset and try again."
+msgstr ""
+"Otvoreno je nekoliko Draw dokumenata i nijedan nije u fokusu. Prebacite se "
+"na dokument za poništavanje i pokušajte ponovno."
+
+#: plugin/scripting/session_manager.py
+msgid "Open a Writer, Calc, or Draw document and try again."
+msgstr "Otvorite Writer, Calc ili Draw dokument i pokušajte ponovno."
 
 #: plugin/scripting/units.py
 msgid "Units helper failed."
@@ -2893,6 +3029,12 @@ msgstr "Skripta spremljena."
 msgid "A script is already running."
 msgstr "Skripta je već pokrenuta."
 
+#: plugin/scripting/python_runner.py
+msgid "No script is selected. Use New or Save As to keep this code."
+msgstr ""
+"Nijedna skripta nije odabrana. Koristite Novo ili Spremi kao za zadržavanje "
+"ovog koda."
+
 #: plugin/scripting/python_runner.py plugin/xdl_strings.py
 msgid "Run Python Script"
 msgstr "Pokreni Python skriptu"
@@ -2915,12 +3057,22 @@ msgstr ""
 msgid "Dispatch Error"
 msgstr "Pogreška slanja"
 
+#: plugin/vision/vision_runner.py
+#, python-brace-format
+msgid "Could not export the selected image: {error}"
+msgstr "Nije bilo moguće izvesti odabranu sliku: {error}"
+
 #: plugin/vision/vision_runner.py plugin/vision/vision_egress.py
 msgid ""
 "Select an embedded image (or a range containing images), then Run again."
 msgstr ""
 "Odaberite ugrađenu sliku (ili raspon koji sadrži slike), a zatim ponovno "
 "pokrenite."
+
+#: plugin/vision/vision_runner.py
+#, python-brace-format
+msgid "Image '{name}' could not be exported: {error}"
+msgstr "Slika '{name}' nije se mogla izvesti: {error}"
 
 #: plugin/vision/vision_runner.py
 #, python-brace-format
@@ -2939,6 +3091,13 @@ msgstr ""
 #: plugin/vision/vision_runner.py
 msgid "Cancelled by user."
 msgstr "Otkazano od strane korisnika."
+
+#: plugin/vision/vision_runner.py
+#, python-brace-format
+msgid ""
+"OCR failed for {failed} ({error}); {count} of {total} images completed."
+msgstr ""
+"OCR nije uspio za {failed} ({error}); {count} od {total} slika dovršeno."
 
 #: plugin/vision/vision_runner.py
 #, python-brace-format
@@ -3232,14 +3391,6 @@ msgstr "{0}: {1} prošlo, {2} nije uspjelo."
 msgid "Tests failed to run: {0}"
 msgstr "Testovi nisu pokrenuti: {0}"
 
-#: plugin/main.py plugin/xdl_strings.py
-msgid "MCP Server Status"
-msgstr "Status MCP poslužitelja"
-
-#: plugin/main.py
-msgid "Edit LaTeX Math..."
-msgstr "Uredi LaTeX formulu..."
-
 #: plugin/xdl_strings.py
 msgid "-1"
 msgstr "-1"
@@ -3263,6 +3414,10 @@ msgstr "Dodatne upute (povijest):"
 #: plugin/xdl_strings.py
 msgid "Additional Instructions:"
 msgstr "Dodatne upute:"
+
+#: plugin/xdl_strings.py
+msgid "All"
+msgstr "Sve"
 
 #: plugin/xdl_strings.py
 msgid "Ask / instruct:"
@@ -3418,6 +3573,10 @@ msgid "Key Phrases"
 msgstr "Ključne fraze"
 
 #: plugin/xdl_strings.py
+msgid "MCP Server Status"
+msgstr "Status MCP poslužitelja"
+
+#: plugin/xdl_strings.py
 msgid "Max Tokens:"
 msgstr "Maks. tokena:"
 
@@ -3522,10 +3681,6 @@ msgid "Scope"
 msgstr "Opseg"
 
 #: plugin/xdl_strings.py
-msgid "Search Nearby Files"
-msgstr "Pretraži obližnje datoteke"
-
-#: plugin/xdl_strings.py
 msgid "Search Query:"
 msgstr "Upit za pretraživanje:"
 
@@ -3544,10 +3699,6 @@ msgstr "Odabir"
 #: plugin/xdl_strings.py
 msgid "Sentiment"
 msgstr "Osjećaji"
-
-#: plugin/xdl_strings.py
-msgid "Status"
-msgstr "Status"
 
 #: plugin/xdl_strings.py
 msgid "Status: Ready"
@@ -3633,17 +3784,17 @@ msgstr "Ugrađeno"
 msgid "Hermes"
 msgstr "Hermes"
 
-msgid "Claude Code (ACP)"
-msgstr "Claude Code (ACP)"
+msgid "Claude Code"
+msgstr "Claude Code"
 
-msgid "Mistral Vibe (ACP)"
-msgstr "Mistral Vibe (ACP)"
+msgid "Mistral Vibe"
+msgstr "Mistral Vibe"
 
-msgid "Grok Build (ACP)"
-msgstr "Grok izgradnja (ACP)"
+msgid "Grok Build"
+msgstr "Grok Build"
 
-msgid "OpenCode (ACP)"
-msgstr "OpenCode (ACP)"
+msgid "OpenCode"
+msgstr "OpenCode"
 
 msgid "Prompt for Agent Permissions"
 msgstr "Upit za dopuštenja agenta"

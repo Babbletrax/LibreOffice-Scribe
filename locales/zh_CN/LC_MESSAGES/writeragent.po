@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-07 23:17-0400\n"
+"POT-Creation-Date: 2026-10-19 12:57-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: Chinese (Simplified) <LL@li.org>\n"
@@ -70,6 +70,10 @@ msgstr "请先打开一个 Writer 文档。"
 msgid "Run code cell"
 msgstr "运行代码单元格"
 
+#: plugin/notebook/notebook_controls.py
+msgid "Code"
+msgstr "代码"
+
 #: plugin/embeddings/search_ui.py
 msgid "just now"
 msgstr "刚刚"
@@ -88,6 +92,14 @@ msgstr "{0}小时前"
 #, python-brace-format
 msgid "{0}d ago"
 msgstr "{0}天前"
+
+#: plugin/embeddings/search_ui.py
+msgid "Failed to open search dialog."
+msgstr "无法打开搜索对话框。"
+
+#: plugin/embeddings/search_ui.py plugin/xdl_strings.py
+msgid "Search Nearby Files"
+msgstr "搜索附近文件"
 
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: No active document"
@@ -179,25 +191,25 @@ msgid "Rebuild failed: "
 msgstr "重建失败： "
 
 #: plugin/framework/errors.py
-#, python-brace-format
-msgid "TLS/SSL Error: {0}"
-msgstr "TLS/SSL 错误：{0}"
-
-#: plugin/framework/errors.py plugin/framework/client/errors.py
 msgid "Invalid API Key. Please check your settings."
 msgstr "无效的 API 密钥。请检查您的设置。"
 
-#: plugin/framework/errors.py plugin/framework/client/errors.py
+#: plugin/framework/errors.py
 msgid "API access Forbidden. Your key may lack permissions for this model."
 msgstr "API 访问被禁止。您的密钥可能缺少此模型的权限。"
 
-#: plugin/framework/errors.py plugin/framework/client/errors.py
+#: plugin/framework/errors.py
 msgid "Endpoint not found (404). Check your URL and Model name."
 msgstr "端点未找到 (404)。请检查您的 URL 和模型名称。"
 
-#: plugin/framework/errors.py plugin/framework/client/errors.py
+#: plugin/framework/errors.py
 msgid "Rate limited (429). Wait a moment and try again."
 msgstr "请求过于频繁 (429)。请稍候再试。"
+
+#: plugin/framework/errors.py
+#, python-brace-format
+msgid "TLS/SSL Error: {0}"
+msgstr "TLS/SSL 错误：{0}"
 
 #: plugin/framework/errors.py
 #, python-brace-format
@@ -342,6 +354,20 @@ msgstr "模型正在重复相同的块（无限循环）。请重试或使用其
 msgid "Provider busy, retrying in {0}s…"
 msgstr "提供商繁忙，将在 {0} 秒后重试…"
 
+#: plugin/framework/client/request_controls.py
+#, python-brace-format
+msgid "Provider asked to wait {0}s, which is above the {1}s retry cap."
+msgstr "提供商要求等待 {0} 秒，这超过了 {1} 秒的重试上限。"
+
+#: plugin/framework/client/request_controls.py
+#, python-brace-format
+msgid "Spacing free-model requests, next send in {0}s…"
+msgstr "正在间隔自由模型请求，下次发送将在 {0} 秒后……"
+
+#: plugin/framework/client/anthropic_shim.py
+msgid "Anthropic model is not set. Choose a model in Settings."
+msgstr "未设置 Anthropic 模型。请在“设置”中选择一个模型。"
+
 #: plugin/framework/main_shared.py plugin/calc/python/cell_editor_ui.py
 #: plugin/writer/math/latex_dialog.py plugin/chatbot/panel.py
 #: plugin/chatbot/external_editor.py plugin/chatbot/send_handlers.py
@@ -381,6 +407,12 @@ msgstr "正在使用本地 Whisper ({0}) 进行转录… 首次运行会下载�
 #: plugin/audio/stt_service.py
 msgid "Transcribing audio..."
 msgstr "正在转录音频..."
+
+#: plugin/audio/stt_service.py
+msgid ""
+"Could not check whether faster-whisper is installed. The Settings → Python "
+"interpreter timed out or could not start."
+msgstr "无法检查是否已安装 faster-whisper。设置 → Python 解释器超时或无法启动。"
 
 #: plugin/audio/stt_service.py
 #, python-brace-format
@@ -496,7 +528,6 @@ msgstr "正在下载日语音素转换器词典…"
 
 #: plugin/calc/python/editor_context_menu.py plugin/librepy/sidebar_menus.py
 #: plugin/chatbot/hamburger_menu.py plugin/chatbot/panel_factory.py
-#: plugin/main.py
 msgid "Edit Python in Cell..."
 msgstr "在单元格中编辑 Python..."
 
@@ -543,10 +574,6 @@ msgid "Ready"
 msgstr "就绪"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/scripting/editor_ui_strings.py
-msgid "A1:C1  or  A1:C1, C1:C5"
-msgstr "A1:C1 或 A1:C1, C1:C5"
-
-#: plugin/calc/python/cell_editor_ui.py plugin/scripting/editor_ui_strings.py
 msgid "Data ranges apply only when saving as a =PY() formula."
 msgstr "数据区域仅在保存为 =PY() 公式时适用。"
 
@@ -559,7 +586,6 @@ msgid "Saving…"
 msgstr "正在保存…"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/calc/python/editor.py
-#: plugin/scripting/editor_ui_strings.py
 msgid "Saved without =PY()."
 msgstr "已保存，不含 =PY()。"
 
@@ -600,6 +626,11 @@ msgstr ""
 msgid "Could not rewrite xl() range literals into =PY data arguments: %s"
 msgstr "无法将 xl() 范围字面量重写为 =PY 数据参数：%s"
 
+#: plugin/calc/python/editor.py
+#, python-brace-format
+msgid "Saved code in {0}."
+msgstr "代码已保存至 {0}。"
+
 #: plugin/calc/python/editor.py plugin/xdl_strings.py
 msgid "Python cell editor"
 msgstr "Python 单元格编辑器"
@@ -610,7 +641,8 @@ msgid "Save without =PY()"
 msgstr "保存时不含 =PY()"
 
 #: plugin/calc/python/editor.py plugin/scripting/editor_ui_strings.py
-#: plugin/scripting/python_runner.py plugin/xdl_strings.py
+#: plugin/scripting/python_runner_ui.py plugin/scripting/python_runner.py
+#: plugin/xdl_strings.py
 msgid "Save"
 msgstr "保存"
 
@@ -740,17 +772,10 @@ msgstr "Python 设置"
 msgid "Could not open Settings."
 msgstr "无法打开设置。"
 
-#: plugin/librepy/python_sidebar.py plugin/xdl_strings.py
-msgid "All"
-msgstr "全部"
-
-#: plugin/librepy/python_sidebar.py
-msgid "Errors"
-msgstr "错误"
-
-#: plugin/librepy/python_sidebar.py plugin/scripting/python_runner_ui.py
-msgid "Output"
-msgstr "输出"
+#: plugin/librepy/settings.py plugin/chatbot/module_config_dialog.py
+#: plugin/chatbot/dialog_views.py
+msgid "Invalid Setting"
+msgstr "无效设置"
 
 #: plugin/librepy/python_sidebar.py
 msgid "Shared kernel"
@@ -788,15 +813,15 @@ msgstr ""
 "虚拟环境：在 {path} 处缺少 Python"
 
 #: plugin/librepy/python_sidebar.py
-msgid "(no =PY() cells on active sheet)"
-msgstr "(当前工作表无 =PY() 单元格)"
-
-#: plugin/librepy/python_sidebar.py
 msgid "(no diagnostics yet)"
 msgstr "(暂无诊断信息)"
 
+#: plugin/librepy/python_sidebar.py
+msgid "(no =PY() cells on active sheet)"
+msgstr "(当前工作表无 =PY() 单元格)"
+
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/chatbot/panel_factory.py plugin/main.py
+#: plugin/chatbot/panel_factory.py
 msgid "Run Python Script..."
 msgstr "运行 Python 脚本..."
 
@@ -806,43 +831,38 @@ msgid "Insert LaTeX Math..."
 msgstr "插入 LaTeX 公式..."
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py
 msgid "Text Analytics..."
 msgstr "文本分析..."
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
 #: plugin/chatbot/dialog_views.py plugin/chatbot/panel_factory.py
-#: plugin/main.py plugin/xdl_strings.py
+#: plugin/xdl_strings.py
 msgid "Settings"
 msgstr "设置"
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py
 msgid "Vision OCR Settings..."
 msgstr "Vision OCR 设置..."
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py
 msgid "Reset Python Session"
 msgstr "重置 Python 会话"
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py
 msgid "Run All"
 msgstr "全部运行"
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py
 msgid "Run From Here"
 msgstr "从此处运行"
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py plugin/xdl_strings.py
+#: plugin/xdl_strings.py
 msgid "Stop"
 msgstr "停止"
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/dialogs.py
-#: plugin/chatbot/hamburger_menu.py plugin/main.py plugin/xdl_strings.py
+#: plugin/chatbot/hamburger_menu.py plugin/xdl_strings.py
 msgid "Report bug..."
 msgstr "报告错误..."
 
@@ -857,6 +877,80 @@ msgstr "接受全部更改 (Agent)"
 #: plugin/writer/change_context_menu.py
 msgid "Reject whole change (agent)"
 msgstr "拒绝全部更改 (Agent)"
+
+#: plugin/writer/inline_review.py
+msgid "No agent changes to review in this document."
+msgstr "本文档中没有可供审阅的代理更改。"
+
+#: plugin/writer/inline_review.py
+#, python-format
+msgid "%d overlapping agent changes accepted together."
+msgstr "已同时接受 %d 处重叠的代理更改。"
+
+#: plugin/writer/inline_review.py
+#, python-format
+msgid "%d overlapping agent changes rejected together."
+msgstr "已同时拒绝 %d 处重叠的代理更改。"
+
+#: plugin/writer/inline_review.py
+msgid "Change accepted."
+msgstr "更改已接受。"
+
+#: plugin/writer/inline_review.py
+msgid "Change rejected."
+msgstr "更改已拒绝。"
+
+#: plugin/writer/inline_review.py
+msgid ""
+"Couldn't read this document's tracked changes reliably just now -- nothing "
+"was changed. Please try again."
+msgstr "刚才无法可靠地读取此文档的修订记录——未进行任何更改。请重试。"
+
+#: plugin/writer/inline_review.py
+msgid ""
+"Started resolving changes but couldn't confirm the result -- some may have "
+"been resolved. Please review remaining changes in Edit > Track Changes > "
+"Manage."
+msgstr "已开始解决更改但无法确认结果——部分更改可能已解决。请在“编辑”>“修订”>“管理”中查看剩余更改。"
+
+#: plugin/writer/inline_review.py
+msgid ""
+"Nothing was changed. Resolve remaining changes from Edit > Track Changes > "
+"Manage."
+msgstr "未进行任何更改。请在“编辑”>“修订”>“管理”中解决剩余更改。"
+
+#: plugin/writer/inline_review.py
+msgid ""
+"None could be resolved here -- each overlaps with one of your own tracked "
+"changes. Resolve them from Edit > Track Changes > Manage."
+msgstr "此处无法解决任何更改——每一项都与您自己的修订记录重叠。请在“编辑”>“修订”>“管理”中解决它们。"
+
+#: plugin/writer/inline_review.py
+#, python-format
+msgid ""
+"Resolved %(resolved)d of %(total)d. The rest overlap with your own tracked "
+"changes -- resolve those from Edit > Track Changes > Manage."
+msgstr ""
+"已解决 %(resolved)d 项，共 %(total)d 项。其余更改与您自己的修订记录重叠——请在“编辑”>“修订”>“管理”中解决这些更改。"
+
+#: plugin/writer/inline_review.py
+msgid ""
+"Could not resolve this change here -- it may share a paragraph with one of "
+"your tracked changes or another agent change. Resolve it from Edit > Track "
+"Changes > Manage."
+msgstr "无法在此处解决此更改——它可能与您的修订记录或其他代理更改处于同一段落中。请在“编辑”>“修订”>“管理”中解决它。"
+
+#: plugin/writer/inline_review.py
+msgid "Put the cursor on a highlighted agent change first."
+msgstr "请先将光标置于高亮显示的代理更改上。"
+
+#: plugin/writer/inline_review.py
+msgid "Review agent changes"
+msgstr "审阅代理更改"
+
+#: plugin/writer/inline_review.py
+msgid "Resolve agent changes"
+msgstr "解决代理更改"
 
 #: plugin/writer/review_click_popup.py
 msgid "Accept this change"
@@ -885,6 +979,13 @@ msgid ""
 msgstr "无法将流式编辑合并为单个跟踪修订。生成的文本已保留，但它可能仍显示为多个跟踪修订。"
 
 #: plugin/writer/edit_review.py
+#, python-brace-format
+msgid ""
+"Failed to collapse the streamed continuation into a single tracked change: "
+"{0}"
+msgstr "无法将流式延续合并为单个跟踪更改：{0}"
+
+#: plugin/writer/edit_review.py
 msgid ""
 "Failed to collapse the streamed continuation into a single tracked change. "
 "The text was kept, but may not be reviewable."
@@ -899,6 +1000,10 @@ msgstr "此选区包含已追踪的插入或删除内容。请先接受或拒绝
 #: plugin/writer/editselection.py
 msgid "WriterAgent: Extend Selection"
 msgstr "WriterAgent: 扩展选区"
+
+#: plugin/writer/editselection.py
+msgid "Select text first"
+msgstr "请先选择文本"
 
 #: plugin/writer/editselection.py
 msgid "WriterAgent: Edit Selection"
@@ -947,6 +1052,10 @@ msgid ""
 "Could not identify the selected formula. Click in the text, then insert a "
 "new formula."
 msgstr "无法识别所选公式。请在文本中点击，然后插入新公式。"
+
+#: plugin/writer/math/latex_dialog.py
+msgid "Could not convert formula to LaTeX. Enter formula manually."
+msgstr "无法将公式转换为 LaTeX。请手动输入公式。"
 
 #: plugin/writer/math/latex_dialog.py
 msgid "Unknown conversion error"
@@ -1229,10 +1338,6 @@ msgstr "为何"
 msgid "you"
 msgstr "您"
 
-#: plugin/chatbot/module_config_dialog.py plugin/chatbot/dialog_views.py
-msgid "Invalid Setting"
-msgstr "无效设置"
-
 #: plugin/chatbot/dialogs.py
 msgid "Agent requests approval"
 msgstr "代理请求批准"
@@ -1254,24 +1359,23 @@ msgstr "已复制！"
 msgid "Copy URL"
 msgstr "复制 URL"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Extend Selection"
 msgstr "扩展选择"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Edit Selection"
 msgstr "编辑选择"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Convert Sheet to Python..."
 msgstr "将工作表转换为 Python..."
 
 #: plugin/chatbot/hamburger_menu.py plugin/chatbot/panel_factory.py
-#: plugin/main.py
 msgid "Search Nearby Files..."
 msgstr "搜索附近文件..."
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Toggle MCP Server"
 msgstr "切换 MCP 服务器"
 
@@ -1283,37 +1387,33 @@ msgstr "MCP 服务器 (运行中)"
 msgid "MCP Server (Stopped)"
 msgstr "MCP 服务器 (已停止)"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Run format tests"
 msgstr "运行格式测试"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Run calc tests"
 msgstr "运行 Calc 测试"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Run Calc API integration tests"
 msgstr "运行 Calc API 集成测试"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Run draw tests"
 msgstr "运行 Draw 测试"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Evaluation Dashboard"
 msgstr "评估仪表板"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Debug"
 msgstr "调试"
 
 #: plugin/chatbot/tool_loop.py plugin/chatbot/panel.py
 msgid "[Voice message]"
 msgstr "[语音消息]"
-
-#: plugin/chatbot/tool_loop.py
-msgid "Error: Toolkit unavailable"
-msgstr "错误：工具包不可用"
 
 #: plugin/chatbot/chat_sidebar_mode.py plugin/xdl_strings.py
 msgid "Chat"
@@ -1339,7 +1439,7 @@ msgstr "头脑风暴"
 msgid "Writing Plan"
 msgstr "写作计划"
 
-#: plugin/chatbot/chat_sidebar_mode.py
+#: plugin/chatbot/chat_sidebar_mode.py plugin/chatbot/dialog_views.py
 msgid "PPT-Master"
 msgstr "PPT-Master"
 
@@ -1565,11 +1665,6 @@ msgstr "[转录错误：{0}]"
 #, python-brace-format
 msgid "[Document context error: {0}]"
 msgstr "[文档上下文错误：{0}]"
-
-#: plugin/chatbot/send_handlers.py
-#, python-brace-format
-msgid "[Agent backend '{0}' not found.]"
-msgstr "[代理后端 '{0}' 未找到。]"
 
 #: plugin/chatbot/send_handlers.py
 #, python-brace-format
@@ -1826,19 +1921,13 @@ msgstr "新建 Python 脚本"
 msgid "Script name:"
 msgstr "脚本名称："
 
-#: plugin/scripting/script_dialogs.py
-msgid "Script name cannot start with a reserved prefix."
-msgstr "脚本名称不能以保留前缀开头。"
+#: plugin/scripting/script_dialogs.py plugin/scripting/editor_ui_strings.py
+msgid "Attach to this document (no document is open)"
+msgstr "附加到此文档（未打开文档）"
 
 #: plugin/scripting/script_dialogs.py plugin/scripting/editor_ui_strings.py
-#: plugin/xdl_strings.py
-msgid "Attach to this document"
-msgstr "附加到本文档"
-
-#: plugin/scripting/script_dialogs.py plugin/scripting/editor_ui_strings.py
-#: plugin/scripting/document_scripts.py
-msgid "Script name cannot be empty."
-msgstr "脚本名称不能为空。"
+msgid "Attach to this document (this document is read-only)"
+msgstr "附加到此文档（此文档为只读）"
 
 #: plugin/scripting/editor_ui_strings.py
 msgid "Running…"
@@ -1865,25 +1954,33 @@ msgstr "取消"
 msgid "Data:"
 msgstr "数据："
 
+#: plugin/scripting/editor_ui_strings.py
+msgid "A1:C1  or  A1:C1, C1:C5"
+msgstr "A1:C1 或 A1:C1, C1:C5"
+
 #: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
 msgid "New"
 msgstr "新建"
+
+#: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
+msgid "Attach to this document"
+msgstr "附加到本文档"
+
+#: plugin/scripting/editor_ui_strings.py
+msgid "Attach to this document (this document changed)"
+msgstr "附加到此文档（此文档已更改）"
 
 #: plugin/scripting/editor_ui_strings.py
 msgid "Create"
 msgstr "创建"
 
+#: plugin/scripting/editor_ui_strings.py plugin/scripting/document_scripts.py
+msgid "Script name cannot be empty."
+msgstr "脚本名称不能为空。"
+
 #: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
 msgid "Script:"
 msgstr "脚本："
-
-#: plugin/scripting/editor_ui_strings.py
-msgid "Attach"
-msgstr "附加"
-
-#: plugin/scripting/editor_ui_strings.py
-msgid "Attach to Document"
-msgstr "附加到文档"
 
 #: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
 msgid "Save As..."
@@ -1906,9 +2003,9 @@ msgid "My Scripts"
 msgstr "我的脚本"
 
 #: plugin/scripting/editor_ui_strings.py plugin/scripting/document_scripts.py
-#: plugin/scripting/python_runner_ui.py
-msgid "Built-in helpers are read-only. Use Copy to My Scripts to customize."
-msgstr "内置助手为只读。请使用“复制到我的脚本”进行自定义。"
+msgid ""
+"Built-in helpers are read-only. Use Save As to copy one into My Scripts."
+msgstr "内置助手为只读。请使用“另存为”将其复制到“我的脚本”中。"
 
 #: plugin/scripting/editor_ui_strings.py plugin/scripting/document_scripts.py
 msgid ""
@@ -1920,20 +2017,6 @@ msgstr "文档已更改 — 请关闭并重新打开“运行 Python 脚本”�
 #, python-brace-format
 msgid "Loaded script '{0}'."
 msgstr "已加载脚本“{0}”。"
-
-#: plugin/scripting/editor_ui_strings.py plugin/scripting/document_scripts.py
-msgid "No document is open to attach scripts."
-msgstr "没有打开任何文档以附加脚本。"
-
-#: plugin/scripting/editor_ui_strings.py
-#, python-brace-format
-msgid "Attaching script '{0}'..."
-msgstr "正在附加脚本“{0}”..."
-
-#: plugin/scripting/editor_ui_strings.py
-#, python-brace-format
-msgid "Copying script '{0}' to My Scripts..."
-msgstr "正在将脚本“{0}”复制到“我的脚本”..."
 
 #: plugin/scripting/editor_ui_strings.py
 #, python-brace-format
@@ -1949,28 +2032,15 @@ msgstr "正在删除脚本“{0}”..."
 msgid "Built-in helpers cannot be deleted."
 msgstr "无法删除内置助手。"
 
-#: plugin/scripting/editor_ui_strings.py
-msgid "Enter script name:"
-msgstr "输入脚本名称："
-
 #: plugin/scripting/editor_ui_strings.py plugin/scripting/python_runner_ui.py
 #, python-brace-format
 msgid "A script named '{0}' already exists in this document. Overwrite?"
 msgstr "名为“{0}”的脚本已存在于此文档中。是否覆盖？"
 
-#: plugin/scripting/editor_ui_strings.py
-msgid "Copy to My Scripts as:"
-msgstr "复制到“我的脚本”为："
-
 #: plugin/scripting/editor_ui_strings.py plugin/scripting/python_runner_ui.py
 #, python-brace-format
 msgid "A script named '{0}' already exists in My Scripts. Overwrite?"
 msgstr "“我的脚本”中已存在名为“{0}”的脚本。是否覆盖？"
-
-#: plugin/scripting/editor_ui_strings.py
-#, python-brace-format
-msgid "Save script '{0}' to this document?"
-msgstr "将脚本“{0}”保存到此文档？"
 
 #: plugin/scripting/editor_ui_strings.py
 #, python-brace-format
@@ -1982,6 +2052,21 @@ msgid "Select data range or enter A1 address (injected as data)."
 msgstr "选择数据区域或输入 A1 地址（作为数据注入）。"
 
 #: plugin/scripting/document_scripts.py
+msgid "Stored document scripts are unreadable, so they were left unchanged."
+msgstr "存储的文档脚本不可读，因此保持不变。"
+
+#: plugin/scripting/document_scripts.py
+#, python-brace-format
+msgid ""
+"Stored document scripts are in an unsupported format (version {0}), so they "
+"were left unchanged."
+msgstr "存储的文档脚本格式不受支持（版本 {0}），因此保持不变。"
+
+#: plugin/scripting/document_scripts.py
+msgid "Document is read-only or properties cannot be written."
+msgstr "文档为只读，或无法写入属性。"
+
+#: plugin/scripting/document_scripts.py
 #, python-brace-format
 msgid "Document scripts are too large to store in the document ({0} bytes)."
 msgstr "文档脚本过大，无法存储在文档中（{0} 字节）。"
@@ -1989,10 +2074,6 @@ msgstr "文档脚本过大，无法存储在文档中（{0} 字节）。"
 #: plugin/scripting/document_scripts.py plugin/scripting/python_runner_ui.py
 msgid "No document is open to save scripts."
 msgstr "没有打开可保存脚本的文档。"
-
-#: plugin/scripting/document_scripts.py
-msgid "Document is read-only or properties cannot be written."
-msgstr "文档为只读，或无法写入属性。"
 
 #: plugin/scripting/document_scripts.py
 msgid ""
@@ -2026,6 +2107,19 @@ msgstr "当前文档"
 
 #: plugin/scripting/document_scripts.py
 #, python-brace-format
+msgid ""
+"Could not save '{0}' to this document ({1}). Saved it to My Scripts instead."
+msgstr "无法将“{0}”保存到此文档（{1}）。已将其保存到“我的脚本”中。"
+
+#: plugin/scripting/document_scripts.py
+#, python-brace-format
+msgid ""
+"Could not save '{0}' to this document ({1}). A script named '{0}' already "
+"exists in My Scripts."
+msgstr "无法将“{0}”保存到此文档（{1}）。“我的脚本”中已存在名为“{0}”的脚本。"
+
+#: plugin/scripting/document_scripts.py
+#, python-brace-format
 msgid "Script '{0}' does not exist in My Scripts."
 msgstr "脚本“{0}”在“我的脚本”中不存在。"
 
@@ -2041,16 +2135,6 @@ msgstr "没有打开任何文档。"
 
 #: plugin/scripting/document_scripts.py
 #, python-brace-format
-msgid "A script named '{0}' already exists in My Scripts. {1}"
-msgstr "名为“{0}”的脚本已存在于“我的脚本”中。{1}"
-
-#: plugin/scripting/document_scripts.py
-#, python-brace-format
-msgid "Saved script '{0}' to My Scripts. {1}"
-msgstr "已将脚本“{0}”保存到“我的脚本”。{1}"
-
-#: plugin/scripting/document_scripts.py
-#, python-brace-format
 msgid "Saved script '{0}' to this document."
 msgstr "脚本“{0}”已保存到当前文档。"
 
@@ -2058,21 +2142,6 @@ msgstr "脚本“{0}”已保存到当前文档。"
 #, python-brace-format
 msgid "Saved script '{0}'."
 msgstr "脚本“{0}”已保存。"
-
-#: plugin/scripting/document_scripts.py
-#, python-brace-format
-msgid "Attached script '{0}' to this document."
-msgstr "已将脚本“{0}”附加到此文档。"
-
-#: plugin/scripting/document_scripts.py
-#, python-brace-format
-msgid "A script named '{0}' already exists in My Scripts."
-msgstr "名为“{0}”的脚本已存在于“我的脚本”中。"
-
-#: plugin/scripting/document_scripts.py
-#, python-brace-format
-msgid "Copied script '{0}' to My Scripts."
-msgstr "已将脚本“{0}”复制到“我的脚本”。"
 
 #: plugin/scripting/document_scripts.py
 #, python-brace-format
@@ -2084,7 +2153,7 @@ msgstr "已删除文档脚本“{0}”。"
 msgid "Deleted script '{0}'."
 msgstr "已删除脚本“{0}”。"
 
-#: plugin/scripting/document_scripts.py
+#: plugin/scripting/document_scripts.py plugin/scripting/text_analytics_ui.py
 msgid "The document was closed."
 msgstr "文档已关闭。"
 
@@ -2093,18 +2162,12 @@ msgid "The document is no longer open."
 msgstr "文档已关闭。"
 
 #: plugin/scripting/python_runner_ui.py
+msgid "Script preparation failed."
+msgstr "脚本准备失败。"
+
+#: plugin/scripting/python_runner_ui.py
 msgid "PythonScriptDialog could not be loaded from the extension."
 msgstr "无法从扩展中加载 PythonScriptDialog。"
-
-#: plugin/scripting/python_runner_ui.py
-#, python-format
-msgid "Cannot save to My Scripts: a script named '%s' already exists."
-msgstr "无法保存到“我的脚本”：名为“%s”的脚本已存在。"
-
-#: plugin/scripting/python_runner_ui.py
-#, python-format
-msgid "%s Saved to My Scripts instead."
-msgstr "%s 已保存到“我的脚本”。"
 
 #: plugin/scripting/python_runner_ui.py
 #, python-format
@@ -2165,13 +2228,9 @@ msgstr "脚本执行成功。"
 msgid "Success"
 msgstr "成功"
 
-#: plugin/scripting/venv_probe_ui.py
-msgid "Venv OK"
-msgstr "虚拟环境正常"
-
-#: plugin/scripting/venv_probe_ui.py
-msgid "Venv check failed"
-msgstr "虚拟环境检查失败"
+#: plugin/scripting/python_runner_ui.py
+msgid "Output"
+msgstr "输出"
 
 #: plugin/scripting/venv_probe_ui.py plugin/xdl_strings.py
 msgid "Testing Python environment..."
@@ -2184,6 +2243,14 @@ msgstr "完成"
 #: plugin/scripting/venv_probe_ui.py
 msgid "Failed"
 msgstr "失败"
+
+#: plugin/scripting/venv_probe_ui.py
+msgid "Venv OK"
+msgstr "虚拟环境正常"
+
+#: plugin/scripting/venv_probe_ui.py
+msgid "Venv check failed"
+msgstr "虚拟环境检查失败"
 
 #: plugin/scripting/editor_host.py
 msgid ""
@@ -2208,12 +2275,20 @@ msgid "The script list update timed out."
 msgstr "脚本列表更新超时。"
 
 #: plugin/scripting/editor_host.py
+msgid "The script list update failed."
+msgstr "脚本列表更新失败。"
+
+#: plugin/scripting/editor_host.py
 msgid "Script execution failed."
 msgstr "脚本执行失败。"
 
 #: plugin/scripting/editor_host.py
 msgid "Saving the script timed out."
 msgstr "保存脚本超时。"
+
+#: plugin/scripting/editor_host.py
+msgid "Saving the script failed."
+msgstr "保存脚本失败。"
 
 #: plugin/scripting/editor_host.py
 msgid "the initialization script"
@@ -2255,8 +2330,10 @@ msgid "Could not talk to the Python editor."
 msgstr "无法与 Python 编辑器通信。"
 
 #: plugin/scripting/venv_diagnostics.py
-msgid "On Linux also install system PortAudio: sudo pacman -S portaudio"
-msgstr "在 Linux 上还需安装系统 PortAudio：sudo pacman -S portaudio"
+msgid ""
+"On Linux also install the system PortAudio package from your distribution "
+"(sounddevice needs it; the package name differs)."
+msgstr "在 Linux 上，还需要从您的发行版安装系统 PortAudio 软件包（sounddevice 需要它；软件包名称各异）。"
 
 #: plugin/scripting/venv_diagnostics.py
 msgid "Audio probe timed out (sounddevice import failed or hung)."
@@ -2356,10 +2433,6 @@ msgid "Vector Search Libraries"
 msgstr "向量搜索库"
 
 #: plugin/scripting/venv_diagnostics.py
-msgid "Audio Recording"
-msgstr "音频录制"
-
-#: plugin/scripting/venv_diagnostics.py
 msgid "To install remaining packages:"
 msgstr "若要安装剩余的软件包："
 
@@ -2424,49 +2497,37 @@ msgid "Could not load the analytics dialog."
 msgstr "无法加载分析对话框。"
 
 #: plugin/scripting/text_analytics_ui.py
-msgid "Checking spaCy / textdescriptives / transformers installation..."
-msgstr "正在检查 spaCy / textdescriptives / transformers 的安装情况..."
-
-#: plugin/scripting/text_analytics_ui.py
-#, python-brace-format
-msgid ""
-"Error from the Text Analytics worker:\n"
-"{err}\n"
-"\n"
-"The features in this dialog require these packages in the python it is using:\n"
-"  • spacy + a model          (entities, key phrases, basic stats)\n"
-"  • textdescriptives         (real Readability scores)\n"
-"  • transformers + torch     (Sentiment using the multilingual model)\n"
-"\n"
-"Install them with:\n"
-"  {install}\n"
-"\n"
-"The worker reported the module as missing. Verify the packages are installed in the exact python executable the worker resolved for your configured venv."
-msgstr ""
-"来自文本分析工作进程的错误：\n"
-"{err}\n"
-"\n"
-"此对话框中的功能需要其所使用的 Python 环境中安装以下包：\n"
-"  • spacy + 模型          （实体、关键短语、基础统计）\n"
-"  • textdescriptives         （实际可读性评分）\n"
-"  • transformers + torch     （使用多语言模型进行情感分析）\n"
-"\n"
-"请使用以下命令安装：\n"
-"  {install}\n"
-"\n"
-"工作进程报告缺少该模块。请验证这些包是否已安装在工作进程为您的配置虚拟环境所解析的特定 Python 可执行文件中。"
+msgid "Could not read the scope checkbox."
+msgstr "无法读取作用域复选框。"
 
 #: plugin/scripting/text_analytics_ui.py
 msgid "Open a Writer document to analyze."
 msgstr "请打开一个 Writer 文档进行分析。"
 
 #: plugin/scripting/text_analytics_ui.py
+msgid "Nothing is selected."
+msgstr "未选中任何内容。"
+
+#: plugin/scripting/text_analytics_ui.py
 msgid "Not enough text in the chosen scope."
 msgstr "所选范围内文本不足。"
 
 #: plugin/scripting/text_analytics_ui.py
+msgid "Checking spaCy / textdescriptives / transformers installation..."
+msgstr "正在检查 spaCy / textdescriptives / transformers 的安装情况..."
+
+#: plugin/scripting/text_analytics_ui.py
 msgid "Analyzing..."
 msgstr "正在分析..."
+
+#: plugin/scripting/text_analytics_ui.py
+#, python-brace-format
+msgid ""
+"Error from the Text Analytics worker:\n"
+"{err}"
+msgstr ""
+"来自文本分析工作进程的错误：\n"
+"{err}"
 
 #: plugin/scripting/text_analytics_ui.py
 #, python-format
@@ -2480,6 +2541,11 @@ msgstr ""
 "您配置的虚拟环境（设置 → Python）中可能缺少必需的软件包。请点击此对话框中的“检查虚拟环境”，或使用“设置 → Python”中的完整测试功能以获取有关 spacy、textdescriptives、transformers、torch 等的详细信息。"
 
 #: plugin/scripting/text_analytics_ui.py
+#, python-format
+msgid "Error: %s"
+msgstr "错误：%s"
+
+#: plugin/scripting/text_analytics_ui.py
 msgid "No Writer document to insert into."
 msgstr "没有可供插入的 Writer 文档。"
 
@@ -2488,8 +2554,9 @@ msgid "Run an analysis first."
 msgstr "请先运行分析。"
 
 #: plugin/scripting/text_analytics_ui.py
-msgid "Nothing useful to insert from the last result."
-msgstr "上次结果中没有可插入的有效内容。"
+msgid ""
+"Switch back to the document that was analyzed, or run the analysis again."
+msgstr "切换回已分析的文档，或重新运行分析。"
 
 #: plugin/scripting/text_analytics_ui.py
 #, python-format
@@ -2605,8 +2672,10 @@ msgid ""
 msgstr "本文档未导入笔记本注册表。请先执行“文件”→“打开 Jupyter 笔记本 (.ipynb)”。"
 
 #: plugin/scripting/session_manager.py
-msgid "Could not resolve notebook Python session."
-msgstr "无法解析笔记本 Python 会话。"
+msgid ""
+"This notebook has no Python worker session yet. The execution counter was "
+"reset."
+msgstr "此笔记本尚未建立 Python 工作进程会话。执行计数器已重置。"
 
 #: plugin/scripting/session_manager.py
 msgid "Notebook Python session reset for this document."
@@ -2621,6 +2690,10 @@ msgid ""
 "Reset Python Session applies to Calc spreadsheets. Open a Calc workbook and "
 "try again."
 msgstr "重置 Python 会话仅适用于 Calc 电子表格。请打开一个 Calc 工作簿并重试。"
+
+#: plugin/scripting/session_manager.py
+msgid "This spreadsheet has no Python worker session yet."
+msgstr "此电子表格尚未建立 Python 工作进程会话。"
 
 #: plugin/scripting/session_manager.py
 msgid "Could not restore the initialization script."
@@ -2646,12 +2719,38 @@ msgstr ""
 "单元格使用其各自的变量）。没有可重置的共享单元格会话。如果需要清除昂贵的一次性工作簿设置，请添加初始化脚本。"
 
 #: plugin/scripting/session_manager.py
+msgid "This document has no Python worker session yet."
+msgstr "此文档尚未建立 Python 工作进程会话。"
+
+#: plugin/scripting/session_manager.py
 msgid "Python session reset for this document."
 msgstr "已重置此文档的 Python 会话。"
 
 #: plugin/scripting/session_manager.py
 msgid "Reset Python Session applies to Writer, Calc, and Draw documents."
 msgstr "重置 Python 会话适用于 Writer、Calc 和 Draw 文档。"
+
+#: plugin/scripting/session_manager.py
+msgid ""
+"Several Calc spreadsheets are open and none is focused. Switch to the "
+"spreadsheet to reset and try again."
+msgstr "当前打开了多个 Calc 电子表格，且没有处于焦点状态的文档。请切换到目标电子表格以重置并重试。"
+
+#: plugin/scripting/session_manager.py
+msgid ""
+"Several Writer documents are open and none is focused. Switch to the "
+"document to reset and try again."
+msgstr "当前打开了多个 Writer 文档，且没有处于焦点状态的文档。请切换到目标文档以重置并重试。"
+
+#: plugin/scripting/session_manager.py
+msgid ""
+"Several Draw documents are open and none is focused. Switch to the document "
+"to reset and try again."
+msgstr "当前打开了多个 Draw 文档，且没有处于焦点状态的文档。请切换到目标文档以重置并重试。"
+
+#: plugin/scripting/session_manager.py
+msgid "Open a Writer, Calc, or Draw document and try again."
+msgstr "请打开一个 Writer、Calc 或 Draw 文档后再试。"
 
 #: plugin/scripting/units.py
 msgid "Units helper failed."
@@ -2733,6 +2832,10 @@ msgstr "脚本已保存。"
 msgid "A script is already running."
 msgstr "脚本已在运行中。"
 
+#: plugin/scripting/python_runner.py
+msgid "No script is selected. Use New or Save As to keep this code."
+msgstr "未选择任何脚本。请使用“新建”或“另存为”来保存此代码。"
+
 #: plugin/scripting/python_runner.py plugin/xdl_strings.py
 msgid "Run Python Script"
 msgstr "运行 Python 脚本"
@@ -2753,10 +2856,20 @@ msgstr "打开“运行 Python 脚本”时发生意外错误。"
 msgid "Dispatch Error"
 msgstr "调度错误"
 
+#: plugin/vision/vision_runner.py
+#, python-brace-format
+msgid "Could not export the selected image: {error}"
+msgstr "无法导出所选图像：{error}"
+
 #: plugin/vision/vision_runner.py plugin/vision/vision_egress.py
 msgid ""
 "Select an embedded image (or a range containing images), then Run again."
 msgstr "请选择一张嵌入式图像（或包含图像的区域），然后再次运行。"
+
+#: plugin/vision/vision_runner.py
+#, python-brace-format
+msgid "Image '{name}' could not be exported: {error}"
+msgstr "无法导出图像“{name}”：{error}"
 
 #: plugin/vision/vision_runner.py
 #, python-brace-format
@@ -2773,6 +2886,12 @@ msgstr "图像过大，无法发送至视觉处理程序（{size} 字节；限�
 #: plugin/vision/vision_runner.py
 msgid "Cancelled by user."
 msgstr "已由用户取消。"
+
+#: plugin/vision/vision_runner.py
+#, python-brace-format
+msgid ""
+"OCR failed for {failed} ({error}); {count} of {total} images completed."
+msgstr "OCR 识别失败：{failed} ({error})；已完成 {count}/{total} 张图像。"
 
 #: plugin/vision/vision_runner.py
 #, python-brace-format
@@ -3060,14 +3179,6 @@ msgstr "{0}：{1} 通过，{2} 失败。"
 msgid "Tests failed to run: {0}"
 msgstr "测试运行失败：{0}"
 
-#: plugin/main.py plugin/xdl_strings.py
-msgid "MCP Server Status"
-msgstr "MCP 服务器状态"
-
-#: plugin/main.py
-msgid "Edit LaTeX Math..."
-msgstr "编辑 LaTeX 公式..."
-
 #: plugin/xdl_strings.py
 msgid "-1"
 msgstr "-1"
@@ -3091,6 +3202,10 @@ msgstr "附加指令（历史）："
 #: plugin/xdl_strings.py
 msgid "Additional Instructions:"
 msgstr "附加指令："
+
+#: plugin/xdl_strings.py
+msgid "All"
+msgstr "全部"
 
 #: plugin/xdl_strings.py
 msgid "Ask / instruct:"
@@ -3245,6 +3360,10 @@ msgid "Key Phrases"
 msgstr "关键短语"
 
 #: plugin/xdl_strings.py
+msgid "MCP Server Status"
+msgstr "MCP 服务器状态"
+
+#: plugin/xdl_strings.py
 msgid "Max Tokens:"
 msgstr "最大令牌数："
 
@@ -3349,10 +3468,6 @@ msgid "Scope"
 msgstr "范围"
 
 #: plugin/xdl_strings.py
-msgid "Search Nearby Files"
-msgstr "搜索附近文件"
-
-#: plugin/xdl_strings.py
 msgid "Search Query:"
 msgstr "搜索查询："
 
@@ -3371,10 +3486,6 @@ msgstr "所选内容"
 #: plugin/xdl_strings.py
 msgid "Sentiment"
 msgstr "情感分析"
-
-#: plugin/xdl_strings.py
-msgid "Status"
-msgstr "状态"
 
 #: plugin/xdl_strings.py
 msgid "Status: Ready"
@@ -3460,17 +3571,17 @@ msgstr "内置"
 msgid "Hermes"
 msgstr "Hermes"
 
-msgid "Claude Code (ACP)"
-msgstr "Claude 代码 (ACP)"
+msgid "Claude Code"
+msgstr "Claude Code"
 
-msgid "Mistral Vibe (ACP)"
-msgstr "Mistral Vibe (ACP)"
+msgid "Mistral Vibe"
+msgstr "Mistral Vibe"
 
-msgid "Grok Build (ACP)"
-msgstr "Grok 构建 (ACP)"
+msgid "Grok Build"
+msgstr "Grok Build"
 
-msgid "OpenCode (ACP)"
-msgstr "OpenCode (ACP)"
+msgid "OpenCode"
+msgstr "OpenCode"
 
 msgid "Prompt for Agent Permissions"
 msgstr "请求代理权限"

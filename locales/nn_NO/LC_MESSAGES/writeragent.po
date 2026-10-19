@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-07 23:17-0400\n"
+"POT-Creation-Date: 2026-10-19 12:57-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: Norwegian Nynorsk <LL@li.org>\n"
@@ -76,6 +76,10 @@ msgstr "Opne eit Writer-dokument først."
 msgid "Run code cell"
 msgstr "Køyr kodecelle"
 
+#: plugin/notebook/notebook_controls.py
+msgid "Code"
+msgstr "Kode"
+
 #: plugin/embeddings/search_ui.py
 msgid "just now"
 msgstr "akkurat no"
@@ -94,6 +98,14 @@ msgstr "for {0} timar sidan"
 #, python-brace-format
 msgid "{0}d ago"
 msgstr "for {0} dagar sidan"
+
+#: plugin/embeddings/search_ui.py
+msgid "Failed to open search dialog."
+msgstr "Klarte ikkje opne søkjedialogen."
+
+#: plugin/embeddings/search_ui.py plugin/xdl_strings.py
+msgid "Search Nearby Files"
+msgstr "Søk i nærliggande filer"
 
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: No active document"
@@ -189,26 +201,26 @@ msgid "Rebuild failed: "
 msgstr "Oppbygging mislukkast: "
 
 #: plugin/framework/errors.py
-#, python-brace-format
-msgid "TLS/SSL Error: {0}"
-msgstr "TLS/SSL-feil: {0}"
-
-#: plugin/framework/errors.py plugin/framework/client/errors.py
 msgid "Invalid API Key. Please check your settings."
 msgstr "Ugyldig API-nøkkel. Kontroller innstillingane dine."
 
-#: plugin/framework/errors.py plugin/framework/client/errors.py
+#: plugin/framework/errors.py
 msgid "API access Forbidden. Your key may lack permissions for this model."
 msgstr ""
 "API-tilgang nekta. Nøkkelen din manglar kanskje løyve for denne modellen."
 
-#: plugin/framework/errors.py plugin/framework/client/errors.py
+#: plugin/framework/errors.py
 msgid "Endpoint not found (404). Check your URL and Model name."
 msgstr "Endepunkt ikkje funne (404). Kontroller URL-en og modellnamnet ditt."
 
-#: plugin/framework/errors.py plugin/framework/client/errors.py
+#: plugin/framework/errors.py
 msgid "Rate limited (429). Wait a moment and try again."
 msgstr "Hastighetsavgrensa (429). Vent litt og prøv på nytt."
+
+#: plugin/framework/errors.py
+#, python-brace-format
+msgid "TLS/SSL Error: {0}"
+msgstr "TLS/SSL-feil: {0}"
 
 #: plugin/framework/errors.py
 #, python-brace-format
@@ -378,6 +390,22 @@ msgstr ""
 msgid "Provider busy, retrying in {0}s…"
 msgstr "Tenesteytar oppteken, prøver på nytt om {0} s…"
 
+#: plugin/framework/client/request_controls.py
+#, python-brace-format
+msgid "Provider asked to wait {0}s, which is above the {1}s retry cap."
+msgstr ""
+"Tenesteytaren bad om å vente {0} s, noko som er over grensa på {1} s for nye"
+" forsøk."
+
+#: plugin/framework/client/request_controls.py
+#, python-brace-format
+msgid "Spacing free-model requests, next send in {0}s…"
+msgstr "Ventar mellom førespurnader til fri modell, neste sending om {0} s…"
+
+#: plugin/framework/client/anthropic_shim.py
+msgid "Anthropic model is not set. Choose a model in Settings."
+msgstr "Anthropic-modell er ikkje vald. Vel ein modell i Innstillingar."
+
 #: plugin/framework/main_shared.py plugin/calc/python/cell_editor_ui.py
 #: plugin/writer/math/latex_dialog.py plugin/chatbot/panel.py
 #: plugin/chatbot/external_editor.py plugin/chatbot/send_handlers.py
@@ -418,6 +446,14 @@ msgstr ""
 #: plugin/audio/stt_service.py
 msgid "Transcribing audio..."
 msgstr "Transkriberer lyd..."
+
+#: plugin/audio/stt_service.py
+msgid ""
+"Could not check whether faster-whisper is installed. The Settings → Python "
+"interpreter timed out or could not start."
+msgstr ""
+"Kunne ikkje kontrollere om faster-whisper er installert. Innstillingar → "
+"Python-tolk fekk tidsavbrot eller kunne ikkje starte."
 
 #: plugin/audio/stt_service.py
 #, python-brace-format
@@ -541,7 +577,6 @@ msgstr "Lastar ned japansk fonemiserar-ordbok…"
 
 #: plugin/calc/python/editor_context_menu.py plugin/librepy/sidebar_menus.py
 #: plugin/chatbot/hamburger_menu.py plugin/chatbot/panel_factory.py
-#: plugin/main.py
 msgid "Edit Python in Cell..."
 msgstr "Rediger Python i celle..."
 
@@ -589,10 +624,6 @@ msgid "Ready"
 msgstr "Klar"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/scripting/editor_ui_strings.py
-msgid "A1:C1  or  A1:C1, C1:C5"
-msgstr "A1:C1 eller A1:C1, C1:C5"
-
-#: plugin/calc/python/cell_editor_ui.py plugin/scripting/editor_ui_strings.py
 msgid "Data ranges apply only when saving as a =PY() formula."
 msgstr "Dataområde gjeld berre ved lagring som ein =PY()-formel."
 
@@ -606,7 +637,6 @@ msgid "Saving…"
 msgstr "Lagrar…"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/calc/python/editor.py
-#: plugin/scripting/editor_ui_strings.py
 msgid "Saved without =PY()."
 msgstr "Lagra utan =PY()."
 
@@ -648,6 +678,11 @@ msgstr ""
 msgid "Could not rewrite xl() range literals into =PY data arguments: %s"
 msgstr "Klarte ikkje skriva om xl()-områdereferansar til =PY-dataargument: %s"
 
+#: plugin/calc/python/editor.py
+#, python-brace-format
+msgid "Saved code in {0}."
+msgstr "Lagra kode i {0}."
+
 #: plugin/calc/python/editor.py plugin/xdl_strings.py
 msgid "Python cell editor"
 msgstr "Python-celle-redigering"
@@ -658,7 +693,8 @@ msgid "Save without =PY()"
 msgstr "Lagre utan =PY()"
 
 #: plugin/calc/python/editor.py plugin/scripting/editor_ui_strings.py
-#: plugin/scripting/python_runner.py plugin/xdl_strings.py
+#: plugin/scripting/python_runner_ui.py plugin/scripting/python_runner.py
+#: plugin/xdl_strings.py
 msgid "Save"
 msgstr "Lagre"
 
@@ -796,17 +832,10 @@ msgstr "Python-innstillingar"
 msgid "Could not open Settings."
 msgstr "Kunne ikkje opne Innstillingar."
 
-#: plugin/librepy/python_sidebar.py plugin/xdl_strings.py
-msgid "All"
-msgstr "Alle"
-
-#: plugin/librepy/python_sidebar.py
-msgid "Errors"
-msgstr "Feil"
-
-#: plugin/librepy/python_sidebar.py plugin/scripting/python_runner_ui.py
-msgid "Output"
-msgstr "Utdata"
+#: plugin/librepy/settings.py plugin/chatbot/module_config_dialog.py
+#: plugin/chatbot/dialog_views.py
+msgid "Invalid Setting"
+msgstr "Ugyldig innstilling"
 
 #: plugin/librepy/python_sidebar.py
 msgid "Shared kernel"
@@ -844,15 +873,15 @@ msgstr ""
 "Virtuelt miljø: manglar Python ved {path}"
 
 #: plugin/librepy/python_sidebar.py
-msgid "(no =PY() cells on active sheet)"
-msgstr "(ingen =PY()-celler i aktivt ark)"
-
-#: plugin/librepy/python_sidebar.py
 msgid "(no diagnostics yet)"
 msgstr "(ingen diagnostikk enno)"
 
+#: plugin/librepy/python_sidebar.py
+msgid "(no =PY() cells on active sheet)"
+msgstr "(ingen =PY()-celler i aktivt ark)"
+
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/chatbot/panel_factory.py plugin/main.py
+#: plugin/chatbot/panel_factory.py
 msgid "Run Python Script..."
 msgstr "Køyr Python-skript..."
 
@@ -862,43 +891,38 @@ msgid "Insert LaTeX Math..."
 msgstr "Set inn LaTeX-matematikk..."
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py
 msgid "Text Analytics..."
 msgstr "Tekstanalyse…"
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
 #: plugin/chatbot/dialog_views.py plugin/chatbot/panel_factory.py
-#: plugin/main.py plugin/xdl_strings.py
+#: plugin/xdl_strings.py
 msgid "Settings"
 msgstr "Innstillingar"
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py
 msgid "Vision OCR Settings..."
 msgstr "Vision OCR-innstillingar..."
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py
 msgid "Reset Python Session"
 msgstr "Nullstill Python-økt"
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py
 msgid "Run All"
 msgstr "Køyr alle"
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py
 msgid "Run From Here"
 msgstr "Køyr herfrå"
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py plugin/xdl_strings.py
+#: plugin/xdl_strings.py
 msgid "Stop"
 msgstr "Stopp"
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/dialogs.py
-#: plugin/chatbot/hamburger_menu.py plugin/main.py plugin/xdl_strings.py
+#: plugin/chatbot/hamburger_menu.py plugin/xdl_strings.py
 msgid "Report bug..."
 msgstr "Rapporter feil..."
 
@@ -913,6 +937,93 @@ msgstr "Godta heile endringa (agent)"
 #: plugin/writer/change_context_menu.py
 msgid "Reject whole change (agent)"
 msgstr "Avvis heile endringa (agent)"
+
+#: plugin/writer/inline_review.py
+msgid "No agent changes to review in this document."
+msgstr "Ingen agentendringar å sjå over i dette dokumentet."
+
+#: plugin/writer/inline_review.py
+#, python-format
+msgid "%d overlapping agent changes accepted together."
+msgstr "%d overlappande agentendringar godtekne samstundes."
+
+#: plugin/writer/inline_review.py
+#, python-format
+msgid "%d overlapping agent changes rejected together."
+msgstr "%d overlappande agentendringar avviste samstundes."
+
+#: plugin/writer/inline_review.py
+msgid "Change accepted."
+msgstr "Endring godteken."
+
+#: plugin/writer/inline_review.py
+msgid "Change rejected."
+msgstr "Endring avvist."
+
+#: plugin/writer/inline_review.py
+msgid ""
+"Couldn't read this document's tracked changes reliably just now -- nothing "
+"was changed. Please try again."
+msgstr ""
+"Klarte ikkje å lesa dokumentet sine sporingsendringar på ein påliteleg måte "
+"akkurat no – ingenting vart endra. Prøv på nytt."
+
+#: plugin/writer/inline_review.py
+msgid ""
+"Started resolving changes but couldn't confirm the result -- some may have "
+"been resolved. Please review remaining changes in Edit > Track Changes > "
+"Manage."
+msgstr ""
+"Starta oppløysing av endringar, men kunne ikkje stadfesta resultatet – nokre"
+" kan ha vorte løyste. Gå gjennom attverande endringar i Rediger > Spor "
+"endringar > Behandle."
+
+#: plugin/writer/inline_review.py
+msgid ""
+"Nothing was changed. Resolve remaining changes from Edit > Track Changes > "
+"Manage."
+msgstr ""
+"Ingenting vart endra. Løys attverande endringar frå Rediger > Spor endringar"
+" > Behandle."
+
+#: plugin/writer/inline_review.py
+msgid ""
+"None could be resolved here -- each overlaps with one of your own tracked "
+"changes. Resolve them from Edit > Track Changes > Manage."
+msgstr ""
+"Ingen kunne løysast her – kvar av dei overlappar med ei av dine eigne "
+"sporingsendringar. Løys dei frå Rediger > Spor endringar > Behandle."
+
+#: plugin/writer/inline_review.py
+#, python-format
+msgid ""
+"Resolved %(resolved)d of %(total)d. The rest overlap with your own tracked "
+"changes -- resolve those from Edit > Track Changes > Manage."
+msgstr ""
+"Løyste %(resolved)d av %(total)d. Resten overlappar med dine eigne "
+"sporingsendringar – løys desse frå Rediger > Spor endringar > Behandle."
+
+#: plugin/writer/inline_review.py
+msgid ""
+"Could not resolve this change here -- it may share a paragraph with one of "
+"your tracked changes or another agent change. Resolve it from Edit > Track "
+"Changes > Manage."
+msgstr ""
+"Kunne ikkje løysa denne endringa her – ho kan dela avsnitt med ei av dine "
+"sporingsendringar eller ei anna agentendring. Løys ho frå Rediger > Spor "
+"endringar > Behandle."
+
+#: plugin/writer/inline_review.py
+msgid "Put the cursor on a highlighted agent change first."
+msgstr "Plasser markøren på ei utheva agentendring først."
+
+#: plugin/writer/inline_review.py
+msgid "Review agent changes"
+msgstr "Gå gjennom agentendringar"
+
+#: plugin/writer/inline_review.py
+msgid "Resolve agent changes"
+msgstr "Løys agentendringar"
 
 #: plugin/writer/review_click_popup.py
 msgid "Accept this change"
@@ -946,6 +1057,15 @@ msgstr ""
 "fleire spora endringar."
 
 #: plugin/writer/edit_review.py
+#, python-brace-format
+msgid ""
+"Failed to collapse the streamed continuation into a single tracked change: "
+"{0}"
+msgstr ""
+"Klarte ikkje å slå saman den strøymde fortsetjinga til ei enkelt spora "
+"endring: {0}"
+
+#: plugin/writer/edit_review.py
 msgid ""
 "Failed to collapse the streamed continuation into a single tracked change. "
 "The text was kept, but may not be reviewable."
@@ -964,6 +1084,10 @@ msgstr ""
 #: plugin/writer/editselection.py
 msgid "WriterAgent: Extend Selection"
 msgstr "WriterAgent: Utvid utval"
+
+#: plugin/writer/editselection.py
+msgid "Select text first"
+msgstr "Marker tekst først"
 
 #: plugin/writer/editselection.py
 msgid "WriterAgent: Edit Selection"
@@ -1018,6 +1142,11 @@ msgid ""
 msgstr ""
 "Kunne ikkje identifisere den valde formelen. Klikk i teksten, og set "
 "deretter inn ein ny formel."
+
+#: plugin/writer/math/latex_dialog.py
+msgid "Could not convert formula to LaTeX. Enter formula manually."
+msgstr ""
+"Klarte ikkje å konvertere formel til LaTeX. Skriv inn formelen manuelt."
 
 #: plugin/writer/math/latex_dialog.py
 msgid "Unknown conversion error"
@@ -1300,10 +1429,6 @@ msgstr "kvifor"
 msgid "you"
 msgstr "du"
 
-#: plugin/chatbot/module_config_dialog.py plugin/chatbot/dialog_views.py
-msgid "Invalid Setting"
-msgstr "Ugyldig innstilling"
-
 #: plugin/chatbot/dialogs.py
 msgid "Agent requests approval"
 msgstr "Agenten ber om godkjenning"
@@ -1325,24 +1450,23 @@ msgstr "Kopiert!"
 msgid "Copy URL"
 msgstr "Kopier URL"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Extend Selection"
 msgstr "Utvid merking"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Edit Selection"
 msgstr "Rediger utval"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Convert Sheet to Python..."
 msgstr "Konverter ark til Python..."
 
 #: plugin/chatbot/hamburger_menu.py plugin/chatbot/panel_factory.py
-#: plugin/main.py
 msgid "Search Nearby Files..."
 msgstr "Søk i nærliggjande filer..."
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Toggle MCP Server"
 msgstr "Veksle MCP-tenar"
 
@@ -1354,37 +1478,33 @@ msgstr "MCP-tenar (køyrer)"
 msgid "MCP Server (Stopped)"
 msgstr "MCP-tenar (stoppa)"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Run format tests"
 msgstr "Køyr formattestar"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Run calc tests"
 msgstr "Køyr Calc-testar"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Run Calc API integration tests"
 msgstr "Køyr integrasjonstestar for Calc API"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Run draw tests"
 msgstr "Køyr Draw-testar"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Evaluation Dashboard"
 msgstr "Evalueringspanel"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Debug"
 msgstr "Feilsøking"
 
 #: plugin/chatbot/tool_loop.py plugin/chatbot/panel.py
 msgid "[Voice message]"
 msgstr "[Talemelding]"
-
-#: plugin/chatbot/tool_loop.py
-msgid "Error: Toolkit unavailable"
-msgstr "Feil: Verktøysett ikkje tilgjengeleg"
 
 #: plugin/chatbot/chat_sidebar_mode.py plugin/xdl_strings.py
 msgid "Chat"
@@ -1410,7 +1530,7 @@ msgstr "Idémyldring"
 msgid "Writing Plan"
 msgstr "Skriveplan"
 
-#: plugin/chatbot/chat_sidebar_mode.py
+#: plugin/chatbot/chat_sidebar_mode.py plugin/chatbot/dialog_views.py
 msgid "PPT-Master"
 msgstr "PPT-Master"
 
@@ -1650,11 +1770,6 @@ msgstr "[Transkriberingsfeil: {0}]"
 #, python-brace-format
 msgid "[Document context error: {0}]"
 msgstr "[Dokumentkontekstfeil: {0}]"
-
-#: plugin/chatbot/send_handlers.py
-#, python-brace-format
-msgid "[Agent backend '{0}' not found.]"
-msgstr "[Agent-bakende '{0}' vart ikkje funnen.]"
 
 #: plugin/chatbot/send_handlers.py
 #, python-brace-format
@@ -1933,19 +2048,13 @@ msgstr "Nytt Python-skript"
 msgid "Script name:"
 msgstr "Skriptnamn:"
 
-#: plugin/scripting/script_dialogs.py
-msgid "Script name cannot start with a reserved prefix."
-msgstr "Skriptnamnet kan ikkje starte med eit reservert prefiks."
+#: plugin/scripting/script_dialogs.py plugin/scripting/editor_ui_strings.py
+msgid "Attach to this document (no document is open)"
+msgstr "Kopla til dette dokumentet (ingen dokument er opne)"
 
 #: plugin/scripting/script_dialogs.py plugin/scripting/editor_ui_strings.py
-#: plugin/xdl_strings.py
-msgid "Attach to this document"
-msgstr "Legg ved dette dokumentet"
-
-#: plugin/scripting/script_dialogs.py plugin/scripting/editor_ui_strings.py
-#: plugin/scripting/document_scripts.py
-msgid "Script name cannot be empty."
-msgstr "Skriptnamnet kan ikkje vere tomt."
+msgid "Attach to this document (this document is read-only)"
+msgstr "Kopla til dette dokumentet (dette dokumentet er skrivebeskytta)"
 
 #: plugin/scripting/editor_ui_strings.py
 msgid "Running…"
@@ -1972,25 +2081,33 @@ msgstr "Avbryt"
 msgid "Data:"
 msgstr "Data:"
 
+#: plugin/scripting/editor_ui_strings.py
+msgid "A1:C1  or  A1:C1, C1:C5"
+msgstr "A1:C1 eller A1:C1, C1:C5"
+
 #: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
 msgid "New"
 msgstr "Ny"
+
+#: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
+msgid "Attach to this document"
+msgstr "Legg ved dette dokumentet"
+
+#: plugin/scripting/editor_ui_strings.py
+msgid "Attach to this document (this document changed)"
+msgstr "Kopla til dette dokumentet (dette dokumentet er endra)"
 
 #: plugin/scripting/editor_ui_strings.py
 msgid "Create"
 msgstr "Opprett"
 
+#: plugin/scripting/editor_ui_strings.py plugin/scripting/document_scripts.py
+msgid "Script name cannot be empty."
+msgstr "Skriptnamnet kan ikkje vere tomt."
+
 #: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
 msgid "Script:"
 msgstr "Skript:"
-
-#: plugin/scripting/editor_ui_strings.py
-msgid "Attach"
-msgstr "Legg til"
-
-#: plugin/scripting/editor_ui_strings.py
-msgid "Attach to Document"
-msgstr "Fest til dokument"
 
 #: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
 msgid "Save As..."
@@ -2013,11 +2130,11 @@ msgid "My Scripts"
 msgstr "Mine skript"
 
 #: plugin/scripting/editor_ui_strings.py plugin/scripting/document_scripts.py
-#: plugin/scripting/python_runner_ui.py
-msgid "Built-in helpers are read-only. Use Copy to My Scripts to customize."
+msgid ""
+"Built-in helpers are read-only. Use Save As to copy one into My Scripts."
 msgstr ""
-"Innebygde hjelpere er skrivebeskytta. Bruk Kopier til Mine skript for å "
-"tilpasse."
+"Innebygde hjelparar er skrivebeskytta. Bruk Lagre som for å kopiere ein til "
+"Mine skript."
 
 #: plugin/scripting/editor_ui_strings.py plugin/scripting/document_scripts.py
 msgid ""
@@ -2031,20 +2148,6 @@ msgstr ""
 #, python-brace-format
 msgid "Loaded script '{0}'."
 msgstr "Lasta skript «{0}»."
-
-#: plugin/scripting/editor_ui_strings.py plugin/scripting/document_scripts.py
-msgid "No document is open to attach scripts."
-msgstr "Ingen dokument er opne for å leggje til skript."
-
-#: plugin/scripting/editor_ui_strings.py
-#, python-brace-format
-msgid "Attaching script '{0}'..."
-msgstr "Legg ved skript «{0}»..."
-
-#: plugin/scripting/editor_ui_strings.py
-#, python-brace-format
-msgid "Copying script '{0}' to My Scripts..."
-msgstr "Kopierer skript «{0}» til Mine skript..."
 
 #: plugin/scripting/editor_ui_strings.py
 #, python-brace-format
@@ -2060,10 +2163,6 @@ msgstr "Slettar skriptet «{0}»..."
 msgid "Built-in helpers cannot be deleted."
 msgstr "Innebygde hjelparar kan ikkje slettast."
 
-#: plugin/scripting/editor_ui_strings.py
-msgid "Enter script name:"
-msgstr "Skriv inn skriptnamn:"
-
 #: plugin/scripting/editor_ui_strings.py plugin/scripting/python_runner_ui.py
 #, python-brace-format
 msgid "A script named '{0}' already exists in this document. Overwrite?"
@@ -2071,21 +2170,12 @@ msgstr ""
 "Eit skript med namnet «{0}» finst allereie i dette dokumentet. Vil du skrive"
 " over?"
 
-#: plugin/scripting/editor_ui_strings.py
-msgid "Copy to My Scripts as:"
-msgstr "Kopier til Mine skript som:"
-
 #: plugin/scripting/editor_ui_strings.py plugin/scripting/python_runner_ui.py
 #, python-brace-format
 msgid "A script named '{0}' already exists in My Scripts. Overwrite?"
 msgstr ""
 "Eit skript med namnet «{0}» finst allereie i Mine skript. Vil du skrive "
 "over?"
-
-#: plugin/scripting/editor_ui_strings.py
-#, python-brace-format
-msgid "Save script '{0}' to this document?"
-msgstr "Vil du lagre skriptet «{0}» i dette dokumentet?"
 
 #: plugin/scripting/editor_ui_strings.py
 #, python-brace-format
@@ -2097,6 +2187,23 @@ msgid "Select data range or enter A1 address (injected as data)."
 msgstr "Vel dataområde eller skriv inn A1-adresse (sett inn som data)."
 
 #: plugin/scripting/document_scripts.py
+msgid "Stored document scripts are unreadable, so they were left unchanged."
+msgstr "Lagra dokumentskript er uleselege, så dei vart ikkje endra."
+
+#: plugin/scripting/document_scripts.py
+#, python-brace-format
+msgid ""
+"Stored document scripts are in an unsupported format (version {0}), so they "
+"were left unchanged."
+msgstr ""
+"Lagra dokumentskript er i eit format som ikkje støttast (versjon {0}), så "
+"dei vart ikkje endra."
+
+#: plugin/scripting/document_scripts.py
+msgid "Document is read-only or properties cannot be written."
+msgstr "Dokumentet er skrivebeskytta eller eigenskapane kan ikkje skrivast."
+
+#: plugin/scripting/document_scripts.py
 #, python-brace-format
 msgid "Document scripts are too large to store in the document ({0} bytes)."
 msgstr "Dokumentskript er for store til å lagrast i dokumentet ({0} byte)."
@@ -2104,10 +2211,6 @@ msgstr "Dokumentskript er for store til å lagrast i dokumentet ({0} byte)."
 #: plugin/scripting/document_scripts.py plugin/scripting/python_runner_ui.py
 msgid "No document is open to save scripts."
 msgstr "Ingen dokument er opne for å lagre skript."
-
-#: plugin/scripting/document_scripts.py
-msgid "Document is read-only or properties cannot be written."
-msgstr "Dokumentet er skrivebeskytta eller eigenskapane kan ikkje skrivast."
 
 #: plugin/scripting/document_scripts.py
 msgid ""
@@ -2143,6 +2246,23 @@ msgstr "Dette dokumentet"
 
 #: plugin/scripting/document_scripts.py
 #, python-brace-format
+msgid ""
+"Could not save '{0}' to this document ({1}). Saved it to My Scripts instead."
+msgstr ""
+"Kunne ikkje lagre «{0}» til dette dokumentet ({1}). Lagra det i Mine skript "
+"i staden."
+
+#: plugin/scripting/document_scripts.py
+#, python-brace-format
+msgid ""
+"Could not save '{0}' to this document ({1}). A script named '{0}' already "
+"exists in My Scripts."
+msgstr ""
+"Kunne ikkje lagre «{0}» til dette dokumentet ({1}). Eit skript med namnet "
+"«{0}» finst allereie i Mine skript."
+
+#: plugin/scripting/document_scripts.py
+#, python-brace-format
 msgid "Script '{0}' does not exist in My Scripts."
 msgstr "Skriptet «{0}» finst ikkje i Mine skript."
 
@@ -2160,16 +2280,6 @@ msgstr "Ingen dokument er opne."
 
 #: plugin/scripting/document_scripts.py
 #, python-brace-format
-msgid "A script named '{0}' already exists in My Scripts. {1}"
-msgstr "Eit skript med namnet «{0}» finst allereie i Mine skript. {1}"
-
-#: plugin/scripting/document_scripts.py
-#, python-brace-format
-msgid "Saved script '{0}' to My Scripts. {1}"
-msgstr "Lagra skriptet «{0}» i Mine skript. {1}"
-
-#: plugin/scripting/document_scripts.py
-#, python-brace-format
 msgid "Saved script '{0}' to this document."
 msgstr "Lagra skriptet «{0}» i dette dokumentet."
 
@@ -2177,21 +2287,6 @@ msgstr "Lagra skriptet «{0}» i dette dokumentet."
 #, python-brace-format
 msgid "Saved script '{0}'."
 msgstr "Lagra skriptet «{0}»."
-
-#: plugin/scripting/document_scripts.py
-#, python-brace-format
-msgid "Attached script '{0}' to this document."
-msgstr "La til skriptet «{0}» i dette dokumentet."
-
-#: plugin/scripting/document_scripts.py
-#, python-brace-format
-msgid "A script named '{0}' already exists in My Scripts."
-msgstr "Eit skript med namnet «{0}» finst allereie i Mine skript."
-
-#: plugin/scripting/document_scripts.py
-#, python-brace-format
-msgid "Copied script '{0}' to My Scripts."
-msgstr "Kopierte skriptet «{0}» til Mine skript."
 
 #: plugin/scripting/document_scripts.py
 #, python-brace-format
@@ -2203,7 +2298,7 @@ msgstr "Sletta dokumentskriptet «{0}»."
 msgid "Deleted script '{0}'."
 msgstr "Sletta skriptet «{0}»."
 
-#: plugin/scripting/document_scripts.py
+#: plugin/scripting/document_scripts.py plugin/scripting/text_analytics_ui.py
 msgid "The document was closed."
 msgstr "Dokumentet vart lukka."
 
@@ -2212,19 +2307,12 @@ msgid "The document is no longer open."
 msgstr "Dokumentet er ikkje lenger ope."
 
 #: plugin/scripting/python_runner_ui.py
+msgid "Script preparation failed."
+msgstr "Førebuing av skriptet mislukkast."
+
+#: plugin/scripting/python_runner_ui.py
 msgid "PythonScriptDialog could not be loaded from the extension."
 msgstr "PythonScriptDialog kunne ikkje lastast frå utvidinga."
-
-#: plugin/scripting/python_runner_ui.py
-#, python-format
-msgid "Cannot save to My Scripts: a script named '%s' already exists."
-msgstr ""
-"Kan ikkje lagre i Mine skript: eit skript med namnet «%s» finst frå før."
-
-#: plugin/scripting/python_runner_ui.py
-#, python-format
-msgid "%s Saved to My Scripts instead."
-msgstr "%s Lagra i Mine skript i staden."
 
 #: plugin/scripting/python_runner_ui.py
 #, python-format
@@ -2285,13 +2373,9 @@ msgstr "Skript køyrt utan feil."
 msgid "Success"
 msgstr "Vellukka"
 
-#: plugin/scripting/venv_probe_ui.py
-msgid "Venv OK"
-msgstr "Venv OK"
-
-#: plugin/scripting/venv_probe_ui.py
-msgid "Venv check failed"
-msgstr "Venv-sjekk feila"
+#: plugin/scripting/python_runner_ui.py
+msgid "Output"
+msgstr "Utdata"
 
 #: plugin/scripting/venv_probe_ui.py plugin/xdl_strings.py
 msgid "Testing Python environment..."
@@ -2304,6 +2388,14 @@ msgstr "Ferdig"
 #: plugin/scripting/venv_probe_ui.py
 msgid "Failed"
 msgstr "Mislykka"
+
+#: plugin/scripting/venv_probe_ui.py
+msgid "Venv OK"
+msgstr "Venv OK"
+
+#: plugin/scripting/venv_probe_ui.py
+msgid "Venv check failed"
+msgstr "Venv-sjekk feila"
 
 #: plugin/scripting/editor_host.py
 msgid ""
@@ -2329,12 +2421,20 @@ msgid "The script list update timed out."
 msgstr "Tidsavbrot ved oppdatering av skriptlista."
 
 #: plugin/scripting/editor_host.py
+msgid "The script list update failed."
+msgstr "Oppdatering av skriptlista mislukkast."
+
+#: plugin/scripting/editor_host.py
 msgid "Script execution failed."
 msgstr "Skriptkøyringa mislukkast."
 
 #: plugin/scripting/editor_host.py
 msgid "Saving the script timed out."
 msgstr "Tidsavbrot ved lagring av skriptet."
+
+#: plugin/scripting/editor_host.py
+msgid "Saving the script failed."
+msgstr "Lagring av skriptet mislukkast."
 
 #: plugin/scripting/editor_host.py
 msgid "the initialization script"
@@ -2377,9 +2477,12 @@ msgid "Could not talk to the Python editor."
 msgstr "Kunne ikkje kommunisera med Python-redigeringsprogrammet."
 
 #: plugin/scripting/venv_diagnostics.py
-msgid "On Linux also install system PortAudio: sudo pacman -S portaudio"
+msgid ""
+"On Linux also install the system PortAudio package from your distribution "
+"(sounddevice needs it; the package name differs)."
 msgstr ""
-"På Linux må du òg installere system-PortAudio: sudo pacman -S portaudio"
+"På Linux må du òg installere systempakken PortAudio frå distribusjonen din "
+"(sounddevice treng han; pakkenamnet varierer)."
 
 #: plugin/scripting/venv_diagnostics.py
 msgid "Audio probe timed out (sounddevice import failed or hung)."
@@ -2486,10 +2589,6 @@ msgid "Vector Search Libraries"
 msgstr "Bibliotek for vektorsøk"
 
 #: plugin/scripting/venv_diagnostics.py
-msgid "Audio Recording"
-msgstr "Lydopptak"
-
-#: plugin/scripting/venv_diagnostics.py
 msgid "To install remaining packages:"
 msgstr "For å installere attverande pakkar:"
 
@@ -2555,50 +2654,38 @@ msgid "Could not load the analytics dialog."
 msgstr "Kunne ikkje laste inn analysedialogen."
 
 #: plugin/scripting/text_analytics_ui.py
-msgid "Checking spaCy / textdescriptives / transformers installation..."
-msgstr ""
-"Kontrollerer installasjon av spaCy / textdescriptives / transformers..."
-
-#: plugin/scripting/text_analytics_ui.py
-#, python-brace-format
-msgid ""
-"Error from the Text Analytics worker:\n"
-"{err}\n"
-"\n"
-"The features in this dialog require these packages in the python it is using:\n"
-"  • spacy + a model          (entities, key phrases, basic stats)\n"
-"  • textdescriptives         (real Readability scores)\n"
-"  • transformers + torch     (Sentiment using the multilingual model)\n"
-"\n"
-"Install them with:\n"
-"  {install}\n"
-"\n"
-"The worker reported the module as missing. Verify the packages are installed in the exact python executable the worker resolved for your configured venv."
-msgstr ""
-"Feil frå tekstanalysetenesta:\n"
-"{err}\n"
-"\n"
-"Funksjonane i denne dialogen krev at desse pakkane er installerte i Python-miljøet som vert brukt:\n"
-"  • spacy + ein modell          (einingar, nøkkeluttrykk, grunnleggjande statistikk)\n"
-"  • textdescriptives         (faktiske lesbarheitsskårar)\n"
-"  • transformers + torch     (sentimentanalyse med fleirspråkleg modell)\n"
-"\n"
-"Installer dei med:\n"
-"  {install}\n"
-"\n"
-"Tenesta rapporterte at modulen manglar. Kontroller at pakkane er installerte i den nøyaktige Python-køyrefila som tenesta har valt for det konfigurerte virtuelle miljøet."
+msgid "Could not read the scope checkbox."
+msgstr "Kunne ikkje lese avkryssingsboksen for omfang."
 
 #: plugin/scripting/text_analytics_ui.py
 msgid "Open a Writer document to analyze."
 msgstr "Opne eit Writer-dokument for å analysere."
 
 #: plugin/scripting/text_analytics_ui.py
+msgid "Nothing is selected."
+msgstr "Ingenting er valt."
+
+#: plugin/scripting/text_analytics_ui.py
 msgid "Not enough text in the chosen scope."
 msgstr "Ikkje nok tekst i det valde området."
 
 #: plugin/scripting/text_analytics_ui.py
+msgid "Checking spaCy / textdescriptives / transformers installation..."
+msgstr ""
+"Kontrollerer installasjon av spaCy / textdescriptives / transformers..."
+
+#: plugin/scripting/text_analytics_ui.py
 msgid "Analyzing..."
 msgstr "Analyserer..."
+
+#: plugin/scripting/text_analytics_ui.py
+#, python-brace-format
+msgid ""
+"Error from the Text Analytics worker:\n"
+"{err}"
+msgstr ""
+"Feil frå tekstanalysaren:\n"
+"{err}"
 
 #: plugin/scripting/text_analytics_ui.py
 #, python-format
@@ -2612,6 +2699,11 @@ msgstr ""
 "Nødvendige pakkar kan mangla i det konfigurerte venv-et ditt (Innstillinger → Python). Klikk på «Check Venv» i denne dialogen eller bruk full test i Innstillinger → Python for detaljar om spacy, textdescriptives, transformers, torch osb."
 
 #: plugin/scripting/text_analytics_ui.py
+#, python-format
+msgid "Error: %s"
+msgstr "Feil: %s"
+
+#: plugin/scripting/text_analytics_ui.py
 msgid "No Writer document to insert into."
 msgstr "Ingen Writer-dokument å setja inn i."
 
@@ -2620,8 +2712,10 @@ msgid "Run an analysis first."
 msgstr "Køyr ein analyse først."
 
 #: plugin/scripting/text_analytics_ui.py
-msgid "Nothing useful to insert from the last result."
-msgstr "Ingenting nyttig å setja inn frå førre resultat."
+msgid ""
+"Switch back to the document that was analyzed, or run the analysis again."
+msgstr ""
+"Bytt tilbake til dokumentet som vart analysert, eller køyr analysen på nytt."
 
 #: plugin/scripting/text_analytics_ui.py
 #, python-format
@@ -2742,8 +2836,12 @@ msgstr ""
 "Fil → Opna ei Jupyter-notatbok (.ipynb) først."
 
 #: plugin/scripting/session_manager.py
-msgid "Could not resolve notebook Python session."
-msgstr "Kunne ikkje finna Python-økt for notatboka."
+msgid ""
+"This notebook has no Python worker session yet. The execution counter was "
+"reset."
+msgstr ""
+"Denne notatboka har inga Python-arbeidsøkt enno. Teljaren for køyring vart "
+"nullstilt."
 
 #: plugin/scripting/session_manager.py
 msgid "Notebook Python session reset for this document."
@@ -2760,6 +2858,10 @@ msgid ""
 msgstr ""
 "Tilbakestilling av Python-økt gjeld Calc-rekneark. Opna ei Calc-arbeidsbok "
 "og prøv igjen."
+
+#: plugin/scripting/session_manager.py
+msgid "This spreadsheet has no Python worker session yet."
+msgstr "Dette reknearket har inga Python-arbeidsøkt enno."
 
 #: plugin/scripting/session_manager.py
 msgid "Could not restore the initialization script."
@@ -2789,12 +2891,44 @@ msgstr ""
 "arbeidsboka."
 
 #: plugin/scripting/session_manager.py
+msgid "This document has no Python worker session yet."
+msgstr "Dette dokumentet har inga Python-arbeidsøkt enno."
+
+#: plugin/scripting/session_manager.py
 msgid "Python session reset for this document."
 msgstr "Python-økt tilbakestilt for dette dokumentet."
 
 #: plugin/scripting/session_manager.py
 msgid "Reset Python Session applies to Writer, Calc, and Draw documents."
 msgstr "«Reset Python Session» gjeld for dokument i Writer, Calc og Draw."
+
+#: plugin/scripting/session_manager.py
+msgid ""
+"Several Calc spreadsheets are open and none is focused. Switch to the "
+"spreadsheet to reset and try again."
+msgstr ""
+"Fleire Calc-rekneark er opne, og ingen er i fokus. Bytt til reknearket for å"
+" nullstille og prøv igjen."
+
+#: plugin/scripting/session_manager.py
+msgid ""
+"Several Writer documents are open and none is focused. Switch to the "
+"document to reset and try again."
+msgstr ""
+"Fleire Writer-dokument er opne, og ingen er i fokus. Bytt til dokumentet for"
+" å nullstille og prøv igjen."
+
+#: plugin/scripting/session_manager.py
+msgid ""
+"Several Draw documents are open and none is focused. Switch to the document "
+"to reset and try again."
+msgstr ""
+"Fleire Draw-dokument er opne, og ingen er i fokus. Bytt til dokumentet for å"
+" nullstille og prøv igjen."
+
+#: plugin/scripting/session_manager.py
+msgid "Open a Writer, Calc, or Draw document and try again."
+msgstr "Opna eit Writer-, Calc- eller Draw-dokument og prøv igjen."
 
 #: plugin/scripting/units.py
 msgid "Units helper failed."
@@ -2883,6 +3017,11 @@ msgstr "Skript lagra."
 msgid "A script is already running."
 msgstr "Eit skript køyrer allereie."
 
+#: plugin/scripting/python_runner.py
+msgid "No script is selected. Use New or Save As to keep this code."
+msgstr ""
+"Inga skript er valt. Bruk Ny eller Lagre som for å ta vare på denne koden."
+
 #: plugin/scripting/python_runner.py plugin/xdl_strings.py
 msgid "Run Python Script"
 msgstr "Køyr Python-skript"
@@ -2903,12 +3042,22 @@ msgstr "Ein uventa feil oppstod under opning av Køyr Python-skript."
 msgid "Dispatch Error"
 msgstr "Utsendingsfeil"
 
+#: plugin/vision/vision_runner.py
+#, python-brace-format
+msgid "Could not export the selected image: {error}"
+msgstr "Kunne ikkje eksportere det valde biletet: {error}"
+
 #: plugin/vision/vision_runner.py plugin/vision/vision_egress.py
 msgid ""
 "Select an embedded image (or a range containing images), then Run again."
 msgstr ""
 "Vel eit innebygd bilete (eller eit område som inneheld bilete), og køyr på "
 "nytt."
+
+#: plugin/vision/vision_runner.py
+#, python-brace-format
+msgid "Image '{name}' could not be exported: {error}"
+msgstr "Biletet '{name}' kunne ikkje eksporterast: {error}"
 
 #: plugin/vision/vision_runner.py
 #, python-brace-format
@@ -2927,6 +3076,13 @@ msgstr ""
 #: plugin/vision/vision_runner.py
 msgid "Cancelled by user."
 msgstr "Avbrote av brukar."
+
+#: plugin/vision/vision_runner.py
+#, python-brace-format
+msgid ""
+"OCR failed for {failed} ({error}); {count} of {total} images completed."
+msgstr ""
+"OCR feila for {failed} ({error}); {count} av {total} bilete fullførte."
 
 #: plugin/vision/vision_runner.py
 #, python-brace-format
@@ -3216,14 +3372,6 @@ msgstr "{0}: {1} bestått, {2} feila."
 msgid "Tests failed to run: {0}"
 msgstr "Testane kunne ikkje køyrast: {0}"
 
-#: plugin/main.py plugin/xdl_strings.py
-msgid "MCP Server Status"
-msgstr "Status for MCP-tenar"
-
-#: plugin/main.py
-msgid "Edit LaTeX Math..."
-msgstr "Rediger LaTeX-formel..."
-
 #: plugin/xdl_strings.py
 msgid "-1"
 msgstr "-1"
@@ -3247,6 +3395,10 @@ msgstr "Tilleggsinstruksar (historikk):"
 #: plugin/xdl_strings.py
 msgid "Additional Instructions:"
 msgstr "Tilleggsinstruksar:"
+
+#: plugin/xdl_strings.py
+msgid "All"
+msgstr "Alle"
 
 #: plugin/xdl_strings.py
 msgid "Ask / instruct:"
@@ -3403,6 +3555,10 @@ msgid "Key Phrases"
 msgstr "Nøkkeluttrykk"
 
 #: plugin/xdl_strings.py
+msgid "MCP Server Status"
+msgstr "Status for MCP-tenar"
+
+#: plugin/xdl_strings.py
 msgid "Max Tokens:"
 msgstr "Maks. teikn:"
 
@@ -3507,10 +3663,6 @@ msgid "Scope"
 msgstr "Omfang"
 
 #: plugin/xdl_strings.py
-msgid "Search Nearby Files"
-msgstr "Søk i nærliggande filer"
-
-#: plugin/xdl_strings.py
 msgid "Search Query:"
 msgstr "Søkespørjing:"
 
@@ -3529,10 +3681,6 @@ msgstr "Utval"
 #: plugin/xdl_strings.py
 msgid "Sentiment"
 msgstr "Sentiment"
-
-#: plugin/xdl_strings.py
-msgid "Status"
-msgstr "Status"
 
 #: plugin/xdl_strings.py
 msgid "Status: Ready"
@@ -3618,17 +3766,17 @@ msgstr "Innebygd"
 msgid "Hermes"
 msgstr "Hermes"
 
-msgid "Claude Code (ACP)"
-msgstr "Claude Code (ACP)"
+msgid "Claude Code"
+msgstr "Claude Code"
 
-msgid "Mistral Vibe (ACP)"
-msgstr "Mistral Vibe (ACP)"
+msgid "Mistral Vibe"
+msgstr "Mistral Vibe"
 
-msgid "Grok Build (ACP)"
-msgstr "Grok-bygg (ACP)"
+msgid "Grok Build"
+msgstr "Grok Build"
 
-msgid "OpenCode (ACP)"
-msgstr "OpenCode (ACP)"
+msgid "OpenCode"
+msgstr "OpenCode"
 
 msgid "Prompt for Agent Permissions"
 msgstr "Be om agentløyve"

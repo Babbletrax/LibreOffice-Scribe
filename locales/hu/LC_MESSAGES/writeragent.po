@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-07 23:17-0400\n"
+"POT-Creation-Date: 2026-10-19 12:57-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: Hungarian <LL@li.org>\n"
@@ -77,6 +77,10 @@ msgstr "Először nyisson meg egy Writer-dokumentumot."
 msgid "Run code cell"
 msgstr "Kódcella futtatása"
 
+#: plugin/notebook/notebook_controls.py
+msgid "Code"
+msgstr "Kód"
+
 #: plugin/embeddings/search_ui.py
 msgid "just now"
 msgstr "épp most"
@@ -95,6 +99,14 @@ msgstr "{0} órája"
 #, python-brace-format
 msgid "{0}d ago"
 msgstr "{0} napja"
+
+#: plugin/embeddings/search_ui.py
+msgid "Failed to open search dialog."
+msgstr "A keresési párbeszédpanel megnyitása sikertelen."
+
+#: plugin/embeddings/search_ui.py plugin/xdl_strings.py
+msgid "Search Nearby Files"
+msgstr "Keresés a közeli fájlokban"
 
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: No active document"
@@ -190,28 +202,28 @@ msgid "Rebuild failed: "
 msgstr "Az újraépítés sikertelen: "
 
 #: plugin/framework/errors.py
-#, python-brace-format
-msgid "TLS/SSL Error: {0}"
-msgstr "TLS/SSL hiba: {0}"
-
-#: plugin/framework/errors.py plugin/framework/client/errors.py
 msgid "Invalid API Key. Please check your settings."
 msgstr "Érvénytelen API-kulcs. Kérjük, ellenőrizze a beállításait."
 
-#: plugin/framework/errors.py plugin/framework/client/errors.py
+#: plugin/framework/errors.py
 msgid "API access Forbidden. Your key may lack permissions for this model."
 msgstr ""
 "Az API-hozzáférés megtagadva. Lehet, hogy a kulcsa nem rendelkezik a "
 "modellhez szükséges jogosultságokkal."
 
-#: plugin/framework/errors.py plugin/framework/client/errors.py
+#: plugin/framework/errors.py
 msgid "Endpoint not found (404). Check your URL and Model name."
 msgstr ""
 "A végpont nem található (404). Ellenőrizze az URL-t és a modell nevét."
 
-#: plugin/framework/errors.py plugin/framework/client/errors.py
+#: plugin/framework/errors.py
 msgid "Rate limited (429). Wait a moment and try again."
 msgstr "Túllépte a korlátot (429). Várjon egy kicsit, majd próbálja újra."
+
+#: plugin/framework/errors.py
+#, python-brace-format
+msgid "TLS/SSL Error: {0}"
+msgstr "TLS/SSL hiba: {0}"
 
 #: plugin/framework/errors.py
 #, python-brace-format
@@ -383,6 +395,24 @@ msgstr ""
 msgid "Provider busy, retrying in {0}s…"
 msgstr "A szolgáltató foglalt, újrapróbálkozás {0} másodperc múlva…"
 
+#: plugin/framework/client/request_controls.py
+#, python-brace-format
+msgid "Provider asked to wait {0}s, which is above the {1}s retry cap."
+msgstr ""
+"A szolgáltató {0} másodperc várakozást kért, ami meghaladja a {1} "
+"másodperces újrapróbálkozási korlátot."
+
+#: plugin/framework/client/request_controls.py
+#, python-brace-format
+msgid "Spacing free-model requests, next send in {0}s…"
+msgstr ""
+"Szabad modellkérések ütemezése, a következő küldés {0} másodperc múlva…"
+
+#: plugin/framework/client/anthropic_shim.py
+msgid "Anthropic model is not set. Choose a model in Settings."
+msgstr ""
+"Az Anthropic modell nincs beállítva. Válasszon modellt a Beállításokban."
+
 #: plugin/framework/main_shared.py plugin/calc/python/cell_editor_ui.py
 #: plugin/writer/math/latex_dialog.py plugin/chatbot/panel.py
 #: plugin/chatbot/external_editor.py plugin/chatbot/send_handlers.py
@@ -423,6 +453,14 @@ msgstr "Átírás helyi Whisperrel ({0})… Az első futtatás letölti a modell
 #: plugin/audio/stt_service.py
 msgid "Transcribing audio..."
 msgstr "Hang átírása..."
+
+#: plugin/audio/stt_service.py
+msgid ""
+"Could not check whether faster-whisper is installed. The Settings → Python "
+"interpreter timed out or could not start."
+msgstr ""
+"Nem sikerült ellenőrizni, hogy a faster-whisper telepítve van-e. A "
+"Beállítások → Python-értelmező időtúllépést okozott vagy nem indítható."
 
 #: plugin/audio/stt_service.py
 #, python-brace-format
@@ -551,7 +589,6 @@ msgstr "Japán fonemizáló szótár letöltése…"
 
 #: plugin/calc/python/editor_context_menu.py plugin/librepy/sidebar_menus.py
 #: plugin/chatbot/hamburger_menu.py plugin/chatbot/panel_factory.py
-#: plugin/main.py
 msgid "Edit Python in Cell..."
 msgstr "Python szerkesztése cellában..."
 
@@ -599,10 +636,6 @@ msgid "Ready"
 msgstr "Kész"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/scripting/editor_ui_strings.py
-msgid "A1:C1  or  A1:C1, C1:C5"
-msgstr "A1:C1 vagy A1:C1, C1:C5"
-
-#: plugin/calc/python/cell_editor_ui.py plugin/scripting/editor_ui_strings.py
 msgid "Data ranges apply only when saving as a =PY() formula."
 msgstr "Az adattartományok csak =PY() képletként való mentéskor érvényesek."
 
@@ -617,7 +650,6 @@ msgid "Saving…"
 msgstr "Mentés…"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/calc/python/editor.py
-#: plugin/scripting/editor_ui_strings.py
 msgid "Saved without =PY()."
 msgstr "Mentve =PY() nélkül."
 
@@ -660,6 +692,11 @@ msgid "Could not rewrite xl() range literals into =PY data arguments: %s"
 msgstr ""
 "Nem sikerült az xl() tartomány-literálokat =PY adatargumentumokká átírni: %s"
 
+#: plugin/calc/python/editor.py
+#, python-brace-format
+msgid "Saved code in {0}."
+msgstr "Kód mentve ide: {0}."
+
 #: plugin/calc/python/editor.py plugin/xdl_strings.py
 msgid "Python cell editor"
 msgstr "Python cella-szerkesztő"
@@ -670,7 +707,8 @@ msgid "Save without =PY()"
 msgstr "Mentés =PY() nélkül"
 
 #: plugin/calc/python/editor.py plugin/scripting/editor_ui_strings.py
-#: plugin/scripting/python_runner.py plugin/xdl_strings.py
+#: plugin/scripting/python_runner_ui.py plugin/scripting/python_runner.py
+#: plugin/xdl_strings.py
 msgid "Save"
 msgstr "Mentés"
 
@@ -810,17 +848,10 @@ msgstr "Python-beállítások"
 msgid "Could not open Settings."
 msgstr "Nem sikerült megnyitni a Beállításokat."
 
-#: plugin/librepy/python_sidebar.py plugin/xdl_strings.py
-msgid "All"
-msgstr "Mind"
-
-#: plugin/librepy/python_sidebar.py
-msgid "Errors"
-msgstr "Hibák"
-
-#: plugin/librepy/python_sidebar.py plugin/scripting/python_runner_ui.py
-msgid "Output"
-msgstr "Kimenet"
+#: plugin/librepy/settings.py plugin/chatbot/module_config_dialog.py
+#: plugin/chatbot/dialog_views.py
+msgid "Invalid Setting"
+msgstr "Érvénytelen beállítás"
 
 #: plugin/librepy/python_sidebar.py
 msgid "Shared kernel"
@@ -858,15 +889,15 @@ msgstr ""
 "Virtuális környezet: hiányzó Python itt: {path}"
 
 #: plugin/librepy/python_sidebar.py
-msgid "(no =PY() cells on active sheet)"
-msgstr "(nincs =PY() cella az aktív munkalapon)"
-
-#: plugin/librepy/python_sidebar.py
 msgid "(no diagnostics yet)"
 msgstr "(még nincsenek diagnosztikai adatok)"
 
+#: plugin/librepy/python_sidebar.py
+msgid "(no =PY() cells on active sheet)"
+msgstr "(nincs =PY() cella az aktív munkalapon)"
+
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/chatbot/panel_factory.py plugin/main.py
+#: plugin/chatbot/panel_factory.py
 msgid "Run Python Script..."
 msgstr "Python-szkript futtatása..."
 
@@ -876,43 +907,38 @@ msgid "Insert LaTeX Math..."
 msgstr "LaTeX-képlet beszúrása..."
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py
 msgid "Text Analytics..."
 msgstr "Szövegelemzés..."
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
 #: plugin/chatbot/dialog_views.py plugin/chatbot/panel_factory.py
-#: plugin/main.py plugin/xdl_strings.py
+#: plugin/xdl_strings.py
 msgid "Settings"
 msgstr "Beállítások"
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py
 msgid "Vision OCR Settings..."
 msgstr "Vision OCR beállítások..."
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py
 msgid "Reset Python Session"
 msgstr "Python-munkamenet alaphelyzetbe állítása"
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py
 msgid "Run All"
 msgstr "Összes futtatása"
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py
 msgid "Run From Here"
 msgstr "Futtatás innen"
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py plugin/xdl_strings.py
+#: plugin/xdl_strings.py
 msgid "Stop"
 msgstr "Leállítás"
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/dialogs.py
-#: plugin/chatbot/hamburger_menu.py plugin/main.py plugin/xdl_strings.py
+#: plugin/chatbot/hamburger_menu.py plugin/xdl_strings.py
 msgid "Report bug..."
 msgstr "Hibabejelentés..."
 
@@ -927,6 +953,95 @@ msgstr "Teljes módosítás elfogadása (ügynök)"
 #: plugin/writer/change_context_menu.py
 msgid "Reject whole change (agent)"
 msgstr "Teljes módosítás elutasítása (ügynök)"
+
+#: plugin/writer/inline_review.py
+msgid "No agent changes to review in this document."
+msgstr "Nincs felülvizsgálandó ügynökmódosítás ebben a dokumentumban."
+
+#: plugin/writer/inline_review.py
+#, python-format
+msgid "%d overlapping agent changes accepted together."
+msgstr "%d átfedő ügynökmódosítás elfogadva együtt."
+
+#: plugin/writer/inline_review.py
+#, python-format
+msgid "%d overlapping agent changes rejected together."
+msgstr "%d átfedő ügynökmódosítás elutasítva együtt."
+
+#: plugin/writer/inline_review.py
+msgid "Change accepted."
+msgstr "Módosítás elfogadva."
+
+#: plugin/writer/inline_review.py
+msgid "Change rejected."
+msgstr "Módosítás elutasítva."
+
+#: plugin/writer/inline_review.py
+msgid ""
+"Couldn't read this document's tracked changes reliably just now -- nothing "
+"was changed. Please try again."
+msgstr ""
+"A dokumentum követett módosításai pillanatnyilag nem olvashatók megbízhatóan"
+" – semmi sem változott. Kérjük, próbálja újra."
+
+#: plugin/writer/inline_review.py
+msgid ""
+"Started resolving changes but couldn't confirm the result -- some may have "
+"been resolved. Please review remaining changes in Edit > Track Changes > "
+"Manage."
+msgstr ""
+"A módosítások feloldása megkezdődött, de az eredmény nem erősíthető meg – "
+"némelyikük feloldásra kerülhetett. Kérjük, ellenőrizze a fennmaradó "
+"módosításokat a Szerkesztés > Módosítások követése > Kezelés menüpontban."
+
+#: plugin/writer/inline_review.py
+msgid ""
+"Nothing was changed. Resolve remaining changes from Edit > Track Changes > "
+"Manage."
+msgstr ""
+"Semmi sem változott. A fennmaradó módosításokat a Szerkesztés > Módosítások "
+"követése > Kezelés menüpontban oldhatja fel."
+
+#: plugin/writer/inline_review.py
+msgid ""
+"None could be resolved here -- each overlaps with one of your own tracked "
+"changes. Resolve them from Edit > Track Changes > Manage."
+msgstr ""
+"Itt egyik sem oldható fel – mindegyik átfedésben van az Ön saját követett "
+"módosításaival. Ezeket a Szerkesztés > Módosítások követése > Kezelés "
+"menüpontban oldhatja fel."
+
+#: plugin/writer/inline_review.py
+#, python-format
+msgid ""
+"Resolved %(resolved)d of %(total)d. The rest overlap with your own tracked "
+"changes -- resolve those from Edit > Track Changes > Manage."
+msgstr ""
+"%(resolved)d / %(total)d feloldva. A többi átfedésben van az Ön saját "
+"követett módosításaival – azokat a Szerkesztés > Módosítások követése > "
+"Kezelés menüpontban oldhatja fel."
+
+#: plugin/writer/inline_review.py
+msgid ""
+"Could not resolve this change here -- it may share a paragraph with one of "
+"your tracked changes or another agent change. Resolve it from Edit > Track "
+"Changes > Manage."
+msgstr ""
+"Ez a módosítás itt nem oldható fel – lehet, hogy egy bekezdésen osztozik az "
+"Ön egyik követett módosításával vagy egy másik ügynök módosításával. Oldja "
+"fel a Szerkesztés > Módosítások követése > Kezelés menüpontban."
+
+#: plugin/writer/inline_review.py
+msgid "Put the cursor on a highlighted agent change first."
+msgstr "Először helyezze a kurzort egy kiemelt ügynök-módosításra."
+
+#: plugin/writer/inline_review.py
+msgid "Review agent changes"
+msgstr "Ügynök-módosítások áttekintése"
+
+#: plugin/writer/inline_review.py
+msgid "Resolve agent changes"
+msgstr "Ügynökmódosítások feloldása"
 
 #: plugin/writer/review_click_popup.py
 msgid "Accept this change"
@@ -960,6 +1075,15 @@ msgstr ""
 "módosításként jelenhet meg."
 
 #: plugin/writer/edit_review.py
+#, python-brace-format
+msgid ""
+"Failed to collapse the streamed continuation into a single tracked change: "
+"{0}"
+msgstr ""
+"Nem sikerült a streamelt folytatást egyetlen követett módosítássá "
+"összevonni: {0}"
+
+#: plugin/writer/edit_review.py
 msgid ""
 "Failed to collapse the streamed continuation into a single tracked change. "
 "The text was kept, but may not be reviewable."
@@ -978,6 +1102,10 @@ msgstr ""
 #: plugin/writer/editselection.py
 msgid "WriterAgent: Extend Selection"
 msgstr "WriterAgent: Kijelölés kiterjesztése"
+
+#: plugin/writer/editselection.py
+msgid "Select text first"
+msgstr "Először jelöljön ki szöveget"
 
 #: plugin/writer/editselection.py
 msgid "WriterAgent: Edit Selection"
@@ -1029,6 +1157,11 @@ msgid ""
 msgstr ""
 "Nem sikerült azonosítani a kijelölt képletet. Kattintson a szövegbe, majd "
 "szúrjon be egy új képletet."
+
+#: plugin/writer/math/latex_dialog.py
+msgid "Could not convert formula to LaTeX. Enter formula manually."
+msgstr ""
+"A képlet nem konvertálható LaTeX formátumba. Adja meg a képletet manuálisan."
 
 #: plugin/writer/math/latex_dialog.py
 msgid "Unknown conversion error"
@@ -1311,10 +1444,6 @@ msgstr "miért"
 msgid "you"
 msgstr "ön"
 
-#: plugin/chatbot/module_config_dialog.py plugin/chatbot/dialog_views.py
-msgid "Invalid Setting"
-msgstr "Érvénytelen beállítás"
-
 #: plugin/chatbot/dialogs.py
 msgid "Agent requests approval"
 msgstr "Az ügynök jóváhagyást kér"
@@ -1336,24 +1465,23 @@ msgstr "Másolva!"
 msgid "Copy URL"
 msgstr "URL másolása"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Extend Selection"
 msgstr "Kijelölés kiterjesztése"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Edit Selection"
 msgstr "Kijelölés szerkesztése"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Convert Sheet to Python..."
 msgstr "Munkalap konvertálása Pythonra..."
 
 #: plugin/chatbot/hamburger_menu.py plugin/chatbot/panel_factory.py
-#: plugin/main.py
 msgid "Search Nearby Files..."
 msgstr "Keresés a közeli fájlokban..."
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Toggle MCP Server"
 msgstr "MCP-kiszolgáló váltása"
 
@@ -1365,37 +1493,33 @@ msgstr "MCP-kiszolgáló (fut)"
 msgid "MCP Server (Stopped)"
 msgstr "MCP-kiszolgáló (leállítva)"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Run format tests"
 msgstr "Formázási tesztek futtatása"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Run calc tests"
 msgstr "Calc-tesztek futtatása"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Run Calc API integration tests"
 msgstr "Calc API-integrációs tesztek futtatása"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Run draw tests"
 msgstr "Draw-tesztek futtatása"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Evaluation Dashboard"
 msgstr "Értékelési irányítópult"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Debug"
 msgstr "Hibakeresés"
 
 #: plugin/chatbot/tool_loop.py plugin/chatbot/panel.py
 msgid "[Voice message]"
 msgstr "[Hangüzenet]"
-
-#: plugin/chatbot/tool_loop.py
-msgid "Error: Toolkit unavailable"
-msgstr "Hiba: Az eszközkészlet nem érhető el"
 
 #: plugin/chatbot/chat_sidebar_mode.py plugin/xdl_strings.py
 msgid "Chat"
@@ -1421,7 +1545,7 @@ msgstr "Ötletbörze"
 msgid "Writing Plan"
 msgstr "Írási terv"
 
-#: plugin/chatbot/chat_sidebar_mode.py
+#: plugin/chatbot/chat_sidebar_mode.py plugin/chatbot/dialog_views.py
 msgid "PPT-Master"
 msgstr "PPT-Master"
 
@@ -1661,11 +1785,6 @@ msgstr "[Átírási hiba: {0}]"
 #, python-brace-format
 msgid "[Document context error: {0}]"
 msgstr "[Dokumentumkörnyezeti hiba: {0}]"
-
-#: plugin/chatbot/send_handlers.py
-#, python-brace-format
-msgid "[Agent backend '{0}' not found.]"
-msgstr "[A(z) „{0}” ügynök-háttérprogram nem található.]"
 
 #: plugin/chatbot/send_handlers.py
 #, python-brace-format
@@ -1949,19 +2068,13 @@ msgstr "Új Python-szkript"
 msgid "Script name:"
 msgstr "Szkript neve:"
 
-#: plugin/scripting/script_dialogs.py
-msgid "Script name cannot start with a reserved prefix."
-msgstr "A parancsfájl neve nem kezdődhet fenntartott előtaggal."
+#: plugin/scripting/script_dialogs.py plugin/scripting/editor_ui_strings.py
+msgid "Attach to this document (no document is open)"
+msgstr "Csatolás ehhez a dokumentumhoz (nincs megnyitott dokumentum)"
 
 #: plugin/scripting/script_dialogs.py plugin/scripting/editor_ui_strings.py
-#: plugin/xdl_strings.py
-msgid "Attach to this document"
-msgstr "Csatolás ehhez a dokumentumhoz"
-
-#: plugin/scripting/script_dialogs.py plugin/scripting/editor_ui_strings.py
-#: plugin/scripting/document_scripts.py
-msgid "Script name cannot be empty."
-msgstr "A szkript neve nem lehet üres."
+msgid "Attach to this document (this document is read-only)"
+msgstr "Csatolás ehhez a dokumentumhoz (a dokumentum csak olvasható)"
 
 #: plugin/scripting/editor_ui_strings.py
 msgid "Running…"
@@ -1988,25 +2101,33 @@ msgstr "Mégse"
 msgid "Data:"
 msgstr "Adatok:"
 
+#: plugin/scripting/editor_ui_strings.py
+msgid "A1:C1  or  A1:C1, C1:C5"
+msgstr "A1:C1 vagy A1:C1, C1:C5"
+
 #: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
 msgid "New"
 msgstr "Új"
+
+#: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
+msgid "Attach to this document"
+msgstr "Csatolás ehhez a dokumentumhoz"
+
+#: plugin/scripting/editor_ui_strings.py
+msgid "Attach to this document (this document changed)"
+msgstr "Csatolás ehhez a dokumentumhoz (a dokumentum módosult)"
 
 #: plugin/scripting/editor_ui_strings.py
 msgid "Create"
 msgstr "Létrehozás"
 
+#: plugin/scripting/editor_ui_strings.py plugin/scripting/document_scripts.py
+msgid "Script name cannot be empty."
+msgstr "A szkript neve nem lehet üres."
+
 #: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
 msgid "Script:"
 msgstr "Parancsfájl:"
-
-#: plugin/scripting/editor_ui_strings.py
-msgid "Attach"
-msgstr "Csatolás"
-
-#: plugin/scripting/editor_ui_strings.py
-msgid "Attach to Document"
-msgstr "Dokumentumhoz csatolás"
 
 #: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
 msgid "Save As..."
@@ -2029,11 +2150,11 @@ msgid "My Scripts"
 msgstr "Saját szkriptek"
 
 #: plugin/scripting/editor_ui_strings.py plugin/scripting/document_scripts.py
-#: plugin/scripting/python_runner_ui.py
-msgid "Built-in helpers are read-only. Use Copy to My Scripts to customize."
+msgid ""
+"Built-in helpers are read-only. Use Save As to copy one into My Scripts."
 msgstr ""
-"A beépített segédprogramok csak olvashatók. A testreszabáshoz használja a "
-"„Másolás a Saját parancsfájlokhoz” parancsot."
+"A beépített segédek csak olvashatók. Használja a Mentés másként parancsot a "
+"Saját parancsfájlok közé másoláshoz."
 
 #: plugin/scripting/editor_ui_strings.py plugin/scripting/document_scripts.py
 msgid ""
@@ -2047,20 +2168,6 @@ msgstr ""
 #, python-brace-format
 msgid "Loaded script '{0}'."
 msgstr "„{0}” parancsfájl betöltve."
-
-#: plugin/scripting/editor_ui_strings.py plugin/scripting/document_scripts.py
-msgid "No document is open to attach scripts."
-msgstr "Nincs megnyitott dokumentum a parancsfájlok csatolásához."
-
-#: plugin/scripting/editor_ui_strings.py
-#, python-brace-format
-msgid "Attaching script '{0}'..."
-msgstr "„{0}” parancsfájl csatolása..."
-
-#: plugin/scripting/editor_ui_strings.py
-#, python-brace-format
-msgid "Copying script '{0}' to My Scripts..."
-msgstr "„{0}” parancsfájl másolása a Saját parancsfájlokhoz..."
 
 #: plugin/scripting/editor_ui_strings.py
 #, python-brace-format
@@ -2076,19 +2183,11 @@ msgstr "„{0}” parancsfájl törlése..."
 msgid "Built-in helpers cannot be deleted."
 msgstr "A beépített segédprogramok nem törölhetők."
 
-#: plugin/scripting/editor_ui_strings.py
-msgid "Enter script name:"
-msgstr "Adja meg a parancsfájl nevét:"
-
 #: plugin/scripting/editor_ui_strings.py plugin/scripting/python_runner_ui.py
 #, python-brace-format
 msgid "A script named '{0}' already exists in this document. Overwrite?"
 msgstr ""
 "A(z) „{0}” nevű parancsfájl már létezik ebben a dokumentumban. Felülírja?"
-
-#: plugin/scripting/editor_ui_strings.py
-msgid "Copy to My Scripts as:"
-msgstr "Másolás a Saját parancsfájlok közé mint:"
 
 #: plugin/scripting/editor_ui_strings.py plugin/scripting/python_runner_ui.py
 #, python-brace-format
@@ -2096,11 +2195,6 @@ msgid "A script named '{0}' already exists in My Scripts. Overwrite?"
 msgstr ""
 "A(z) „{0}” nevű parancsfájl már létezik a Saját parancsfájlok között. "
 "Felülírja?"
-
-#: plugin/scripting/editor_ui_strings.py
-#, python-brace-format
-msgid "Save script '{0}' to this document?"
-msgstr "Mentse a(z) „{0}” parancsfájlt ebbe a dokumentumba?"
 
 #: plugin/scripting/editor_ui_strings.py
 #, python-brace-format
@@ -2114,6 +2208,25 @@ msgstr ""
 "beszúrva)."
 
 #: plugin/scripting/document_scripts.py
+msgid "Stored document scripts are unreadable, so they were left unchanged."
+msgstr ""
+"A tárolt dokumentum-parancsfájlok olvashatatlanok, ezért változatlanok "
+"maradtak."
+
+#: plugin/scripting/document_scripts.py
+#, python-brace-format
+msgid ""
+"Stored document scripts are in an unsupported format (version {0}), so they "
+"were left unchanged."
+msgstr ""
+"A tárolt dokumentum-parancsfájlok nem támogatott formátumúak ({0}. verzió), "
+"ezért változatlanok maradtak."
+
+#: plugin/scripting/document_scripts.py
+msgid "Document is read-only or properties cannot be written."
+msgstr "A dokumentum írásvédett, vagy a tulajdonságok nem írhatók."
+
+#: plugin/scripting/document_scripts.py
 #, python-brace-format
 msgid "Document scripts are too large to store in the document ({0} bytes)."
 msgstr ""
@@ -2123,10 +2236,6 @@ msgstr ""
 #: plugin/scripting/document_scripts.py plugin/scripting/python_runner_ui.py
 msgid "No document is open to save scripts."
 msgstr "Nincs megnyitott dokumentum a szkriptek mentéséhez."
-
-#: plugin/scripting/document_scripts.py
-msgid "Document is read-only or properties cannot be written."
-msgstr "A dokumentum írásvédett, vagy a tulajdonságok nem írhatók."
 
 #: plugin/scripting/document_scripts.py
 msgid ""
@@ -2163,6 +2272,23 @@ msgstr "Ez a dokumentum"
 
 #: plugin/scripting/document_scripts.py
 #, python-brace-format
+msgid ""
+"Could not save '{0}' to this document ({1}). Saved it to My Scripts instead."
+msgstr ""
+"Nem sikerült a(z) „{0}” mentése ebbe a dokumentumba ({1}). Helyette a Saját "
+"parancsfájlok közé mentettem."
+
+#: plugin/scripting/document_scripts.py
+#, python-brace-format
+msgid ""
+"Could not save '{0}' to this document ({1}). A script named '{0}' already "
+"exists in My Scripts."
+msgstr ""
+"Nem sikerült a(z) „{0}” mentése ebbe a dokumentumba ({1}). A(z) „{0}” nevű "
+"parancsfájl már létezik a Saját parancsfájlok között."
+
+#: plugin/scripting/document_scripts.py
+#, python-brace-format
 msgid "Script '{0}' does not exist in My Scripts."
 msgstr "A(z) „{0}” parancsfájl nem létezik a Saját parancsfájlok között."
 
@@ -2180,17 +2306,6 @@ msgstr "Nincs megnyitott dokumentum."
 
 #: plugin/scripting/document_scripts.py
 #, python-brace-format
-msgid "A script named '{0}' already exists in My Scripts. {1}"
-msgstr ""
-"A(z) „{0}” nevű parancsfájl már létezik a Saját parancsfájlok között. {1}"
-
-#: plugin/scripting/document_scripts.py
-#, python-brace-format
-msgid "Saved script '{0}' to My Scripts. {1}"
-msgstr "A(z) „{0}” parancsfájl mentve a Saját parancsfájlok közé. {1}"
-
-#: plugin/scripting/document_scripts.py
-#, python-brace-format
 msgid "Saved script '{0}' to this document."
 msgstr "A(z) „{0}” szkript mentve ebbe a dokumentumba."
 
@@ -2198,21 +2313,6 @@ msgstr "A(z) „{0}” szkript mentve ebbe a dokumentumba."
 #, python-brace-format
 msgid "Saved script '{0}'."
 msgstr "A(z) „{0}” szkript mentve."
-
-#: plugin/scripting/document_scripts.py
-#, python-brace-format
-msgid "Attached script '{0}' to this document."
-msgstr "A(z) „{0}” parancsfájl csatolva ehhez a dokumentumhoz."
-
-#: plugin/scripting/document_scripts.py
-#, python-brace-format
-msgid "A script named '{0}' already exists in My Scripts."
-msgstr "A(z) „{0}” nevű parancsfájl már létezik a Saját parancsfájlok között."
-
-#: plugin/scripting/document_scripts.py
-#, python-brace-format
-msgid "Copied script '{0}' to My Scripts."
-msgstr "A(z) „{0}” parancsfájl átmásolva a Saját parancsfájlok közé."
 
 #: plugin/scripting/document_scripts.py
 #, python-brace-format
@@ -2224,7 +2324,7 @@ msgstr "A(z) „{0}” dokumentumparancsfájl törölve."
 msgid "Deleted script '{0}'."
 msgstr "A(z) „{0}” parancsfájl törölve."
 
-#: plugin/scripting/document_scripts.py
+#: plugin/scripting/document_scripts.py plugin/scripting/text_analytics_ui.py
 msgid "The document was closed."
 msgstr "A dokumentum be lett zárva."
 
@@ -2233,19 +2333,12 @@ msgid "The document is no longer open."
 msgstr "A dokumentum már nincs megnyitva."
 
 #: plugin/scripting/python_runner_ui.py
+msgid "Script preparation failed."
+msgstr "A parancsfájl előkészítése sikertelen."
+
+#: plugin/scripting/python_runner_ui.py
 msgid "PythonScriptDialog could not be loaded from the extension."
 msgstr "A PythonScriptDialog nem tölthető be a kiterjesztésből."
-
-#: plugin/scripting/python_runner_ui.py
-#, python-format
-msgid "Cannot save to My Scripts: a script named '%s' already exists."
-msgstr ""
-"Nem menthető a Saját parancsfájlok közé: már létezik „%s” nevű parancsfájl."
-
-#: plugin/scripting/python_runner_ui.py
-#, python-format
-msgid "%s Saved to My Scripts instead."
-msgstr "%s Helyette mentve a Saját parancsfájlok közé."
 
 #: plugin/scripting/python_runner_ui.py
 #, python-format
@@ -2306,13 +2399,9 @@ msgstr "A parancsfájl sikeresen lefutott."
 msgid "Success"
 msgstr "Siker"
 
-#: plugin/scripting/venv_probe_ui.py
-msgid "Venv OK"
-msgstr "Venv OK"
-
-#: plugin/scripting/venv_probe_ui.py
-msgid "Venv check failed"
-msgstr "A virtuális környezet ellenőrzése sikertelen"
+#: plugin/scripting/python_runner_ui.py
+msgid "Output"
+msgstr "Kimenet"
 
 #: plugin/scripting/venv_probe_ui.py plugin/xdl_strings.py
 msgid "Testing Python environment..."
@@ -2325,6 +2414,14 @@ msgstr "Kész"
 #: plugin/scripting/venv_probe_ui.py
 msgid "Failed"
 msgstr "Sikertelen"
+
+#: plugin/scripting/venv_probe_ui.py
+msgid "Venv OK"
+msgstr "Venv OK"
+
+#: plugin/scripting/venv_probe_ui.py
+msgid "Venv check failed"
+msgstr "A virtuális környezet ellenőrzése sikertelen"
 
 #: plugin/scripting/editor_host.py
 msgid ""
@@ -2350,12 +2447,20 @@ msgid "The script list update timed out."
 msgstr "A parancsfájllista frissítése időtúllépés miatt megszakadt."
 
 #: plugin/scripting/editor_host.py
+msgid "The script list update failed."
+msgstr "A parancsfájllista frissítése sikertelen."
+
+#: plugin/scripting/editor_host.py
 msgid "Script execution failed."
 msgstr "A parancsfájl végrehajtása sikertelen."
 
 #: plugin/scripting/editor_host.py
 msgid "Saving the script timed out."
 msgstr "A parancsfájl mentése időtúllépés miatt megszakadt."
+
+#: plugin/scripting/editor_host.py
+msgid "Saving the script failed."
+msgstr "A parancsfájl mentése sikertelen."
 
 #: plugin/scripting/editor_host.py
 msgid "the initialization script"
@@ -2397,10 +2502,12 @@ msgid "Could not talk to the Python editor."
 msgstr "Nem sikerült kommunikálni a Python-szerkesztővel."
 
 #: plugin/scripting/venv_diagnostics.py
-msgid "On Linux also install system PortAudio: sudo pacman -S portaudio"
+msgid ""
+"On Linux also install the system PortAudio package from your distribution "
+"(sounddevice needs it; the package name differs)."
 msgstr ""
-"Linuxon telepítse a rendszer PortAudio csomagját is: sudo pacman -S "
-"portaudio"
+"Linuxon telepítse a rendszer PortAudio csomagját is a disztribúciójából (a "
+"sounddevice-nak szüksége van rá; a csomagnév eltérő lehet)."
 
 #: plugin/scripting/venv_diagnostics.py
 msgid "Audio probe timed out (sounddevice import failed or hung)."
@@ -2508,10 +2615,6 @@ msgid "Vector Search Libraries"
 msgstr "Vektorkeresési könyvtárak"
 
 #: plugin/scripting/venv_diagnostics.py
-msgid "Audio Recording"
-msgstr "Hangfelvétel"
-
-#: plugin/scripting/venv_diagnostics.py
 msgid "To install remaining packages:"
 msgstr "A hátralévő csomagok telepítéséhez:"
 
@@ -2579,50 +2682,38 @@ msgid "Could not load the analytics dialog."
 msgstr "A szövegelemzési párbeszédablak nem tölthető be."
 
 #: plugin/scripting/text_analytics_ui.py
-msgid "Checking spaCy / textdescriptives / transformers installation..."
-msgstr ""
-"A spaCy / textdescriptives / transformers telepítésének ellenőrzése..."
-
-#: plugin/scripting/text_analytics_ui.py
-#, python-brace-format
-msgid ""
-"Error from the Text Analytics worker:\n"
-"{err}\n"
-"\n"
-"The features in this dialog require these packages in the python it is using:\n"
-"  • spacy + a model          (entities, key phrases, basic stats)\n"
-"  • textdescriptives         (real Readability scores)\n"
-"  • transformers + torch     (Sentiment using the multilingual model)\n"
-"\n"
-"Install them with:\n"
-"  {install}\n"
-"\n"
-"The worker reported the module as missing. Verify the packages are installed in the exact python executable the worker resolved for your configured venv."
-msgstr ""
-"Hiba a szövegelemzési munkafolyamatból:\n"
-"{err}\n"
-"\n"
-"Az ebben a párbeszédablakban található funkciókhoz a használt Pythonban az alábbi csomagok szükségesek:\n"
-"  • spacy + modell          (entitások, kulcskifejezések, alapvető statisztikák)\n"
-"  • textdescriptives         (valós olvashatósági pontszámok)\n"
-"  • transformers + torch     (hangulatelemzés többnyelvű modellel)\n"
-"\n"
-"Telepítse őket ezzel:\n"
-"  {install}\n"
-"\n"
-"A munkafolyamat szerint a modul hiányzik. Ellenőrizze, hogy a csomagok pontosan abban a Python-futtatható állományban vannak-e telepítve, amelyet a munkafolyamat a konfigurált virtuális környezethez feloldott."
+msgid "Could not read the scope checkbox."
+msgstr "Nem sikerült kiolvasni a hatókör jelölőnégyzetet."
 
 #: plugin/scripting/text_analytics_ui.py
 msgid "Open a Writer document to analyze."
 msgstr "Nyisson meg egy Writer-dokumentumot az elemzéshez."
 
 #: plugin/scripting/text_analytics_ui.py
+msgid "Nothing is selected."
+msgstr "Nincs kijelölve semmi."
+
+#: plugin/scripting/text_analytics_ui.py
 msgid "Not enough text in the chosen scope."
 msgstr "Nincs elég szöveg a kijelölt tartományban."
 
 #: plugin/scripting/text_analytics_ui.py
+msgid "Checking spaCy / textdescriptives / transformers installation..."
+msgstr ""
+"A spaCy / textdescriptives / transformers telepítésének ellenőrzése..."
+
+#: plugin/scripting/text_analytics_ui.py
 msgid "Analyzing..."
 msgstr "Elemzés..."
+
+#: plugin/scripting/text_analytics_ui.py
+#, python-brace-format
+msgid ""
+"Error from the Text Analytics worker:\n"
+"{err}"
+msgstr ""
+"Hiba a szövegelemző munkafolyamatból:\n"
+"{err}"
 
 #: plugin/scripting/text_analytics_ui.py
 #, python-format
@@ -2636,6 +2727,11 @@ msgstr ""
 "A konfigurált virtuális környezetből (Beállítások → Python) hiányozhatnak a szükséges csomagok. Kattintson a „Venv ellenőrzése” gombra ebben a párbeszédablakban, vagy használja a teljes tesztet a Beállítások → Python menüpontban a spacy, textdescriptives, transformers, torch stb. részleteiért."
 
 #: plugin/scripting/text_analytics_ui.py
+#, python-format
+msgid "Error: %s"
+msgstr "Hiba: %s"
+
+#: plugin/scripting/text_analytics_ui.py
 msgid "No Writer document to insert into."
 msgstr "Nincs Writer-dokumentum, amelybe be lehetne szúrni."
 
@@ -2644,8 +2740,10 @@ msgid "Run an analysis first."
 msgstr "Először futtasson egy elemzést."
 
 #: plugin/scripting/text_analytics_ui.py
-msgid "Nothing useful to insert from the last result."
-msgstr "Az utolsó eredményből nincs hasznos tartalom a beszúráshoz."
+msgid ""
+"Switch back to the document that was analyzed, or run the analysis again."
+msgstr ""
+"Váltson vissza az elemzett dokumentumra, vagy futtassa újra az elemzést."
 
 #: plugin/scripting/text_analytics_ui.py
 #, python-format
@@ -2770,8 +2868,12 @@ msgstr ""
 "lehetőséget."
 
 #: plugin/scripting/session_manager.py
-msgid "Could not resolve notebook Python session."
-msgstr "Nem sikerült feloldani a jegyzetfüzet Python-munkamenetét."
+msgid ""
+"This notebook has no Python worker session yet. The execution counter was "
+"reset."
+msgstr ""
+"Ennek a jegyzetfüzetnek még nincs Python-munkafolyamata. A végrehajtási "
+"számláló alaphelyzetbe állt."
 
 #: plugin/scripting/session_manager.py
 msgid "Notebook Python session reset for this document."
@@ -2790,6 +2892,10 @@ msgid ""
 msgstr ""
 "A Python-munkamenet alaphelyzetbe állítása a Calc-táblázatokra vonatkozik. "
 "Nyisson meg egy Calc-munkafüzetet, és próbálja újra."
+
+#: plugin/scripting/session_manager.py
+msgid "This spreadsheet has no Python worker session yet."
+msgstr "Ennek a táblázatnak még nincs Python-munkafolyamata."
 
 #: plugin/scripting/session_manager.py
 msgid "Could not restore the initialization script."
@@ -2819,6 +2925,10 @@ msgstr ""
 "egyszeri munkafüzet-beállításokat."
 
 #: plugin/scripting/session_manager.py
+msgid "This document has no Python worker session yet."
+msgstr "Ennek a dokumentumnak még nincs Python-munkafolyamata."
+
+#: plugin/scripting/session_manager.py
 msgid "Python session reset for this document."
 msgstr "Python-munkamenet alaphelyzetbe állítva ehhez a dokumentumhoz."
 
@@ -2827,6 +2937,35 @@ msgid "Reset Python Session applies to Writer, Calc, and Draw documents."
 msgstr ""
 "A Python-munkamenet alaphelyzetbe állítása a Writer, Calc és Draw "
 "dokumentumokra vonatkozik."
+
+#: plugin/scripting/session_manager.py
+msgid ""
+"Several Calc spreadsheets are open and none is focused. Switch to the "
+"spreadsheet to reset and try again."
+msgstr ""
+"Több Calc-táblázat van megnyitva, és egyik sem aktív. Váltson a táblázatra "
+"az alaphelyzetbe állításhoz, majd próbálja újra."
+
+#: plugin/scripting/session_manager.py
+msgid ""
+"Several Writer documents are open and none is focused. Switch to the "
+"document to reset and try again."
+msgstr ""
+"Több Writer-dokumentum van megnyitva, és egyik sem aktív. Váltson a "
+"dokumentumra az alaphelyzetbe állításhoz, majd próbálja újra."
+
+#: plugin/scripting/session_manager.py
+msgid ""
+"Several Draw documents are open and none is focused. Switch to the document "
+"to reset and try again."
+msgstr ""
+"Több Draw-dokumentum van megnyitva, és egyik sem aktív. Váltson a "
+"dokumentumra az alaphelyzetbe állításhoz, majd próbálja újra."
+
+#: plugin/scripting/session_manager.py
+msgid "Open a Writer, Calc, or Draw document and try again."
+msgstr ""
+"Nyisson meg egy Writer-, Calc- vagy Draw-dokumentumot, és próbálja újra."
 
 #: plugin/scripting/units.py
 msgid "Units helper failed."
@@ -2916,6 +3055,12 @@ msgstr "Parancsfájl mentve."
 msgid "A script is already running."
 msgstr "Már fut egy szkript."
 
+#: plugin/scripting/python_runner.py
+msgid "No script is selected. Use New or Save As to keep this code."
+msgstr ""
+"Nincs kijelölt parancsfájl. Használja az Új vagy a Mentés másként parancsot "
+"a kód megőrzéséhez."
+
 #: plugin/scripting/python_runner.py plugin/xdl_strings.py
 msgid "Run Python Script"
 msgstr "Python-szkript futtatása"
@@ -2936,12 +3081,22 @@ msgstr "Váratlan hiba történt a Python-szkript futtatása megnyitásakor."
 msgid "Dispatch Error"
 msgstr "Küldési hiba"
 
+#: plugin/vision/vision_runner.py
+#, python-brace-format
+msgid "Could not export the selected image: {error}"
+msgstr "Nem sikerült exportálni a kijelölt képet: {error}"
+
 #: plugin/vision/vision_runner.py plugin/vision/vision_egress.py
 msgid ""
 "Select an embedded image (or a range containing images), then Run again."
 msgstr ""
 "Jelöljön ki egy beágyazott képet (vagy egy képeket tartalmazó tartományt), "
 "majd futtassa újra."
+
+#: plugin/vision/vision_runner.py
+#, python-brace-format
+msgid "Image '{name}' could not be exported: {error}"
+msgstr "A(z) „{name}” kép exportálása nem sikerült: {error}"
 
 #: plugin/vision/vision_runner.py
 #, python-brace-format
@@ -2960,6 +3115,13 @@ msgstr ""
 #: plugin/vision/vision_runner.py
 msgid "Cancelled by user."
 msgstr "Felhasználó által megszakítva."
+
+#: plugin/vision/vision_runner.py
+#, python-brace-format
+msgid ""
+"OCR failed for {failed} ({error}); {count} of {total} images completed."
+msgstr ""
+"Az OCR sikertelen: {failed} ({error}); {count}/{total} kép feldolgozva."
 
 #: plugin/vision/vision_runner.py
 #, python-brace-format
@@ -3253,14 +3415,6 @@ msgstr "{0}: {1} sikeres, {2} sikertelen."
 msgid "Tests failed to run: {0}"
 msgstr "A tesztek futtatása sikertelen: {0}"
 
-#: plugin/main.py plugin/xdl_strings.py
-msgid "MCP Server Status"
-msgstr "MCP-kiszolgáló állapota"
-
-#: plugin/main.py
-msgid "Edit LaTeX Math..."
-msgstr "LaTeX-képlet szerkesztése..."
-
 #: plugin/xdl_strings.py
 msgid "-1"
 msgstr "-1"
@@ -3284,6 +3438,10 @@ msgstr "További utasítások (előzmények):"
 #: plugin/xdl_strings.py
 msgid "Additional Instructions:"
 msgstr "További utasítások:"
+
+#: plugin/xdl_strings.py
+msgid "All"
+msgstr "Mind"
 
 #: plugin/xdl_strings.py
 msgid "Ask / instruct:"
@@ -3440,6 +3598,10 @@ msgid "Key Phrases"
 msgstr "Kulcskifejezések"
 
 #: plugin/xdl_strings.py
+msgid "MCP Server Status"
+msgstr "MCP-kiszolgáló állapota"
+
+#: plugin/xdl_strings.py
 msgid "Max Tokens:"
 msgstr "Max. token:"
 
@@ -3544,10 +3706,6 @@ msgid "Scope"
 msgstr "Hatókör"
 
 #: plugin/xdl_strings.py
-msgid "Search Nearby Files"
-msgstr "Keresés a közeli fájlokban"
-
-#: plugin/xdl_strings.py
 msgid "Search Query:"
 msgstr "Keresési lekérdezés:"
 
@@ -3566,10 +3724,6 @@ msgstr "Kijelölés"
 #: plugin/xdl_strings.py
 msgid "Sentiment"
 msgstr "Hangulatelemzés"
-
-#: plugin/xdl_strings.py
-msgid "Status"
-msgstr "Állapot"
 
 #: plugin/xdl_strings.py
 msgid "Status: Ready"
@@ -3655,17 +3809,17 @@ msgstr "Beépített"
 msgid "Hermes"
 msgstr "Hermes"
 
-msgid "Claude Code (ACP)"
-msgstr "Claude Code (ACP)"
+msgid "Claude Code"
+msgstr "Claude Code"
 
-msgid "Mistral Vibe (ACP)"
-msgstr "Mistral Vibe (ACP)"
+msgid "Mistral Vibe"
+msgstr "Mistral Vibe"
 
-msgid "Grok Build (ACP)"
-msgstr "Grok Build (ACP)"
+msgid "Grok Build"
+msgstr "Grok Build"
 
-msgid "OpenCode (ACP)"
-msgstr "OpenCode (ACP)"
+msgid "OpenCode"
+msgstr "OpenCode"
 
 msgid "Prompt for Agent Permissions"
 msgstr "Ügynökengedélyek kérése"

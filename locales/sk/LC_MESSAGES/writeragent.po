@@ -8,7 +8,7 @@ msgid ""
 msgstr ""
 "Project-Id-Version: PACKAGE VERSION\n"
 "Report-Msgid-Bugs-To: \n"
-"POT-Creation-Date: 2026-10-07 23:17-0400\n"
+"POT-Creation-Date: 2026-10-19 12:57-0400\n"
 "PO-Revision-Date: YEAR-MO-DA HO:MI+ZONE\n"
 "Last-Translator: FULL NAME <EMAIL@ADDRESS>\n"
 "Language-Team: Slovak <LL@li.org>\n"
@@ -77,6 +77,10 @@ msgstr "Najprv otvorte dokument Writer."
 msgid "Run code cell"
 msgstr "Spustiť bunku kódu"
 
+#: plugin/notebook/notebook_controls.py
+msgid "Code"
+msgstr "Kód"
+
 #: plugin/embeddings/search_ui.py
 msgid "just now"
 msgstr "práve teraz"
@@ -95,6 +99,14 @@ msgstr "pred {0} h"
 #, python-brace-format
 msgid "{0}d ago"
 msgstr "pred {0} d"
+
+#: plugin/embeddings/search_ui.py
+msgid "Failed to open search dialog."
+msgstr "Nepodarilo sa otvoriť dialógové okno vyhľadávania."
+
+#: plugin/embeddings/search_ui.py plugin/xdl_strings.py
+msgid "Search Nearby Files"
+msgstr "Hľadať v blízkych súboroch"
 
 #: plugin/embeddings/search_ui.py
 msgid "Cache Status: No active document"
@@ -190,28 +202,28 @@ msgid "Rebuild failed: "
 msgstr "Obnova zlyhala: "
 
 #: plugin/framework/errors.py
-#, python-brace-format
-msgid "TLS/SSL Error: {0}"
-msgstr "Chyba TLS/SSL: {0}"
-
-#: plugin/framework/errors.py plugin/framework/client/errors.py
 msgid "Invalid API Key. Please check your settings."
 msgstr "Neplatný kľúč API. Skontrolujte svoje nastavenia."
 
-#: plugin/framework/errors.py plugin/framework/client/errors.py
+#: plugin/framework/errors.py
 msgid "API access Forbidden. Your key may lack permissions for this model."
 msgstr ""
 "Prístup k API je zakázaný. Váš kľúč možno nemá oprávnenia pre tento model."
 
-#: plugin/framework/errors.py plugin/framework/client/errors.py
+#: plugin/framework/errors.py
 msgid "Endpoint not found (404). Check your URL and Model name."
 msgstr ""
 "Koncový bod sa nenašiel (404). Skontrolujte svoju adresu URL a názov modelu."
 
-#: plugin/framework/errors.py plugin/framework/client/errors.py
+#: plugin/framework/errors.py
 msgid "Rate limited (429). Wait a moment and try again."
 msgstr ""
 "Limit požiadaviek prekročený (429). Počkajte chvíľu a skúste to znova."
+
+#: plugin/framework/errors.py
+#, python-brace-format
+msgid "TLS/SSL Error: {0}"
+msgstr "Chyba TLS/SSL: {0}"
 
 #: plugin/framework/errors.py
 #, python-brace-format
@@ -383,6 +395,21 @@ msgstr ""
 msgid "Provider busy, retrying in {0}s…"
 msgstr "Poskytovateľ je zaneprázdnený, opakujem o {0} s…"
 
+#: plugin/framework/client/request_controls.py
+#, python-brace-format
+msgid "Provider asked to wait {0}s, which is above the {1}s retry cap."
+msgstr ""
+"Poskytovateľ požiadal o čakanie {0} s, čo je nad limitom opakovania {1} s."
+
+#: plugin/framework/client/request_controls.py
+#, python-brace-format
+msgid "Spacing free-model requests, next send in {0}s…"
+msgstr "Časovanie požiadaviek voľného modelu, ďalšie odoslanie o {0} s…"
+
+#: plugin/framework/client/anthropic_shim.py
+msgid "Anthropic model is not set. Choose a model in Settings."
+msgstr "Model Anthropic nie je nastavený. Vyberte model v Nastaveniach."
+
 #: plugin/framework/main_shared.py plugin/calc/python/cell_editor_ui.py
 #: plugin/writer/math/latex_dialog.py plugin/chatbot/panel.py
 #: plugin/chatbot/external_editor.py plugin/chatbot/send_handlers.py
@@ -422,6 +449,14 @@ msgstr "Prepis pomocou lokálneho Whisper ({0})… Prvé spustenie stiahne model
 #: plugin/audio/stt_service.py
 msgid "Transcribing audio..."
 msgstr "Prepisujem zvuk..."
+
+#: plugin/audio/stt_service.py
+msgid ""
+"Could not check whether faster-whisper is installed. The Settings → Python "
+"interpreter timed out or could not start."
+msgstr ""
+"Nepodarilo sa skontrolovať, či je nainštalovaný faster-whisper. Nastavenia →"
+" Interpret Pythonu vypršali alebo sa nedali spustiť."
 
 #: plugin/audio/stt_service.py
 #, python-brace-format
@@ -547,7 +582,6 @@ msgstr "Sťahuje sa japonský slovník fonemizátora…"
 
 #: plugin/calc/python/editor_context_menu.py plugin/librepy/sidebar_menus.py
 #: plugin/chatbot/hamburger_menu.py plugin/chatbot/panel_factory.py
-#: plugin/main.py
 msgid "Edit Python in Cell..."
 msgstr "Upraviť Python v bunke..."
 
@@ -594,10 +628,6 @@ msgid "Ready"
 msgstr "Pripravený"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/scripting/editor_ui_strings.py
-msgid "A1:C1  or  A1:C1, C1:C5"
-msgstr "A1:C1 alebo A1:C1, C1:C5"
-
-#: plugin/calc/python/cell_editor_ui.py plugin/scripting/editor_ui_strings.py
 msgid "Data ranges apply only when saving as a =PY() formula."
 msgstr "Rozsahy údajov sa uplatňujú iba pri ukladaní ako vzorec =PY()."
 
@@ -610,7 +640,6 @@ msgid "Saving…"
 msgstr "Ukladá sa…"
 
 #: plugin/calc/python/cell_editor_ui.py plugin/calc/python/editor.py
-#: plugin/scripting/editor_ui_strings.py
 msgid "Saved without =PY()."
 msgstr "Uložené bez =PY()."
 
@@ -653,6 +682,11 @@ msgid "Could not rewrite xl() range literals into =PY data arguments: %s"
 msgstr ""
 "Nepodarilo sa prepísať literály rozsahu xl() na dátové argumenty =PY: %s"
 
+#: plugin/calc/python/editor.py
+#, python-brace-format
+msgid "Saved code in {0}."
+msgstr "Kód uložený v {0}."
+
 #: plugin/calc/python/editor.py plugin/xdl_strings.py
 msgid "Python cell editor"
 msgstr "Editor buniek Python"
@@ -663,7 +697,8 @@ msgid "Save without =PY()"
 msgstr "Uložiť bez =PY()"
 
 #: plugin/calc/python/editor.py plugin/scripting/editor_ui_strings.py
-#: plugin/scripting/python_runner.py plugin/xdl_strings.py
+#: plugin/scripting/python_runner_ui.py plugin/scripting/python_runner.py
+#: plugin/xdl_strings.py
 msgid "Save"
 msgstr "Uložiť"
 
@@ -801,17 +836,10 @@ msgstr "Nastavenia Pythonu"
 msgid "Could not open Settings."
 msgstr "Nepodarilo sa otvoriť Nastavenia."
 
-#: plugin/librepy/python_sidebar.py plugin/xdl_strings.py
-msgid "All"
-msgstr "Všetky"
-
-#: plugin/librepy/python_sidebar.py
-msgid "Errors"
-msgstr "Chyby"
-
-#: plugin/librepy/python_sidebar.py plugin/scripting/python_runner_ui.py
-msgid "Output"
-msgstr "Výstup"
+#: plugin/librepy/settings.py plugin/chatbot/module_config_dialog.py
+#: plugin/chatbot/dialog_views.py
+msgid "Invalid Setting"
+msgstr "Neplatné nastavenie"
 
 #: plugin/librepy/python_sidebar.py
 msgid "Shared kernel"
@@ -849,15 +877,15 @@ msgstr ""
 "Venv: chýba python v {path}"
 
 #: plugin/librepy/python_sidebar.py
-msgid "(no =PY() cells on active sheet)"
-msgstr "(žiadne bunky =PY() na aktívnom hárku)"
-
-#: plugin/librepy/python_sidebar.py
 msgid "(no diagnostics yet)"
 msgstr "(zatiaľ žiadna diagnostika)"
 
+#: plugin/librepy/python_sidebar.py
+msgid "(no =PY() cells on active sheet)"
+msgstr "(žiadne bunky =PY() na aktívnom hárku)"
+
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/chatbot/panel_factory.py plugin/main.py
+#: plugin/chatbot/panel_factory.py
 msgid "Run Python Script..."
 msgstr "Spustiť skript Python..."
 
@@ -867,43 +895,38 @@ msgid "Insert LaTeX Math..."
 msgstr "Vložiť matematický výraz LaTeX..."
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py
 msgid "Text Analytics..."
 msgstr "Analýza textu..."
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
 #: plugin/chatbot/dialog_views.py plugin/chatbot/panel_factory.py
-#: plugin/main.py plugin/xdl_strings.py
+#: plugin/xdl_strings.py
 msgid "Settings"
 msgstr "Nastavenia"
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py
 msgid "Vision OCR Settings..."
 msgstr "Nastavenia Vision OCR..."
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py
 msgid "Reset Python Session"
 msgstr "Resetovať reláciu Pythonu"
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py
 msgid "Run All"
 msgstr "Spustiť všetko"
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py
 msgid "Run From Here"
 msgstr "Spustiť odtiaľto"
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/hamburger_menu.py
-#: plugin/main.py plugin/xdl_strings.py
+#: plugin/xdl_strings.py
 msgid "Stop"
 msgstr "Zastaviť"
 
 #: plugin/librepy/sidebar_menus.py plugin/chatbot/dialogs.py
-#: plugin/chatbot/hamburger_menu.py plugin/main.py plugin/xdl_strings.py
+#: plugin/chatbot/hamburger_menu.py plugin/xdl_strings.py
 msgid "Report bug..."
 msgstr "Nahlásiť chybu..."
 
@@ -918,6 +941,95 @@ msgstr "Prijať celú zmenu (agent)"
 #: plugin/writer/change_context_menu.py
 msgid "Reject whole change (agent)"
 msgstr "Odmietnuť celú zmenu (agent)"
+
+#: plugin/writer/inline_review.py
+msgid "No agent changes to review in this document."
+msgstr "V tomto dokumente nie sú žiadne zmeny agenta na kontrolu."
+
+#: plugin/writer/inline_review.py
+#, python-format
+msgid "%d overlapping agent changes accepted together."
+msgstr "%d prekrývajúcich sa zmien agenta bolo prijatých spoločne."
+
+#: plugin/writer/inline_review.py
+#, python-format
+msgid "%d overlapping agent changes rejected together."
+msgstr "%d prekrývajúcich sa zmien agenta bolo zamietnutých spoločne."
+
+#: plugin/writer/inline_review.py
+msgid "Change accepted."
+msgstr "Zmena prijatá."
+
+#: plugin/writer/inline_review.py
+msgid "Change rejected."
+msgstr "Zmena zamietnutá."
+
+#: plugin/writer/inline_review.py
+msgid ""
+"Couldn't read this document's tracked changes reliably just now -- nothing "
+"was changed. Please try again."
+msgstr ""
+"Sledované zmeny v tomto dokumente sa momentálne nepodarilo spoľahlivo "
+"prečítať – nič sa nezmenilo. Skúste to znova."
+
+#: plugin/writer/inline_review.py
+msgid ""
+"Started resolving changes but couldn't confirm the result -- some may have "
+"been resolved. Please review remaining changes in Edit > Track Changes > "
+"Manage."
+msgstr ""
+"Riešenie zmien sa začalo, ale výsledok nebolo možné potvrdiť – niektoré "
+"mohli byť vyriešené. Skontrolujte zostávajúce zmeny v ponuke Úpravy > "
+"Sledovanie zmien > Spravovať."
+
+#: plugin/writer/inline_review.py
+msgid ""
+"Nothing was changed. Resolve remaining changes from Edit > Track Changes > "
+"Manage."
+msgstr ""
+"Nič sa nezmenilo. Zostávajúce zmeny vyriešte v ponuke Úpravy > Sledovanie "
+"zmien > Spravovať."
+
+#: plugin/writer/inline_review.py
+msgid ""
+"None could be resolved here -- each overlaps with one of your own tracked "
+"changes. Resolve them from Edit > Track Changes > Manage."
+msgstr ""
+"Tu nebolo možné vyriešiť žiadnu zmenu – každá sa prekrýva s jednou z vašich "
+"vlastných sledovaných zmien. Vyriešte ich v ponuke Úpravy > Sledovanie zmien"
+" > Spravovať."
+
+#: plugin/writer/inline_review.py
+#, python-format
+msgid ""
+"Resolved %(resolved)d of %(total)d. The rest overlap with your own tracked "
+"changes -- resolve those from Edit > Track Changes > Manage."
+msgstr ""
+"Vyriešených %(resolved)d z %(total)d. Zvyšné sa prekrývajú s vašimi "
+"vlastnými sledovanými zmenami – vyriešte ich v ponuke Úpravy > Sledovanie "
+"zmien > Spravovať."
+
+#: plugin/writer/inline_review.py
+msgid ""
+"Could not resolve this change here -- it may share a paragraph with one of "
+"your tracked changes or another agent change. Resolve it from Edit > Track "
+"Changes > Manage."
+msgstr ""
+"Túto zmenu tu nebolo možné vyriešiť – môže zdieľať odsek s jednou z vašich "
+"sledovaných zmien alebo inou zmenou agenta. Vyriešte ju v ponuke Úpravy > "
+"Sledovanie zmien > Spravovať."
+
+#: plugin/writer/inline_review.py
+msgid "Put the cursor on a highlighted agent change first."
+msgstr "Najprv umiestnite kurzor na zvýraznenú zmenu agenta."
+
+#: plugin/writer/inline_review.py
+msgid "Review agent changes"
+msgstr "Skontrolovať zmeny agenta"
+
+#: plugin/writer/inline_review.py
+msgid "Resolve agent changes"
+msgstr "Vyriešiť zmeny agenta"
 
 #: plugin/writer/review_click_popup.py
 msgid "Accept this change"
@@ -950,6 +1062,15 @@ msgstr ""
 "sledovaných zmien."
 
 #: plugin/writer/edit_review.py
+#, python-brace-format
+msgid ""
+"Failed to collapse the streamed continuation into a single tracked change: "
+"{0}"
+msgstr ""
+"Nepodarilo sa zbaliť streamované pokračovanie do jednej sledovanej zmeny: "
+"{0}"
+
+#: plugin/writer/edit_review.py
 msgid ""
 "Failed to collapse the streamed continuation into a single tracked change. "
 "The text was kept, but may not be reviewable."
@@ -968,6 +1089,10 @@ msgstr ""
 #: plugin/writer/editselection.py
 msgid "WriterAgent: Extend Selection"
 msgstr "WriterAgent: Rozšíriť výber"
+
+#: plugin/writer/editselection.py
+msgid "Select text first"
+msgstr "Najprv vyberte text"
 
 #: plugin/writer/editselection.py
 msgid "WriterAgent: Edit Selection"
@@ -1019,6 +1144,10 @@ msgid ""
 msgstr ""
 "Nepodarilo sa identifikovať vybratý vzorec. Kliknite do textu a potom vložte"
 " nový vzorec."
+
+#: plugin/writer/math/latex_dialog.py
+msgid "Could not convert formula to LaTeX. Enter formula manually."
+msgstr "Vzorec sa nepodarilo previesť na LaTeX. Zadajte vzorec manuálne."
 
 #: plugin/writer/math/latex_dialog.py
 msgid "Unknown conversion error"
@@ -1301,10 +1430,6 @@ msgstr "prečo"
 msgid "you"
 msgstr "vy"
 
-#: plugin/chatbot/module_config_dialog.py plugin/chatbot/dialog_views.py
-msgid "Invalid Setting"
-msgstr "Neplatné nastavenie"
-
 #: plugin/chatbot/dialogs.py
 msgid "Agent requests approval"
 msgstr "Agent vyžaduje schválenie"
@@ -1326,24 +1451,23 @@ msgstr "Skopírované!"
 msgid "Copy URL"
 msgstr "Kopírovať URL"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Extend Selection"
 msgstr "Rozšíriť výber"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Edit Selection"
 msgstr "Upraviť výber"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Convert Sheet to Python..."
 msgstr "Konvertovať hárok na Python..."
 
 #: plugin/chatbot/hamburger_menu.py plugin/chatbot/panel_factory.py
-#: plugin/main.py
 msgid "Search Nearby Files..."
 msgstr "Hľadať v blízkych súboroch..."
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Toggle MCP Server"
 msgstr "Prepnúť server MCP"
 
@@ -1355,37 +1479,33 @@ msgstr "Server MCP (spustený)"
 msgid "MCP Server (Stopped)"
 msgstr "Server MCP (zastavený)"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Run format tests"
 msgstr "Spustiť testy formátovania"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Run calc tests"
 msgstr "Spustiť testy Calc"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Run Calc API integration tests"
 msgstr "Spustiť integračné testy API Calc"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Run draw tests"
 msgstr "Spustiť testy Draw"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Evaluation Dashboard"
 msgstr "Panel hodnotenia"
 
-#: plugin/chatbot/hamburger_menu.py plugin/main.py
+#: plugin/chatbot/hamburger_menu.py
 msgid "Debug"
 msgstr "Ladenie"
 
 #: plugin/chatbot/tool_loop.py plugin/chatbot/panel.py
 msgid "[Voice message]"
 msgstr "[Hlasová správa]"
-
-#: plugin/chatbot/tool_loop.py
-msgid "Error: Toolkit unavailable"
-msgstr "Chyba: Sada nástrojov nie je k dispozícii"
 
 #: plugin/chatbot/chat_sidebar_mode.py plugin/xdl_strings.py
 msgid "Chat"
@@ -1411,7 +1531,7 @@ msgstr "Brainstorming"
 msgid "Writing Plan"
 msgstr "Plán písania"
 
-#: plugin/chatbot/chat_sidebar_mode.py
+#: plugin/chatbot/chat_sidebar_mode.py plugin/chatbot/dialog_views.py
 msgid "PPT-Master"
 msgstr "PPT-Master"
 
@@ -1651,11 +1771,6 @@ msgstr "[Chyba prepisu: {0}]"
 #, python-brace-format
 msgid "[Document context error: {0}]"
 msgstr "[Chyba kontextu dokumentu: {0}]"
-
-#: plugin/chatbot/send_handlers.py
-#, python-brace-format
-msgid "[Agent backend '{0}' not found.]"
-msgstr "[Backend agenta „{0}“ sa nenašiel.]"
 
 #: plugin/chatbot/send_handlers.py
 #, python-brace-format
@@ -1937,19 +2052,13 @@ msgstr "Nový skript Python"
 msgid "Script name:"
 msgstr "Názov skriptu:"
 
-#: plugin/scripting/script_dialogs.py
-msgid "Script name cannot start with a reserved prefix."
-msgstr "Názov skriptu nemôže začínať vyhradenou predponou."
+#: plugin/scripting/script_dialogs.py plugin/scripting/editor_ui_strings.py
+msgid "Attach to this document (no document is open)"
+msgstr "Pripojiť k tomuto dokumentu (žiadny dokument nie je otvorený)"
 
 #: plugin/scripting/script_dialogs.py plugin/scripting/editor_ui_strings.py
-#: plugin/xdl_strings.py
-msgid "Attach to this document"
-msgstr "Pripojiť k tomuto dokumentu"
-
-#: plugin/scripting/script_dialogs.py plugin/scripting/editor_ui_strings.py
-#: plugin/scripting/document_scripts.py
-msgid "Script name cannot be empty."
-msgstr "Názov skriptu nemôže byť prázdny."
+msgid "Attach to this document (this document is read-only)"
+msgstr "Pripojiť k tomuto dokumentu (tento dokument je len na čítanie)"
 
 #: plugin/scripting/editor_ui_strings.py
 msgid "Running…"
@@ -1976,25 +2085,33 @@ msgstr "Zrušiť"
 msgid "Data:"
 msgstr "Údaje:"
 
+#: plugin/scripting/editor_ui_strings.py
+msgid "A1:C1  or  A1:C1, C1:C5"
+msgstr "A1:C1 alebo A1:C1, C1:C5"
+
 #: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
 msgid "New"
 msgstr "Nový"
+
+#: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
+msgid "Attach to this document"
+msgstr "Pripojiť k tomuto dokumentu"
+
+#: plugin/scripting/editor_ui_strings.py
+msgid "Attach to this document (this document changed)"
+msgstr "Pripojiť k tomuto dokumentu (tento dokument sa zmenil)"
 
 #: plugin/scripting/editor_ui_strings.py
 msgid "Create"
 msgstr "Vytvoriť"
 
+#: plugin/scripting/editor_ui_strings.py plugin/scripting/document_scripts.py
+msgid "Script name cannot be empty."
+msgstr "Názov skriptu nemôže byť prázdny."
+
 #: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
 msgid "Script:"
 msgstr "Skript:"
-
-#: plugin/scripting/editor_ui_strings.py
-msgid "Attach"
-msgstr "Pripojiť"
-
-#: plugin/scripting/editor_ui_strings.py
-msgid "Attach to Document"
-msgstr "Pripojiť k dokumentu"
 
 #: plugin/scripting/editor_ui_strings.py plugin/xdl_strings.py
 msgid "Save As..."
@@ -2017,11 +2134,11 @@ msgid "My Scripts"
 msgstr "Moje skripty"
 
 #: plugin/scripting/editor_ui_strings.py plugin/scripting/document_scripts.py
-#: plugin/scripting/python_runner_ui.py
-msgid "Built-in helpers are read-only. Use Copy to My Scripts to customize."
+msgid ""
+"Built-in helpers are read-only. Use Save As to copy one into My Scripts."
 msgstr ""
-"Vstavaní pomocníci sú len na čítanie. Na prispôsobenie použite Kopírovať do "
-"Mojich skriptov."
+"Vstavaní pomocníci sú len na čítanie. Použite Uložiť ako na skopírovanie do "
+"Moje skripty."
 
 #: plugin/scripting/editor_ui_strings.py plugin/scripting/document_scripts.py
 msgid ""
@@ -2035,20 +2152,6 @@ msgstr ""
 #, python-brace-format
 msgid "Loaded script '{0}'."
 msgstr "Načítaný skript „{0}“."
-
-#: plugin/scripting/editor_ui_strings.py plugin/scripting/document_scripts.py
-msgid "No document is open to attach scripts."
-msgstr "Žiadny dokument nie je otvorený na pripojenie skriptov."
-
-#: plugin/scripting/editor_ui_strings.py
-#, python-brace-format
-msgid "Attaching script '{0}'..."
-msgstr "Pripája sa skript „{0}“..."
-
-#: plugin/scripting/editor_ui_strings.py
-#, python-brace-format
-msgid "Copying script '{0}' to My Scripts..."
-msgstr "Kopíruje sa skript „{0}“ do Mojich skriptov..."
 
 #: plugin/scripting/editor_ui_strings.py
 #, python-brace-format
@@ -2064,28 +2167,15 @@ msgstr "Odstraňujem skript „{0}“..."
 msgid "Built-in helpers cannot be deleted."
 msgstr "Vstavané pomocné skripty nie je možné odstrániť."
 
-#: plugin/scripting/editor_ui_strings.py
-msgid "Enter script name:"
-msgstr "Zadajte názov skriptu:"
-
 #: plugin/scripting/editor_ui_strings.py plugin/scripting/python_runner_ui.py
 #, python-brace-format
 msgid "A script named '{0}' already exists in this document. Overwrite?"
 msgstr "Skript s názvom „{0}“ už v tomto dokumente existuje. Prepísať?"
 
-#: plugin/scripting/editor_ui_strings.py
-msgid "Copy to My Scripts as:"
-msgstr "Kopírovať do Moje skripty ako:"
-
 #: plugin/scripting/editor_ui_strings.py plugin/scripting/python_runner_ui.py
 #, python-brace-format
 msgid "A script named '{0}' already exists in My Scripts. Overwrite?"
 msgstr "Skript s názvom „{0}“ už v časti Moje skripty existuje. Prepísať?"
-
-#: plugin/scripting/editor_ui_strings.py
-#, python-brace-format
-msgid "Save script '{0}' to this document?"
-msgstr "Uložiť skript „{0}“ do tohto dokumentu?"
 
 #: plugin/scripting/editor_ui_strings.py
 #, python-brace-format
@@ -2097,6 +2187,23 @@ msgid "Select data range or enter A1 address (injected as data)."
 msgstr "Vyberte rozsah údajov alebo zadajte adresu A1 (vloženú ako údaje)."
 
 #: plugin/scripting/document_scripts.py
+msgid "Stored document scripts are unreadable, so they were left unchanged."
+msgstr "Uložené skripty dokumentu sú nečitateľné, preto zostali nezmenené."
+
+#: plugin/scripting/document_scripts.py
+#, python-brace-format
+msgid ""
+"Stored document scripts are in an unsupported format (version {0}), so they "
+"were left unchanged."
+msgstr ""
+"Uložené skripty dokumentu sú v nepodporovanom formáte (verzia {0}), preto "
+"zostali nezmenené."
+
+#: plugin/scripting/document_scripts.py
+msgid "Document is read-only or properties cannot be written."
+msgstr "Dokument je len na čítanie alebo vlastnosti nie je možné zapísať."
+
+#: plugin/scripting/document_scripts.py
 #, python-brace-format
 msgid "Document scripts are too large to store in the document ({0} bytes)."
 msgstr ""
@@ -2105,10 +2212,6 @@ msgstr ""
 #: plugin/scripting/document_scripts.py plugin/scripting/python_runner_ui.py
 msgid "No document is open to save scripts."
 msgstr "Nie je otvorený žiadny dokument na uloženie skriptov."
-
-#: plugin/scripting/document_scripts.py
-msgid "Document is read-only or properties cannot be written."
-msgstr "Dokument je len na čítanie alebo vlastnosti nie je možné zapísať."
 
 #: plugin/scripting/document_scripts.py
 msgid ""
@@ -2144,6 +2247,23 @@ msgstr "Tento dokument"
 
 #: plugin/scripting/document_scripts.py
 #, python-brace-format
+msgid ""
+"Could not save '{0}' to this document ({1}). Saved it to My Scripts instead."
+msgstr ""
+"Nepodarilo sa uložiť „{0}“ do tohto dokumentu ({1}). Namiesto toho sa uložil"
+" do Moje skripty."
+
+#: plugin/scripting/document_scripts.py
+#, python-brace-format
+msgid ""
+"Could not save '{0}' to this document ({1}). A script named '{0}' already "
+"exists in My Scripts."
+msgstr ""
+"Nepodarilo sa uložiť „{0}“ do tohto dokumentu ({1}). Skript s názvom „{0}“ "
+"už v Moje skripty existuje."
+
+#: plugin/scripting/document_scripts.py
+#, python-brace-format
 msgid "Script '{0}' does not exist in My Scripts."
 msgstr "Skript „{0}“ v časti Moje skripty neexistuje."
 
@@ -2161,16 +2281,6 @@ msgstr "Žiadny dokument nie je otvorený."
 
 #: plugin/scripting/document_scripts.py
 #, python-brace-format
-msgid "A script named '{0}' already exists in My Scripts. {1}"
-msgstr "Skript s názvom '{0}' už v časti Moje skripty existuje. {1}"
-
-#: plugin/scripting/document_scripts.py
-#, python-brace-format
-msgid "Saved script '{0}' to My Scripts. {1}"
-msgstr "Skript „{0}“ bol uložený do Moje skripty. {1}"
-
-#: plugin/scripting/document_scripts.py
-#, python-brace-format
 msgid "Saved script '{0}' to this document."
 msgstr "Skript „{0}“ bol uložený do tohto dokumentu."
 
@@ -2178,21 +2288,6 @@ msgstr "Skript „{0}“ bol uložený do tohto dokumentu."
 #, python-brace-format
 msgid "Saved script '{0}'."
 msgstr "Skript „{0}“ bol uložený."
-
-#: plugin/scripting/document_scripts.py
-#, python-brace-format
-msgid "Attached script '{0}' to this document."
-msgstr "Skript „{0}“ bol pripojený k tomuto dokumentu."
-
-#: plugin/scripting/document_scripts.py
-#, python-brace-format
-msgid "A script named '{0}' already exists in My Scripts."
-msgstr "Skript s názvom „{0}“ už v časti Moje skripty existuje."
-
-#: plugin/scripting/document_scripts.py
-#, python-brace-format
-msgid "Copied script '{0}' to My Scripts."
-msgstr "Skript „{0}“ bol skopírovaný do časti Moje skripty."
 
 #: plugin/scripting/document_scripts.py
 #, python-brace-format
@@ -2204,7 +2299,7 @@ msgstr "Skript dokumentu „{0}“ bol odstránený."
 msgid "Deleted script '{0}'."
 msgstr "Skript „{0}“ bol odstránený."
 
-#: plugin/scripting/document_scripts.py
+#: plugin/scripting/document_scripts.py plugin/scripting/text_analytics_ui.py
 msgid "The document was closed."
 msgstr "Dokument bol zatvorený."
 
@@ -2213,19 +2308,12 @@ msgid "The document is no longer open."
 msgstr "Dokument už nie je otvorený."
 
 #: plugin/scripting/python_runner_ui.py
+msgid "Script preparation failed."
+msgstr "Príprava skriptu zlyhala."
+
+#: plugin/scripting/python_runner_ui.py
 msgid "PythonScriptDialog could not be loaded from the extension."
 msgstr "PythonScriptDialog sa nepodarilo načítať z rozšírenia."
-
-#: plugin/scripting/python_runner_ui.py
-#, python-format
-msgid "Cannot save to My Scripts: a script named '%s' already exists."
-msgstr ""
-"Do Moje skripty nie je možné uložiť: skript s názvom „%s“ už existuje."
-
-#: plugin/scripting/python_runner_ui.py
-#, python-format
-msgid "%s Saved to My Scripts instead."
-msgstr "%s Namiesto toho uložené v časti Moje skripty."
 
 #: plugin/scripting/python_runner_ui.py
 #, python-format
@@ -2286,13 +2374,9 @@ msgstr "Skript bol úspešne vykonaný."
 msgid "Success"
 msgstr "Úspech"
 
-#: plugin/scripting/venv_probe_ui.py
-msgid "Venv OK"
-msgstr "Venv OK"
-
-#: plugin/scripting/venv_probe_ui.py
-msgid "Venv check failed"
-msgstr "Kontrola virtuálneho prostredia zlyhala"
+#: plugin/scripting/python_runner_ui.py
+msgid "Output"
+msgstr "Výstup"
 
 #: plugin/scripting/venv_probe_ui.py plugin/xdl_strings.py
 msgid "Testing Python environment..."
@@ -2305,6 +2389,14 @@ msgstr "Hotovo"
 #: plugin/scripting/venv_probe_ui.py
 msgid "Failed"
 msgstr "Zlyhalo"
+
+#: plugin/scripting/venv_probe_ui.py
+msgid "Venv OK"
+msgstr "Venv OK"
+
+#: plugin/scripting/venv_probe_ui.py
+msgid "Venv check failed"
+msgstr "Kontrola virtuálneho prostredia zlyhala"
 
 #: plugin/scripting/editor_host.py
 msgid ""
@@ -2330,12 +2422,20 @@ msgid "The script list update timed out."
 msgstr "Časový limit na aktualizáciu zoznamu skriptov vypršal."
 
 #: plugin/scripting/editor_host.py
+msgid "The script list update failed."
+msgstr "Aktualizácia zoznamu skriptov zlyhala."
+
+#: plugin/scripting/editor_host.py
 msgid "Script execution failed."
 msgstr "Spustenie skriptu zlyhalo."
 
 #: plugin/scripting/editor_host.py
 msgid "Saving the script timed out."
 msgstr "Časový limit na uloženie skriptu vypršal."
+
+#: plugin/scripting/editor_host.py
+msgid "Saving the script failed."
+msgstr "Uloženie skriptu zlyhalo."
 
 #: plugin/scripting/editor_host.py
 msgid "the initialization script"
@@ -2377,10 +2477,12 @@ msgid "Could not talk to the Python editor."
 msgstr "Nepodarilo sa komunikovať s editorom Pythonu."
 
 #: plugin/scripting/venv_diagnostics.py
-msgid "On Linux also install system PortAudio: sudo pacman -S portaudio"
+msgid ""
+"On Linux also install the system PortAudio package from your distribution "
+"(sounddevice needs it; the package name differs)."
 msgstr ""
-"V systéme Linux nainštalujte aj systémové PortAudio: sudo pacman -S "
-"portaudio"
+"V systéme Linux nainštalujte aj systémový balík PortAudio z vašej "
+"distribúcie (vyžaduje ho sounddevice; názov balíka sa líši)."
 
 #: plugin/scripting/venv_diagnostics.py
 msgid "Audio probe timed out (sounddevice import failed or hung)."
@@ -2488,10 +2590,6 @@ msgid "Vector Search Libraries"
 msgstr "Knižnice vektorového vyhľadávania"
 
 #: plugin/scripting/venv_diagnostics.py
-msgid "Audio Recording"
-msgstr "Nahrávanie zvuku"
-
-#: plugin/scripting/venv_diagnostics.py
 msgid "To install remaining packages:"
 msgstr "Na inštaláciu zostávajúcich balíkov:"
 
@@ -2560,49 +2658,37 @@ msgid "Could not load the analytics dialog."
 msgstr "Nepodarilo sa načítať dialógové okno analýzy."
 
 #: plugin/scripting/text_analytics_ui.py
-msgid "Checking spaCy / textdescriptives / transformers installation..."
-msgstr "Kontrola inštalácie spaCy / textdescriptives / transformers..."
-
-#: plugin/scripting/text_analytics_ui.py
-#, python-brace-format
-msgid ""
-"Error from the Text Analytics worker:\n"
-"{err}\n"
-"\n"
-"The features in this dialog require these packages in the python it is using:\n"
-"  • spacy + a model          (entities, key phrases, basic stats)\n"
-"  • textdescriptives         (real Readability scores)\n"
-"  • transformers + torch     (Sentiment using the multilingual model)\n"
-"\n"
-"Install them with:\n"
-"  {install}\n"
-"\n"
-"The worker reported the module as missing. Verify the packages are installed in the exact python executable the worker resolved for your configured venv."
-msgstr ""
-"Chyba z procesu analýzy textu:\n"
-"{err}\n"
-"\n"
-"Funkcie v tomto dialógovom okne vyžadujú tieto balíky v používanom Pythone:\n"
-"  • spacy + model          (entity, kľúčové frázy, základné štatistiky)\n"
-"  • textdescriptives         (skutočné skóre čitateľnosti)\n"
-"  • transformers + torch     (analýza sentimentu pomocou viacjazyčného modelu)\n"
-"\n"
-"Nainštalujte ich pomocou:\n"
-"  {install}\n"
-"\n"
-"Proces nahlásil chýbajúci modul. Overte, či sú balíky nainštalované v presnom spustiteľnom súbore Pythonu, ktorý proces priradil k vášmu nakonfigurovanému venv."
+msgid "Could not read the scope checkbox."
+msgstr "Nepodarilo sa prečítať začiarkavacie políčko rozsahu."
 
 #: plugin/scripting/text_analytics_ui.py
 msgid "Open a Writer document to analyze."
 msgstr "Na analýzu otvorte dokument Writer."
 
 #: plugin/scripting/text_analytics_ui.py
+msgid "Nothing is selected."
+msgstr "Nič nie je vybraté."
+
+#: plugin/scripting/text_analytics_ui.py
 msgid "Not enough text in the chosen scope."
 msgstr "Vo zvolenom rozsahu nie je dostatok textu."
 
 #: plugin/scripting/text_analytics_ui.py
+msgid "Checking spaCy / textdescriptives / transformers installation..."
+msgstr "Kontrola inštalácie spaCy / textdescriptives / transformers..."
+
+#: plugin/scripting/text_analytics_ui.py
 msgid "Analyzing..."
 msgstr "Analyzuje sa..."
+
+#: plugin/scripting/text_analytics_ui.py
+#, python-brace-format
+msgid ""
+"Error from the Text Analytics worker:\n"
+"{err}"
+msgstr ""
+"Chyba z procesu analýzy textu:\n"
+"{err}"
 
 #: plugin/scripting/text_analytics_ui.py
 #, python-format
@@ -2616,6 +2702,11 @@ msgstr ""
 "Vo vašom nakonfigurovanom venv (Nastavenia → Python) môžu chýbať požadované balíky. Kliknite na Skontrolovať Venv v tomto dialógovom okne alebo použite úplný Test v Nastavenia → Python pre podrobnosti o spacy, textdescriptives, transformers, torch atď."
 
 #: plugin/scripting/text_analytics_ui.py
+#, python-format
+msgid "Error: %s"
+msgstr "Chyba: %s"
+
+#: plugin/scripting/text_analytics_ui.py
 msgid "No Writer document to insert into."
 msgstr "Žiadny dokument Writer, do ktorého by sa dalo vkladať."
 
@@ -2624,8 +2715,9 @@ msgid "Run an analysis first."
 msgstr "Najprv spustite analýzu."
 
 #: plugin/scripting/text_analytics_ui.py
-msgid "Nothing useful to insert from the last result."
-msgstr "Z posledného výsledku nie je možné vložiť nič užitočné."
+msgid ""
+"Switch back to the document that was analyzed, or run the analysis again."
+msgstr "Prepnite späť na analyzovaný dokument alebo spustite analýzu znova."
 
 #: plugin/scripting/text_analytics_ui.py
 #, python-format
@@ -2749,8 +2841,12 @@ msgstr ""
 "Najprv vyberte Súbor → Otvoriť zápisník Jupyter (.ipynb)."
 
 #: plugin/scripting/session_manager.py
-msgid "Could not resolve notebook Python session."
-msgstr "Nepodarilo sa vyriešiť reláciu Python poznámkového bloku."
+msgid ""
+"This notebook has no Python worker session yet. The execution counter was "
+"reset."
+msgstr ""
+"Tento zápisník zatiaľ nemá žiadnu reláciu Python worker. Počítadlo "
+"vykonávania bolo resetované."
 
 #: plugin/scripting/session_manager.py
 msgid "Notebook Python session reset for this document."
@@ -2767,6 +2863,10 @@ msgid ""
 msgstr ""
 "Resetovanie relácie Python sa vzťahuje na tabuľky Calc. Otvorte zošit Calc a"
 " skúste to znova."
+
+#: plugin/scripting/session_manager.py
+msgid "This spreadsheet has no Python worker session yet."
+msgstr "Táto tabuľka zatiaľ nemá žiadnu reláciu Python worker."
 
 #: plugin/scripting/session_manager.py
 msgid "Could not restore the initialization script."
@@ -2796,6 +2896,10 @@ msgstr ""
 "pridajte inicializačný skript."
 
 #: plugin/scripting/session_manager.py
+msgid "This document has no Python worker session yet."
+msgstr "Tento dokument zatiaľ nemá žiadnu reláciu Python worker."
+
+#: plugin/scripting/session_manager.py
 msgid "Python session reset for this document."
 msgstr "Relácia Pythonu pre tento dokument bola resetovaná."
 
@@ -2803,6 +2907,34 @@ msgstr "Relácia Pythonu pre tento dokument bola resetovaná."
 msgid "Reset Python Session applies to Writer, Calc, and Draw documents."
 msgstr ""
 "Resetovanie relácie Python sa vzťahuje na dokumenty Writer, Calc a Draw."
+
+#: plugin/scripting/session_manager.py
+msgid ""
+"Several Calc spreadsheets are open and none is focused. Switch to the "
+"spreadsheet to reset and try again."
+msgstr ""
+"Je otvorených niekoľko tabuliek Calc a žiadna nie je aktívna. Prepnite na "
+"tabuľku, ktorú chcete resetovať, a skúste to znova."
+
+#: plugin/scripting/session_manager.py
+msgid ""
+"Several Writer documents are open and none is focused. Switch to the "
+"document to reset and try again."
+msgstr ""
+"Je otvorených niekoľko dokumentov Writer a žiadny nie je aktívny. Prepnite "
+"na dokument, ktorý chcete resetovať, a skúste to znova."
+
+#: plugin/scripting/session_manager.py
+msgid ""
+"Several Draw documents are open and none is focused. Switch to the document "
+"to reset and try again."
+msgstr ""
+"Je otvorených niekoľko dokumentov Draw a žiadny nie je aktívny. Prepnite na "
+"dokument, ktorý chcete resetovať, a skúste to znova."
+
+#: plugin/scripting/session_manager.py
+msgid "Open a Writer, Calc, or Draw document and try again."
+msgstr "Otvorte dokument Writer, Calc alebo Draw a skúste to znova."
 
 #: plugin/scripting/units.py
 msgid "Units helper failed."
@@ -2889,6 +3021,12 @@ msgstr "Skript bol uložený."
 msgid "A script is already running."
 msgstr "Skript je už spustený."
 
+#: plugin/scripting/python_runner.py
+msgid "No script is selected. Use New or Save As to keep this code."
+msgstr ""
+"Nie je vybratý žiadny skript. Použite Nový alebo Uložiť ako, aby ste tento "
+"kód zachovali."
+
 #: plugin/scripting/python_runner.py plugin/xdl_strings.py
 msgid "Run Python Script"
 msgstr "Spustiť skript Python"
@@ -2910,12 +3048,22 @@ msgstr ""
 msgid "Dispatch Error"
 msgstr "Chyba odoslania"
 
+#: plugin/vision/vision_runner.py
+#, python-brace-format
+msgid "Could not export the selected image: {error}"
+msgstr "Nepodarilo sa exportovať vybratý obrázok: {error}"
+
 #: plugin/vision/vision_runner.py plugin/vision/vision_egress.py
 msgid ""
 "Select an embedded image (or a range containing images), then Run again."
 msgstr ""
 "Vyberte vložený obrázok (alebo rozsah obsahujúci obrázky) a potom spustite "
 "znova."
+
+#: plugin/vision/vision_runner.py
+#, python-brace-format
+msgid "Image '{name}' could not be exported: {error}"
+msgstr "Obrázok „{name}“ sa nepodarilo exportovať: {error}"
 
 #: plugin/vision/vision_runner.py
 #, python-brace-format
@@ -2934,6 +3082,13 @@ msgstr ""
 #: plugin/vision/vision_runner.py
 msgid "Cancelled by user."
 msgstr "Zrušené používateľom."
+
+#: plugin/vision/vision_runner.py
+#, python-brace-format
+msgid ""
+"OCR failed for {failed} ({error}); {count} of {total} images completed."
+msgstr ""
+"OCR zlyhalo pre {failed} ({error}); dokončených {count} z {total} obrázkov."
 
 #: plugin/vision/vision_runner.py
 #, python-brace-format
@@ -3225,14 +3380,6 @@ msgstr "{0}: {1} úspešných, {2} zlyhaných."
 msgid "Tests failed to run: {0}"
 msgstr "Testy sa nepodarilo spustiť: {0}"
 
-#: plugin/main.py plugin/xdl_strings.py
-msgid "MCP Server Status"
-msgstr "Stav servera MCP"
-
-#: plugin/main.py
-msgid "Edit LaTeX Math..."
-msgstr "Upraviť LaTeX matematiku..."
-
 #: plugin/xdl_strings.py
 msgid "-1"
 msgstr "-1"
@@ -3256,6 +3403,10 @@ msgstr "Ďalšie pokyny (história):"
 #: plugin/xdl_strings.py
 msgid "Additional Instructions:"
 msgstr "Ďalšie pokyny:"
+
+#: plugin/xdl_strings.py
+msgid "All"
+msgstr "Všetky"
 
 #: plugin/xdl_strings.py
 msgid "Ask / instruct:"
@@ -3412,6 +3563,10 @@ msgid "Key Phrases"
 msgstr "Kľúčové frázy"
 
 #: plugin/xdl_strings.py
+msgid "MCP Server Status"
+msgstr "Stav servera MCP"
+
+#: plugin/xdl_strings.py
 msgid "Max Tokens:"
 msgstr "Maximálny počet tokenov:"
 
@@ -3516,10 +3671,6 @@ msgid "Scope"
 msgstr "Rozsah"
 
 #: plugin/xdl_strings.py
-msgid "Search Nearby Files"
-msgstr "Hľadať v blízkych súboroch"
-
-#: plugin/xdl_strings.py
 msgid "Search Query:"
 msgstr "Vyhľadávací dopyt:"
 
@@ -3538,10 +3689,6 @@ msgstr "Výber"
 #: plugin/xdl_strings.py
 msgid "Sentiment"
 msgstr "Sentiment"
-
-#: plugin/xdl_strings.py
-msgid "Status"
-msgstr "Stav"
 
 #: plugin/xdl_strings.py
 msgid "Status: Ready"
@@ -3627,17 +3774,17 @@ msgstr "Vstavané"
 msgid "Hermes"
 msgstr "Hermes"
 
-msgid "Claude Code (ACP)"
-msgstr "Claude Code (ACP)"
+msgid "Claude Code"
+msgstr "Claude Code"
 
-msgid "Mistral Vibe (ACP)"
-msgstr "Mistral Vibe (ACP)"
+msgid "Mistral Vibe"
+msgstr "Mistral Vibe"
 
-msgid "Grok Build (ACP)"
-msgstr "Grok Build (ACP)"
+msgid "Grok Build"
+msgstr "Grok Build"
 
-msgid "OpenCode (ACP)"
-msgstr "OpenCode (ACP)"
+msgid "OpenCode"
+msgstr "OpenCode"
 
 msgid "Prompt for Agent Permissions"
 msgstr "Výzva na povolenia agenta"
