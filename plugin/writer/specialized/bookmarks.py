@@ -165,7 +165,9 @@ class BookmarkService(ServiceBase):
             except Exception:
                 log.debug("BookmarkService: setModified(%s) failed", was, exc_info=True)
 
-    def get_mcp_bookmark_map(self, doc: Any, strict: bool = False) -> dict[int, str]:
+    def get_mcp_bookmark_map(
+        self, doc: Any, para_ranges: list[Any] | None = None, strict: bool = False
+    ) -> dict[int, str]:
         """Return {para_index: bookmark_name} for all _mcp_ bookmarks.
 
         A failed read returns {} unless *strict*; ensure_heading_bookmarks reads
@@ -177,7 +179,8 @@ class BookmarkService(ServiceBase):
             names = bookmarks.getElementNames()
             if not names:
                 return result
-            para_ranges = get_paragraph_ranges(doc)
+            if para_ranges is None:
+                para_ranges = get_paragraph_ranges(doc)
             text_obj = doc.getText()
             for name in names:
                 if not (isinstance(name, str) and name.startswith("_mcp_")):
@@ -201,7 +204,12 @@ class BookmarkService(ServiceBase):
 
         return result
 
-    def ensure_heading_bookmarks(self, doc: Any) -> dict[int, str]:
+    def ensure_heading_bookmarks(
+        self,
+        doc: Any,
+        heading_para_indices: list[int] | None = None,
+        para_ranges: list[Any] | None = None,
+    ) -> dict[int, str]:
         """Ensure every heading has an _mcp_ bookmark. Returns map.
 
         Also removes ``_mcp_`` bookmarks that are no longer on a heading.
@@ -211,7 +219,7 @@ class BookmarkService(ServiceBase):
         if key not in _ACTIVE_SAVE_HOOK_KEYS:
             self._restore_abandoned(doc)
         try:
-            existing_map = self.get_mcp_bookmark_map(doc, strict=True)
+            existing_map = self.get_mcp_bookmark_map(doc, para_ranges=para_ranges, strict=True)
         except Exception as exc:
             reraise_if_disposed(exc)
             log.warning("heading bookmark map unreadable; leaving locators unchanged")
@@ -221,22 +229,31 @@ class BookmarkService(ServiceBase):
         bookmark_map = {}
         needs_bookmark = []
 
-        enum = text.createEnumeration()
-        para_index = 0
-        while enum.hasMoreElements():
-            element = enum.nextElement()
-            if element.supportsService("com.sun.star.text.Paragraph"):
-                outline_level = 0
-                try:
-                    outline_level = element.getPropertyValue("OutlineLevel")
-                except Exception:
-                    pass
-                if outline_level > 0:
-                    if para_index in existing_map:
-                        bookmark_map[para_index] = existing_map[para_index]
-                    else:
-                        needs_bookmark.append((para_index, element.getStart()))
-            para_index += 1
+        if heading_para_indices is not None:
+            if para_ranges is None:
+                para_ranges = get_paragraph_ranges(doc)
+            for para_index in heading_para_indices:
+                if para_index in existing_map:
+                    bookmark_map[para_index] = existing_map[para_index]
+                elif 0 <= para_index < len(para_ranges):
+                    needs_bookmark.append((para_index, para_ranges[para_index].getStart()))
+        else:
+            enum = text.createEnumeration()
+            para_index = 0
+            while enum.hasMoreElements():
+                element = enum.nextElement()
+                if element.supportsService("com.sun.star.text.Paragraph"):
+                    outline_level = 0
+                    try:
+                        outline_level = element.getPropertyValue("OutlineLevel")
+                    except Exception:
+                        pass
+                    if outline_level > 0:
+                        if para_index in existing_map:
+                            bookmark_map[para_index] = existing_map[para_index]
+                        else:
+                            needs_bookmark.append((para_index, element.getStart()))
+                para_index += 1
 
         # Names already on a current heading. New inserts are not in the
         # document yet, so they cannot appear in this stale list.
