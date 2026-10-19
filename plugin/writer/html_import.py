@@ -846,6 +846,25 @@ def _insert_mixed_html_and_math_at_cursor(
 
 
 
+def _insert_start_anchor(text_obj: Any, cursor: Any) -> Any:
+    """Cursor one character before the insert point, or ``None`` at the start of the text."""
+    anchor = text_obj.createTextCursorByRange(cursor.getStart())
+    return anchor if anchor.goLeft(1, False) else None
+
+
+def _insert_start_from_anchor(text_obj: Any, anchor: Any, cursor: Any) -> Any:
+    """Start of the imported content, from the anchor taken before the import."""
+    try:
+        if anchor is None:
+            return text_obj.getStart()
+        start = text_obj.createTextCursorByRange(anchor.getStart())
+        start.goRight(1, False)
+        return start
+    except Exception as exc:
+        reraise_if_disposed(exc)
+        return cursor
+
+
 def _paragraph_before(text_obj: Any, cursor: Any) -> Any:
     """Cursor at the start of the paragraph before *cursor*'s, or None in the first one."""
     cur = text_obj.createTextCursorByRange(cursor.getStart())
@@ -894,6 +913,9 @@ def _insert_mixed_or_plain_html(
     imported_end = _parked_cursor(cursor) if styled else None
     # The math path moves *cursor* past each segment, so keep the paragraph before the insert.
     before_para = _paragraph_before(text_obj, cursor) if styled and has_math else None
+    # Tip: the live cursor (and any cursor parked at the insert point) ends up after the imported
+    # content, so anchor one character to the left and step back right after the import.
+    start_anchor = _insert_start_anchor(text_obj, cursor) if styled and not has_math else None
 
     if has_math:
         _insert_mixed_html_and_math_at_cursor(model, ctx, cursor, clean, config_svc=config_svc)
@@ -912,7 +934,10 @@ def _insert_mixed_or_plain_html(
         # Per-paragraph failures are already logged inside _apply_block_lo_styles.
         # This wrapper swallowed compareRegionStarts, so a closed document
         # still looked like a finished insert.
-        start = _paragraph_after(text_obj, before_para) if has_math else cursor
+        if has_math:
+            start = _paragraph_after(text_obj, before_para)
+        else:
+            start = _insert_start_from_anchor(text_obj, start_anchor, cursor)
         _apply_block_lo_styles(model, text_obj, start, block_styles, end=imported_end)
         _cursor_goto_document_end(model, cursor)
     if not has_math:
