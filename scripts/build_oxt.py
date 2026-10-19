@@ -80,19 +80,6 @@ ALWAYS_INCLUDE_ROOT = [
     "locales/",
 ]
 
-EXCLUDE_PATTERNS = (
-    ".git",
-    ".DS_Store",
-    "__pycache__",
-    ".pyc",
-    ".pyo",
-    "tests/",
-    "test_",
-    ".tpl",
-    # make pyspector writes under plugin/; never ship in OXT
-    ".pyspector_cache",
-    ".pyspector_baseline.json",
-)
 
 # Generated files (XCS/XCU, XDL dialogs). One Dialogs/ tree only — a separate
 # lowercase dialogs/ collides with Dialogs/ on Windows case-insensitive FS and
@@ -238,9 +225,21 @@ def should_exclude(path, with_tests=False):
     # Attribution only; 48 px PNGs ship. Buttons do not scale graphics (see dialog_views).
     if path_norm.endswith("assets/provider_logos.NOTICE"):
         return True
-    for pat in EXCLUDE_PATTERNS:
-        if pat in path:
-            return True
+
+    parts = [p for p in path_norm.split("/") if p]
+    if not parts:
+        return False
+    basename = parts[-1]
+
+    # make pyspector writes under plugin/; never ship in OXT
+    if any(part in (".git", ".DS_Store", "__pycache__", ".pyspector_cache") for part in parts):
+        return True
+    if basename == ".pyspector_baseline.json":
+        return True
+    if basename.endswith((".pyc", ".pyo", ".tpl")):
+        return True
+    if any(part == "tests" or part.startswith("test_") for part in parts):
+        return True
     return False
 
 
