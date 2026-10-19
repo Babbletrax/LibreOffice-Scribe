@@ -132,6 +132,8 @@ jobs:
         run: |
           choco install libreoffice-fresh gettext make -y || true
           echo "C:\\Program Files\\LibreOffice\\program" >> $GITHUB_PATH
+          # choco gettext does not add itself to PATH; extract_strings.py needs xgettext/msgmerge.
+          echo "C:\\Program Files\\gettext-iconv\\bin" >> $GITHUB_PATH
           # typecheck runs opengrep-lint; Linux/macOS install this, Windows did not.
           powershell -NoProfile -ExecutionPolicy Bypass -Command \
             "irm https://raw.githubusercontent.com/opengrep/opengrep/main/install.ps1 | iex" || true
@@ -168,6 +170,14 @@ jobs:
           # grep -q + pipefail: unopkg dies of SIGPIPE (exit 141) after the first match.
           unopkg list > "$RUNNER_TEMP/unopkg-list.txt"
           grep "org.extension.writeragent" "$RUNNER_TEMP/unopkg-list.txt"
+
+      # Dispatch only: exercises the Python clean / extract-strings / merge path on each OS.
+      - name: Release build (clean + release-build)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.test_mock_sidebar != true }}
+        continue-on-error: true
+        run: |
+          make clean
+          make release-build
 
       - name: Run tests (Pytest + UNO)
         if: ${{ inputs.test_mock_sidebar != true }}
