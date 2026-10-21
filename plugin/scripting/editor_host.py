@@ -1352,7 +1352,7 @@ def launch_monaco_editor(
             proc = spawn_editor_process(exe)
         except OSError as e:
             log.exception("Failed to spawn editor")
-            msg = failure_message(_("Could not start the Python editor."), detail=exception_traceback(e))
+            msg = failure_message(_("Could not start the Python editor."), exc=e)
             msgbox_with_report(ctx, title, msg, box_type=3, reportable=True, report_title="Python editor spawn failed", report_extra=msg)
             return False
 
