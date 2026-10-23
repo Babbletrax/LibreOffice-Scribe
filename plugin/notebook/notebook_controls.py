@@ -953,7 +953,7 @@ def wire_all_notebook_run_buttons(ctx: Any, doc: Any, new_view: bool = True) -> 
         _detach_wiring(container, listener, container_lis)
         log.debug("notebook controls: lost wiring race; detached duplicate doc=%s", doc_key)
         return 1
-    elapsed_ms = int((time.monotonic() - t0) * 1000)
+    elapsed_ms = _mono_ms(t0)
     log.info("notebook import attach_form_listener elapsed_ms=%d attached_views=%d code_cells=%d", elapsed_ms, attached, len(state.code_cells))
     return 1
 

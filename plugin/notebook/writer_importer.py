@@ -51,6 +51,7 @@ from plugin.notebook.notebook_controls import (
     _insert_code_input_in_flow,
     _insert_run_button_in_flow,
     _log_shape_add,
+    _mono_ms,
     _page_style,
     _resolve_para_style,
     _style_control_paragraph,
@@ -118,10 +119,6 @@ _HTML_A_OR_IMG_TAG_RE = re.compile(r"(?is)</?(?:img|a)\b[^>]*?/?>")
 _HTML_ATTR_RE = re.compile(r"""(?is)([a-z_:][-a-z0-9_:.]*)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))""")
 # One-item resumed list: ``<ol start="3"><li>Ask for help…</li></ol>``.
 _OL_START_RE = re.compile(r"""(?is)<ol\b[^>]*\bstart\s*=\s*["']?(\d+)""")
-
-
-def _mono_ms(t0: float) -> int:
-    return int((time.monotonic() - t0) * 1000)
 
 
 # ---------------------------------------------------------------------------
