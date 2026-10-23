@@ -821,15 +821,15 @@ def run_trusted_calc_data_helper(
     doc: Any,
     *,
     helper: str,
-    params: dict[str, Any] | None,
-    data_range: str | None,
-    data: Any,
-    headers: bool,
-    task_hint: str | None,
     helper_names: frozenset[str] | set[str],
     error_code: str,
     empty_data_message: str,
     client_run: Callable[..., dict[str, Any]],
+    params: dict[str, Any] | None = None,
+    data_range: str | None = None,
+    data: Any = None,
+    headers: bool = True,
+    task_hint: str | None = None,
     require_calc_or_writer: bool = False,
     force_queue: bool = False,
 ) -> dict[str, Any]:
@@ -917,5 +917,46 @@ def supports_calc_or_writer_manual(doc: Any) -> bool:
     from plugin.doc.doc_type import is_calc, is_writer
 
     return is_writer(doc) or is_calc(doc)
+
+
+def insert_helper_result_into_calc(
+    doc: Any,
+    uno_ctx: Any,
+    result: dict[str, Any],
+    *,
+    domain_label: str,
+    default_helper: str,
+    failed_message: str,
+    sheet_name: str | None = None,
+    start_col: int | None = None,
+    start_row: int | None = None,
+) -> int:
+    """Write formatted helper output at *sheet_name*/*start_col*/*start_row* (or the selection).
+
+    *sheet_name* is the prefix from ``parse_output_anchor``. The shared
+    tabular writer qualifies the anchor so ``CalcBridge.resolve`` opens
+    that sheet. A missing name stays on the active sheet (Run Python Script
+    selection, or an unqualified ``output_range``).
+    """
+    from plugin.calc.tabular_egress import (
+        format_tabular_helper_for_calc,
+        insert_tabular_result_into_calc,
+    )
+
+    grid = format_tabular_helper_for_calc(
+        result,
+        domain_label=domain_label,
+        default_helper=default_helper,
+        failed_message=failed_message,
+    )
+    return insert_tabular_result_into_calc(
+        doc,
+        uno_ctx,
+        grid,
+        sheet_name=sheet_name,
+        start_col=start_col,
+        start_row=start_row,
+    )
+
 
 

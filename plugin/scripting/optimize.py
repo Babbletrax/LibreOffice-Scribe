@@ -9,11 +9,13 @@ Compute is lazy-loaded from ``plugin.scripting.venv.optimize`` via ``__getattr__
 
 from __future__ import annotations
 
+import functools
 from typing import Any
 
 from plugin.scripting._lazy_venv import install_lazy_exports
 from plugin.scripting.helper_domain import (
     DomainFacadeConfig,
+    insert_helper_result_into_calc,
     is_status_helper_result,
     make_template_api,
     run_trusted_calc_data_helper,
@@ -73,11 +75,7 @@ def run_trusted_optimize(
     doc: Any,
     *,
     helper: str,
-    params: dict[str, Any] | None = None,
-    data_range: str | None = None,
-    data: Any = None,
-    headers: bool = True,
-    task_hint: str | None = None,
+    **kwargs: Any,
 ) -> dict[str, Any]:
     """Fetch Calc data and run a trusted optimization helper in the user venv."""
     # What was wrong: importing this facade loaded the host worker inside the venv child.
@@ -91,15 +89,11 @@ def run_trusted_optimize(
         uno_ctx,
         doc,
         helper=helper,
-        params=params,
-        data_range=data_range,
-        data=data,
-        headers=headers,
-        task_hint=task_hint,
         helper_names=HELPER_NAMES,
         error_code="OPTIMIZE_ERROR",
         empty_data_message="No data to optimize",
         client_run=client_run_optimize,
+        **kwargs,
     )
 
 
@@ -110,42 +104,9 @@ def is_optimize_result(value: Any) -> bool:
     return is_status_helper_result(value, HELPER_NAMES, frozenset({"OPTIMIZE_ERROR"}))
 
 
-def format_optimize_for_calc(result: dict[str, Any]) -> list[list[Any]]:
-    """Turn an optimize helper result dict into a row-major grid for ``write_formula_range``."""
-    from plugin.calc.tabular_egress import format_tabular_helper_for_calc
-
-    return format_tabular_helper_for_calc(
-        result,
-        domain_label="Optimization",
-        default_helper="optimization",
-        failed_message="Optimization failed.",
-    )
-
-
-def insert_optimize_result_into_calc(
-    doc: Any,
-    uno_ctx: Any,
-    result: dict[str, Any],
-    *,
-    sheet_name: str | None = None,
-    start_col: int | None = None,
-    start_row: int | None = None,
-) -> int:
-    """Write formatted optimization output at *sheet_name*/*start_col*/*start_row* (or the selection).
-
-    *sheet_name* is the prefix from ``parse_output_anchor``. The shared
-    tabular writer qualifies the anchor so ``CalcBridge.resolve`` opens
-    that sheet. A missing name stays on the active sheet (Run Python Script
-    selection, or an unqualified ``output_range``).
-    """
-    from plugin.calc.tabular_egress import insert_tabular_result_into_calc
-
-    grid = format_optimize_for_calc(result)
-    return insert_tabular_result_into_calc(
-        doc,
-        uno_ctx,
-        grid,
-        sheet_name=sheet_name,
-        start_col=start_col,
-        start_row=start_row,
-    )
+insert_optimize_result_into_calc = functools.partial(
+    insert_helper_result_into_calc,
+    domain_label="Optimization",
+    default_helper="optimization",
+    failed_message="Optimization failed.",
+)
