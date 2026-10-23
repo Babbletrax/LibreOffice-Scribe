@@ -171,6 +171,7 @@ def _action_execute(request: dict[str, Any], *, stdout: Any | None = None) -> di
         init_session_id=_clean_str(request.get("init_session_id")),
         init_script_hash=_clean_str(request.get("init_script_hash")),
         timeout_sec=request.get("timeout_sec"),
+        sandbox_policy=request.get("sandbox_policy"),
     )
 
 
