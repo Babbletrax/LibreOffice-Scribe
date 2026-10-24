@@ -26,7 +26,7 @@ if _PROJECT_ROOT not in sys.path:
 
 from compute_service.config import DEFAULT_SETTINGS, clamp_timeout_sec
 from compute_service.json_egress import normalize_execute_response
-from compute_service.json_forward import dumps_response, validate_execute_response, validate_session_id
+from compute_service.json_forward import json_forward_envelope, validate_execute_response, validate_session_id
 from compute_service.worker_base import configure_compute_worker_env, run_compute_worker
 
 # Default math/OpenMP thread pools to 1 thread early before any heavy math imports.
@@ -105,7 +105,7 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any]:
     code = req.get("code")
     if not code or not isinstance(code, str):
         err = {"id": req_id, "status": "error", "code": "MISSING_CODE", "error": "Missing or invalid 'code' parameter", "stdout": ""}
-        return _json_forward_envelope(err, req_id=req_id, session_reset=session_reset)
+        return json_forward_envelope(err, req_id=req_id, session_reset=session_reset)
 
     session_id = req.get("session_id")
     # Pool execute() already rejected a bad mode or wire. The stdio dict
@@ -119,12 +119,12 @@ def _handle_request(req: dict[str, Any]) -> dict[str, Any]:
         res = validate_execute_response(execute_code(code=code, data=data, session_id=session_id, timeout_sec=timeout_sec, mode=mode, init_script=init_script))
         if req_id is not None and isinstance(res, dict):
             res["id"] = req_id
-        return _json_forward_envelope(res, req_id=req_id, session_reset=session_reset)
+        return json_forward_envelope(res, req_id=req_id, session_reset=session_reset)
     except Exception as exc:
         # Traceback included server paths on the kit wire. Eval errors from
         # json_egress are only status/error/stdout; this path must match.
         err = {"id": req_id, "status": "error", "code": "WORKER_EXECUTION_ERROR", "error": str(exc), "stdout": ""}
-        return _json_forward_envelope(err, req_id=req_id, session_reset=session_reset)
+        return json_forward_envelope(err, req_id=req_id, session_reset=session_reset)
 
 
 def _load_request_data(req: dict[str, Any]) -> Any:
@@ -142,29 +142,6 @@ def _load_request_data(req: dict[str, Any]) -> Any:
         except Exception as exc:
             raise ValueError(f"Invalid data_json: {exc}") from exc
     raise ValueError("data_json must be bytes")
-
-
-def _json_forward_envelope(res: dict[str, Any], *, req_id: Any, session_reset: bool = False) -> dict[str, Any]:
-    """Pickle envelope: small status for host logs + result_json bytes to forward."""
-    if session_reset:
-        res["session_reset"] = True
-    try:
-        result_json = dumps_response(res)
-    except (TypeError, ValueError) as exc:
-        fallback: dict[str, Any] = {"status": "error", "error": f"JSON encode failed: {exc}"}
-        if req_id is not None:
-            fallback["id"] = req_id
-        if session_reset:
-            fallback["session_reset"] = True
-        result_json = dumps_response(fallback)
-        out: dict[str, Any] = {"id": req_id, "status": "error", "result_json": result_json}
-        if session_reset:
-            out["session_reset"] = True
-        return out
-    out = {"id": req_id, "status": res.get("status"), "result_json": result_json}
-    if session_reset:
-        out["session_reset"] = True
-    return out
 
 
 def main() -> int:
