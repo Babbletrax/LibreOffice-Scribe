@@ -36,6 +36,7 @@ if TYPE_CHECKING:
     from plugin.framework.tool import ToolContext
 from plugin.framework.errors import ToolExecutionError, best_effort, format_error_payload, safe_json_loads
 from plugin.contrib.smolagents.agents import ToolCallingAgent
+from plugin.chatbot.web_research_cache import ordered_unique_query_words
 
 log = logging.getLogger("writeragent.web_research")
 
@@ -124,31 +125,14 @@ class WebResearchToolCallingAgent(ToolCallingAgent):
         return messages
 
 
-def _ordered_unique_query_words(query: str, *, snowball_lang: str) -> list[str]:
-    """Fluff-filtered tokens, first-seen order. Storage keys sort a copy of this list."""
-    from plugin.chatbot.web_research_cache import get_research_fluff_words, tokenize_query_words
-
-    if not query:
-        return []
-    fluff = get_research_fluff_words(snowball_lang=snowball_lang)
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for token in tokenize_query_words(query):
-        if token in fluff or len(token) < 3 or token in seen:
-            continue
-        seen.add(token)
-        ordered.append(token)
-    return ordered
-
-
 def _get_unique_words_key(query: str, *, snowball_lang: str = "english") -> str:
     """Normalize query, filter locale-aware fluff, sort unique words and return space-separated key."""
-    return " ".join(sorted(_ordered_unique_query_words(query, snowball_lang=snowball_lang)))
+    return " ".join(sorted(ordered_unique_query_words(query, snowball_lang=snowball_lang)))
 
 
 def _get_embedding_words_text(query: str, *, snowball_lang: str = "english") -> str:
     """Normalize query terms for embeddings while preserving original word order."""
-    return " ".join(_ordered_unique_query_words(query, snowball_lang=snowball_lang))
+    return " ".join(ordered_unique_query_words(query, snowball_lang=snowball_lang))
 
 
 def _research_cache_result_fields(
