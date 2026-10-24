@@ -55,8 +55,13 @@ class PanelEventsController:
 
         # Read the same module object that ``from plugin.main import get_tools`` resolves.
         main_mod = sys.modules.get("plugin.main")
-        if main_mod is not None and getattr(main_mod, "_initialized", False) is True:
-            return False
+        if main_mod is not None:
+            bootstrap_state = getattr(main_mod, "_bootstrap_state", None)
+            bootstrap_enum = getattr(main_mod, "BootstrapState", None)
+            if bootstrap_enum is not None and bootstrap_state is bootstrap_enum.INITIALIZED:
+                return False
+            if getattr(bootstrap_state, "name", None) == "INITIALIZED":
+                return False
         return not on_python_main_thread()
 
     @staticmethod
@@ -265,12 +270,8 @@ class PanelEventsController:
             # The send drain pumps default_executor only. A post on the panel
             # queue sits until the drain ends, so an MCP result during Send
             # never reaches the sidebar until the turn is over.
-            from plugin.framework.queue_executor import post_to_main_thread
-            from plugin.framework.thread_guard import get_background_task_name, on_main_thread
+            from plugin.framework.queue_executor import on_main_thread_or_post
 
-            if on_main_thread() and not get_background_task_name():
-                _update_ui()
-            else:
-                post_to_main_thread(_update_ui)
+            on_main_thread_or_post(_update_ui)
         except Exception:
             log.exception("_on_mcp_result post error")

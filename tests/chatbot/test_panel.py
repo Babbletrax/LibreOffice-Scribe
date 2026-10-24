@@ -33,6 +33,7 @@ from plugin.chatbot.audio_recorder_state import AudioRecorderState
 from plugin.framework.errors import DocumentDisposedError
 from plugin.framework.send_cancellation import SendCancellation
 from plugin.chatbot import panel_voice as panel_voice_module
+from plugin.main import BootstrapState
 from tests.harness.strip_bundle import is_release_build, module_source_contains
 
 
@@ -100,6 +101,22 @@ class TestGrammarStatusDocType:
         listener.cached_doc_type = "writer"
         listener._on_grammar_status(phase="failed", preview="sample", length=6, result="API error")
         listener.status_control.setText.assert_called_once_with("Grammar: failed 'sample' len 6: API error")
+
+
+@pytest.fixture(autouse=True)
+def _isolate_default_executor():
+    from plugin.framework.queue_executor import default_executor
+
+    orig_post = default_executor.post
+    try:
+        yield
+    finally:
+        default_executor.post = orig_post
+        while not default_executor._work_queue.empty():
+            try:
+                default_executor._work_queue.get_nowait()
+            except Exception:
+                break
 
 
 @pytest.fixture(autouse=False)
@@ -379,12 +396,18 @@ class TestSendDispose:
             assert not _live_bus_callbacks(local_bus, "mcp:request")
 
     @pytest.mark.parametrize(
-        ("initialized", "py_main", "expected"),
-        [(True, False, False), (False, True, False), (False, False, True)],
+        ("bootstrap_state", "py_main", "expected"),
+        [
+            (BootstrapState.INITIALIZED, False, False),
+            (BootstrapState.UNINITIALIZED, True, False),
+            (BootstrapState.UNINITIALIZED, False, True),
+        ],
     )
-    def test_mcp_subscribe_must_defer_decision(self, initialized: bool, py_main: bool, expected: bool) -> None:
+    def test_mcp_subscribe_must_defer_decision(
+        self, bootstrap_state: BootstrapState, py_main: bool, expected: bool
+    ) -> None:
         fake_main = MagicMock()
-        fake_main._initialized = initialized
+        fake_main._bootstrap_state = bootstrap_state
         with (
             patch.dict(sys.modules, {"plugin.main": fake_main}),
             patch("plugin.framework.thread_guard.on_python_main_thread", return_value=py_main),
