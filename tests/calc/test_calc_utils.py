@@ -21,7 +21,6 @@ from plugin.calc.calc_utils import (
     get_cell_geometry,
     get_cell_geometry_target,
     query_interface,
-    resolve_cell_address,
     resolve_sheet,
     resolve_sheet_and_cell,
 )
@@ -91,7 +90,7 @@ class TestGetCellGeometry:
 
 
 class TestSheetAndCellResolution:
-    """Tests for resolve_sheet, query_interface, resolve_sheet_and_cell, and resolve_cell_address."""
+    """Tests for resolve_sheet, query_interface, and resolve_sheet_and_cell."""
 
     def test_query_interface_none_object(self):
         assert query_interface(None, "com.sun.star.sheet.XSheetCondition") is None
@@ -161,27 +160,6 @@ class TestSheetAndCellResolution:
 
         with pytest.raises(DocumentDisposedError):
             resolve_sheet_and_cell(doc, "A1")
-
-    def test_resolve_cell_address_valid(self):
-        mock_cell = MagicMock()
-        mock_cell_addr = MagicMock()
-        mock_cell.getCellAddress.return_value = mock_cell_addr
-
-        mock_sheet = MagicMock()
-        mock_sheet.getCellByPosition.return_value = mock_cell
-
-        doc = MagicMock()
-        controller = MagicMock()
-        controller.getActiveSheet.return_value = mock_sheet
-        doc.getCurrentController.return_value = controller
-
-        assert resolve_cell_address(doc, "A1") is mock_cell_addr
-        mock_sheet.getCellByPosition.assert_called_once_with(0, 0)
-
-    def test_resolve_cell_address_invalid_raises(self):
-        doc = MagicMock()
-        with pytest.raises(UnoObjectError, match="Cannot resolve cell address"):
-            resolve_cell_address(doc, "BadRef")
 
 
 class TestCellValueAndType:
