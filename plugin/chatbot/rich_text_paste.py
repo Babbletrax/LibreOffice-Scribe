@@ -38,33 +38,33 @@ from __future__ import annotations
 
 import logging
 import unicodedata
-from typing import Any, Sequence, cast
+from typing import Any, cast
 
 from plugin.chatbot.rich_text import (
     CHAT_FONT_HEIGHT,
-    CHAT_FONT_NAME,
-    CHAT_FONT_WEIGHT,
     ChatTheme,
-    configure_hidden_writer_for_chat,
+    normalize_portion_font,
     _role_prefix,
     _span_matches_message,
     append_rich_text,
+    configure_hidden_writer_for_chat,
     contains_html_tag,
     render_messages_to_hidden_doc,
     strip_legacy_ai_label,
 )
 from plugin.chatbot.rich_text_control import (
     _apply_sidebar_para_margins,
+    force_rich_full_reformat,
     _insert_string_at_rich_cursor,
     _is_automatic_char_color,
+    rollback_rich_insert,
+    _scroll_rich_to_tail,
     clear_control,
     get_control_text_length,
-    truncate_control_from,
-    _scroll_rich_to_tail,
     log_rich_scroll,
 )
 from plugin.calc.navigation import (
-    drop_cell_link_spans_from,
+    cell_links_for_rows,
     extract_cell_links_from_html,
     normalize_cell_address,
     portion_cell_href,
@@ -80,16 +80,6 @@ log = logging.getLogger(__name__)
 
 # Rich-sidebar formatted-insert fallback diagnostics use WARNING so release builds
 # (default log_level=WARN) capture direct-copy failures and clipboard fallbacks.
-
-_SERIF_FONT_MARKERS = ("serif", "times", "roman", "courier", "mono")
-
-
-def _cell_links_for_rows(rows: Sequence[tuple[str, str]]) -> list[tuple[str, str]]:
-    links: list[tuple[str, str]] = []
-    for _role, content in rows:
-        rendered = render_calc_cell_refs(content) if content else content
-        links.extend(extract_cell_links_from_html(rendered or ""))
-    return links
 
 
 def create_hidden_html_writer(ctx: Any) -> Any | None:
@@ -261,23 +251,6 @@ def _resolve_portion_char_color(src_portion: Any, txt: str, user_color: int, ass
     if isinstance(raw, int) and not _is_automatic_char_color(raw):
         return raw
     return _role_color_for_text(txt, user_color, assistant_color, default_role)
-
-
-def _normalize_portion_font(portion: Any) -> None:
-    """Clamp hidden-doc portions to sidebar sans 10pt (HTML import often uses serif headings)."""
-    font = getattr(portion, "CharFontName", "") or ""
-    if not font or any(marker in font.lower() for marker in _SERIF_FONT_MARKERS):
-        portion.CharFontName = CHAT_FONT_NAME
-        portion.CharFontNameAsian = CHAT_FONT_NAME
-        portion.CharFontNameComplex = CHAT_FONT_NAME
-    height = getattr(portion, "CharHeight", 0.0) or 0.0
-    if height <= 0 or height > CHAT_FONT_HEIGHT + 1.0:
-        portion.CharHeight = CHAT_FONT_HEIGHT
-    weight = getattr(portion, "CharWeight", 0.0) or 0.0
-    if weight <= 0:
-        portion.CharWeight = CHAT_FONT_WEIGHT
-
-
 
 
 def _list_prefix_for_paragraph(para: Any, order_counters: dict[Any, int]) -> str:
@@ -528,27 +501,6 @@ def rows_need_hidden_writer(rows: Any) -> bool:
     return any(contains_html_tag(content or "") for _role, content in (rows or []))
 
 
-def _force_rich_full_reformat(control: Any) -> None:
-    """Make the RichTextControl EditEngine lay out the whole control again.
-
-    After clear_control and a bulk refill, the EditEngine draws a layout
-    that disagrees with its own text height. Lines go missing and a gap
-    below the last line grows with the transcript, until the sidebar goes
-    blank in long sessions. invalidate() and hide/show do not fix it. A
-    paper-width change does: resizing the peer reaches
-    EditEngine::SetPaperSize (editeng/source/editeng/editeng.cxx), which
-    reformats the whole document when the width changes. Narrow by 1px,
-    then restore.
-    """
-    ps = control.getPosSize()
-    if ps.Width <= 2:
-        return
-    try:
-        control.setPosSize(ps.X, ps.Y, ps.Width - 1, ps.Height, 4)  # PosSize.WIDTH
-    finally:
-        control.setPosSize(ps.X, ps.Y, ps.Width, ps.Height, 4)
-
-
 def paint_message_items(
     ctx: Any,
     control: Any,
@@ -577,7 +529,7 @@ def paint_message_items(
         if rows[-1][0] == "user":
             with focus_preserved(ctx, restore, restore_focus=restore_focus):
                 _ensure_trailing_line_break(control)
-        _force_rich_full_reformat(control)
+        force_rich_full_reformat(control)
         _scroll_rich_to_tail(control, ctx, restore_focus=restore_focus)
         return True
     doc = None
@@ -595,7 +547,7 @@ def paint_message_items(
             log.warning("paint_message_items: hidden doc still has tags; plain paint")
             _replace_control_with_plain(control, rows, ctx, style_window, restore_focus=restore_focus)
             return True
-        links = _cell_links_for_rows(rows)
+        links = cell_links_for_rows(rows)
         # Replace, do not append. A previous splice is not part of this paint.
         clear_control(control)
         res = _copy_formatted_from_hidden_doc_to_control(
@@ -615,7 +567,7 @@ def paint_message_items(
                 with focus_preserved(ctx, restore, restore_focus=restore_focus):
                     _ensure_trailing_line_break(control)
             # Reformat before the restick so the scroll target is the real end.
-            _force_rich_full_reformat(control)
+            force_rich_full_reformat(control)
             _scroll_rich_to_tail(control, ctx, restore_focus=restore_focus)
             return True
         log.warning("paint_message_items: formatted copy failed reason=%s; plain paint", copy_reason)
@@ -763,7 +715,7 @@ def _copy_formatted_from_hidden_doc_to_control(
                         portion_color = _resolve_portion_char_color(
                             portion, txt, theme.user_color, theme.assistant_color, current_role
                         )
-                        _normalize_portion_font(portion)
+                        normalize_portion_font(portion)
                         _apply_cursor_char_props(dest_cursor, portion, char_color=portion_color, bg_color=fill_color)
                         href = portion_cell_href(portion)
                         is_pending = bool(pending_links and pending_link_idx < len(pending_links) and pending_links[pending_link_idx][0] == txt)
@@ -876,22 +828,6 @@ def _plain_fallback_text(text: str) -> str:
     return strip_html_tags(text or "")
 
 
-def _rollback_rich_insert(control: Any, before: int | None) -> None:
-    """Undo a separator or partial copy that did not finish as a full insert.
-
-    The separator (and any partial copy) must not stay in the control
-    when the formatted insert returns false, and cell-link spans recorded
-    for that tail must not resolve clicks into deleted text.
-    A length of None means the control length could not be read. Truncate
-    treats 0 as "delete from the start", so an unknown length must not roll
-    back.
-    """
-    if before is None:
-        return
-    truncate_control_from(control, before)
-    drop_cell_link_spans_from(control, before)
-
-
 def _plain_role_prefix(role: str) -> str:
     """Same ``You:`` / ``Assistant:`` label ``append_rich_text`` writes on the formatted path."""
     return _role_prefix(role)
@@ -989,14 +925,14 @@ def append_formatted_rows(
         if doc is None:
             # Tip: write this batch as plain text; dropping it would lose that history.
             log.warning("append_formatted_rows: hidden Writer unavailable")
-            _rollback_rich_insert(control, before)
+            rollback_rich_insert(control, before)
             if _plain_append_messages(control, rows, ctx, style_window, restore_focus=restore_focus):
                 if rows[-1][0] == "user":
                     _ensure_trailing_line_break(control)
                 _scroll_rich_to_tail(control, ctx, restore_focus=restore_focus)
             return
         configure_hidden_writer_for_chat(doc)
-        batch_links = _cell_links_for_rows(rows)
+        batch_links = cell_links_for_rows(rows)
 
         render_messages_to_hidden_doc(doc, rows, style_window=style_window)
         log.debug(
@@ -1007,7 +943,7 @@ def append_formatted_rows(
         doc_text = doc.getText().getString() or ""
         if contains_html_tag(doc_text):
             log.warning("append_formatted_rows: hidden doc still has tags; plain append")
-            _rollback_rich_insert(control, before)
+            rollback_rich_insert(control, before)
             if _plain_append_messages(control, rows, ctx, style_window, restore_focus=restore_focus):
                 if rows[-1][0] == "user":
                     _ensure_trailing_line_break(control)
@@ -1038,7 +974,7 @@ def append_formatted_rows(
                 len(rows),
                 copy_reason,
             )
-            _rollback_rich_insert(control, before)
+            rollback_rich_insert(control, before)
             if _plain_append_messages(control, rows, ctx, style_window, restore_focus=restore_focus):
                 if rows[-1][0] == "user":
                     _ensure_trailing_line_break(control)
@@ -1046,7 +982,7 @@ def append_formatted_rows(
     except Exception:
         log.exception("append_formatted_rows failed")
         if not inserted:
-            _rollback_rich_insert(control, before)
+            rollback_rich_insert(control, before)
             if _plain_append_messages(control, rows, ctx, style_window, restore_focus=restore_focus):
                 if rows[-1][0] == "user":
                     _ensure_trailing_line_break(control)
@@ -1158,7 +1094,7 @@ def append_formatted_row(
         doc = create_hidden_html_writer(ctx)
         if doc is None:
             log.warning("append_formatted_row: hidden Writer unavailable")
-            _rollback_rich_insert(control, before)
+            rollback_rich_insert(control, before)
             _plain_append_messages(
                 control, [(role, text)], ctx, style_window, auto_scroll=auto_scroll, restore_focus=restore_focus,
             )
@@ -1169,7 +1105,7 @@ def append_formatted_row(
             # Copying it would show the prefix alone, or the raw tags if they
             # had been inserted. Roll back and write the stripped message.
             log.warning("append_formatted_row: HTML import failed role=%s", role)
-            _rollback_rich_insert(control, before)
+            rollback_rich_insert(control, before)
             _plain_append_messages(
                 control, [(role, text)], ctx, style_window, auto_scroll=auto_scroll, restore_focus=restore_focus,
             )
@@ -1177,7 +1113,7 @@ def append_formatted_row(
         span = uno_probe(lambda: doc.getText().getString(), None)
         if isinstance(span, str) and not _span_matches_message(span, role, text):
             log.warning("append_formatted_row: imported span does not match message role=%s", role)
-            _rollback_rich_insert(control, before)
+            rollback_rich_insert(control, before)
             _plain_append_messages(
                 control, [(role, text)], ctx, style_window, auto_scroll=auto_scroll, restore_focus=restore_focus,
             )
@@ -1206,7 +1142,7 @@ def append_formatted_row(
                 direct_reason,
                 role,
             )
-            _rollback_rich_insert(control, before)
+            rollback_rich_insert(control, before)
         if inserted and role == "user":
             with focus_preserved(ctx, restore, restore_focus=restore_focus):
                 _ensure_trailing_line_break(control)
@@ -1229,7 +1165,7 @@ def append_formatted_row(
     except Exception:
         log.exception("append_formatted_row failed")
         if not inserted:
-            _rollback_rich_insert(control, before)
+            rollback_rich_insert(control, before)
     finally:
         _close_hidden_doc(doc, "append_formatted_row")
     return False

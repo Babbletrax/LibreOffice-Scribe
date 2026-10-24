@@ -44,10 +44,10 @@ from plugin.chatbot.state_machine import SendHandlerEvent, SendHandlerState, Sta
 from plugin.chatbot.tool_loop import _PanelDescriptor
 from plugin.chatbot.tool_loop_actions import (
     TurnController,
+    turn_session_or_stop,
     abort_turn,
     current_turn,
     persist_assistant_on_turn,
-    running_turn,
 )
 from plugin.chatbot.chat_sidebar_mode import (
     CHAT_MODE_BRAINSTORMING,
@@ -110,23 +110,6 @@ def _send_worker_queues(host: Any) -> tuple[StreamQueue, _SendWorkerQueue]:
         turn.queue = raw
         turn.batcher = None
     return raw, _SendWorkerQueue(turn, raw)
-
-
-def _turn_session_or_stop(host: Any) -> Any:
-    """The session for this send. None when the turn is already over.
-
-    ``_do_send`` starts the turn before this runs. A direct call with no
-    turn yet starts one. An aborted turn is not replaced: that rebind wrote
-    the reply onto a session the turn did not start with.
-    """
-    from plugin.chatbot.tool_loop_actions import begin_send_turn
-
-    if current_turn(host) is None:
-        begin_send_turn(host, "")
-    turn = running_turn(host)
-    if turn is None:
-        return None
-    return turn.session
 
 
 def _specialized_tool_error_payload(note: str) -> dict[str, str]:
@@ -524,7 +507,7 @@ class SendHandlersMixin:
         interpreter = EffectInterpreter(self._panel)
         current_state = SendHandlerState(handler_type="image", status="ready")
 
-        turn_session = _turn_session_or_stop(self._panel)
+        turn_session = turn_session_or_stop(self._panel)
         # Store the user row once here, before the append, like web
         # research; the fold then sees it and only paints. The StartEvent
         # user append already folds the prompt into the session, and the
@@ -542,7 +525,7 @@ class SendHandlersMixin:
             interpreter.interpret(effect)
 
     def _execute_direct_image_effect(self: SendHandlerHost, query_text: str, model: Any, current_state: "SendHandlerState", interpreter: "EffectInterpreter") -> None:
-        turn_session = _turn_session_or_stop(self._panel)
+        turn_session = turn_session_or_stop(self._panel)
         if turn_session is None:
             return
         # The user row was stored by _do_send_direct_image before StartEvent.
@@ -689,7 +672,7 @@ class SendHandlersMixin:
             if model and hasattr(model, "getURL"):
                 document_url = str(model.getURL() or "")
 
-        turn_session = _turn_session_or_stop(self._panel)
+        turn_session = turn_session_or_stop(self._panel)
         if turn_session is None:
             return
 
@@ -833,7 +816,7 @@ class SendHandlersMixin:
         # Resolve on the UI thread so UNO UserProfile reads stay on the main thread.
         self._panel._librarian_suggested_user_name = get_suggested_user_name(self._panel.ctx)
 
-        turn_session = _turn_session_or_stop(self._panel)
+        turn_session = turn_session_or_stop(self._panel)
         if turn_session is None:
             return
         self._panel._active_mode = CHAT_MODE_LIBRARIAN
@@ -865,7 +848,7 @@ class SendHandlersMixin:
         interpreter = EffectInterpreter(self._panel)
         current_state = SendHandlerState(handler_type="web", status="ready")
 
-        turn_session = _turn_session_or_stop(self._panel)
+        turn_session = turn_session_or_stop(self._panel)
         if turn_session is None:
             return
         self._panel._active_mode = mode
@@ -901,7 +884,7 @@ class SendHandlersMixin:
         interpreter = EffectInterpreter(self._panel)
         current_state = SendHandlerState(handler_type="web", status="ready")
 
-        turn_session = _turn_session_or_stop(self._panel)
+        turn_session = turn_session_or_stop(self._panel)
         if turn_session is None:
             return
 

@@ -321,7 +321,6 @@ class RichTextChatWidget:
         from plugin.chatbot.rich_text_paste import (
             OPEN_TRANSCRIPT,
             _plain_append_messages,
-            _rollback_rich_insert,
             append_formatted_row,
             session_history_items,
         )
@@ -362,7 +361,7 @@ class RichTextChatWidget:
         if not self._append_to_plain_tail(old_tail, new_tail, open_content=open_content):
             # Not an append: cut the plain tail at the end of the prefix and
             # write it again. The prefix is not cleared.
-            _rollback_rich_insert(self.control, self._formatted_len)
+            rollback_rich_insert(self.control, self._formatted_len)
             _plain_append_messages(
                 self.control, new_tail, self.ctx, self.style_window,
                 auto_scroll=True, restore_focus=self.restore_focus,
@@ -455,8 +454,6 @@ class RichTextChatWidget:
         """
         from plugin.chatbot.rich_text_paste import (
             _ensure_message_separator,
-            _force_rich_full_reformat,
-            _rollback_rich_insert,
             append_formatted_rows,
             session_history_items,
         )
@@ -486,7 +483,7 @@ class RichTextChatWidget:
         log_rich_scroll("turn_end_tail", control=self.control, rows=len(items), tail_rows=len(tail), cut=self._formatted_len)
         # Cut the plain tail and append the same rows formatted. The
         # transcript above the cut is not wiped and refilled.
-        _rollback_rich_insert(self.control, self._formatted_len)
+        rollback_rich_insert(self.control, self._formatted_len)
         if tail:
             _ensure_message_separator(self.control)
             append_formatted_rows(
@@ -497,7 +494,7 @@ class RichTextChatWidget:
         # turn) then a formatted refill left the same stale layout as a full
         # repaint: an 80px gap under the reply at Ready. One reformat per turn,
         # outside the stream drain, so it settles before the next send.
-        _force_rich_full_reformat(self.control)
+        force_rich_full_reformat(self.control)
         _scroll_rich_to_tail(self.control, self.ctx, restore_focus=self.restore_focus)
         self._set_formatted_state(items)
         return True
@@ -666,6 +663,27 @@ def refresh_rich_control_peer_layout(ctx: Any, rich_control: Any) -> None:
     peer = rich_control.getPeer() if hasattr(rich_control, "getPeer") else None
     if peer is not None and hasattr(peer, "invalidate"):
         peer.invalidate(0)
+
+
+def force_rich_full_reformat(control: Any) -> None:
+    """Make the RichTextControl EditEngine lay out the whole control again.
+
+    After clear_control and a bulk refill, the EditEngine draws a layout
+    that disagrees with its own text height. Lines go missing and a gap
+    below the last line grows with the transcript, until the sidebar goes
+    blank in long sessions. invalidate() and hide/show do not fix it. A
+    paper-width change does: resizing the peer reaches
+    EditEngine::SetPaperSize (editeng/source/editeng/editeng.cxx), which
+    reformats the whole document when the width changes. Narrow by 1px,
+    then restore.
+    """
+    ps = control.getPosSize()
+    if ps.Width <= 2:
+        return
+    try:
+        control.setPosSize(ps.X, ps.Y, ps.Width - 1, ps.Height, 4)  # PosSize.WIDTH
+    finally:
+        control.setPosSize(ps.X, ps.Y, ps.Width, ps.Height, 4)
 
 
 def _apply_sidebar_para_margins(cursor: Any) -> None:
@@ -1446,6 +1464,24 @@ def truncate_control_from(control: Any, start_len: int | None) -> None:
         log.debug("truncate_control_from: removed tail from offset %d (len now %d)", start_len, len(model.Text or ""))
     except Exception:
         log.exception("truncate_control_from failed")
+
+
+def rollback_rich_insert(control: Any, before: int | None) -> None:
+    """Undo a separator or partial copy that did not finish as a full insert.
+
+    The separator (and any partial copy) must not stay in the control
+    when the formatted insert returns false, and cell-link spans recorded
+    for that tail must not resolve clicks into deleted text.
+    A length of None means the control length could not be read. Truncate
+    treats 0 as "delete from the start", so an unknown length must not roll
+    back.
+    """
+    if before is None:
+        return
+    from plugin.calc.navigation import drop_cell_link_spans_from
+
+    truncate_control_from(control, before)
+    drop_cell_link_spans_from(control, before)
 
 
 def _temporarily_allow_focus(control: Any) -> tuple[Any, Any]:
