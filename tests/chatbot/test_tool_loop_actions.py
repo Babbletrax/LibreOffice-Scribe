@@ -11,10 +11,12 @@ from plugin.chatbot.tool_loop_actions import ToolLoopEffectInterpreter, build_to
 from plugin.chatbot.tool_loop_state import (  # noqa: E402
     AddMessageEffect,
     ExitLoopEffect,
+    MessageRole,
     SpawnLLMWorkerEffect,
     SpawnToolWorkerEffect,
     ToolLoopUIEffect,
     TriggerNextToolEffect,
+    UIEffectKind,
     UpdateDocumentContextEffect,
 )
 from plugin.framework.stream_batch import StreamQueueKind  # noqa: E402
@@ -234,15 +236,15 @@ def test_interpreter_handles_session_ui_queue_and_exit_effects():
     interpreter = ToolLoopEffectInterpreter(host)
 
     assert interpreter.execute(ExitLoopEffect()) is True
-    assert interpreter.execute(ToolLoopUIEffect(kind="status", text="Ready")) is False
+    assert interpreter.execute(ToolLoopUIEffect(kind=UIEffectKind.STATUS, text="Ready")) is False
     assert host.statuses == ["Ready"]
     assert host._terminal_status == "Ready"
 
-    interpreter.execute(ToolLoopUIEffect(kind="append", text="hello"))
+    interpreter.execute(ToolLoopUIEffect(kind=UIEffectKind.APPEND, text="hello"))
     assert host.appended == [("hello", False, "assistant")]
 
-    interpreter.execute(AddMessageEffect(role="assistant", content="answer"))
-    interpreter.execute(AddMessageEffect(role="tool", call_id="call_1", content='{"ok": true}'))
+    interpreter.execute(AddMessageEffect(role=MessageRole.ASSISTANT, content="answer"))
+    interpreter.execute(AddMessageEffect(role=MessageRole.TOOL, call_id="call_1", content='{"ok": true}'))
     assert host.session.assistant_messages[0]["content"] == "answer"
     assert host.session.tool_results == [("call_1", '{"ok": true}')]
 
@@ -1724,3 +1726,57 @@ def test_turn_controller_can_write_guards():
     turn2.abort()
     assert turn2.alive is False
     assert turn2.can_write(host2) is True
+
+
+def test_interpreter_handles_tool_running_and_result_effects():
+    from plugin.chatbot.tool_loop_state import MessageRole, UIEffectKind
+
+    host = FakeHost()
+    interpreter = ToolLoopEffectInterpreter(host)
+
+    # Tool running effect
+    eff_running = ToolLoopUIEffect(kind=UIEffectKind.TOOL_RUNNING, func_name="read_cell_range", func_args={})
+    assert interpreter.execute(eff_running) is False
+    assert host.statuses[-1] == "Running: read_cell_range"
+    assert host.appended[-1] == ("[Running tool: read_cell_range...]\n", False, "assistant")
+
+    # Tool result effect
+    eff_result = ToolLoopUIEffect(
+        kind=UIEffectKind.TOOL_RESULT,
+        func_name="read_cell_range",
+        func_args={},
+        result_data={"status": "ok", "message": "done"},
+    )
+    assert interpreter.execute(eff_result) is False
+    assert host.appended[-1] == ("[read_cell_range: done]\n", False, "assistant")
+
+    # apply_document_content zero-replaced result appends debug line
+    eff_zero = ToolLoopUIEffect(
+        kind=UIEffectKind.TOOL_RESULT,
+        func_name="apply_document_content",
+        func_args={},
+        func_args_str='{"target": "search"}',
+        result_data={"status": "error", "replaced_count": 0},
+    )
+    interpreter.execute(eff_zero)
+    assert any("[Debug: params" in item[0] for item in host.appended)
+
+    # Empty model debug effect
+    eff_empty = ToolLoopUIEffect(
+        kind=UIEffectKind.EMPTY_MODEL_DEBUG,
+        round_num=1,
+        response={"finish_reason": "stop", "content": None},
+    )
+    interpreter.execute(eff_empty)
+    assert any("finish_reason='stop'" in item[0] for item in host.appended)
+
+    # Empty model AddMessageEffect
+    eff_empty_msg = AddMessageEffect(
+        role=MessageRole.ASSISTANT,
+        round_num=1,
+        response={"finish_reason": "stop", "content": None},
+    )
+    interpreter.execute(eff_empty_msg)
+    last_msg = host.session.assistant_messages[-1]
+    assert "No text from model" in last_msg["content"]
+    assert "finish_reason='stop'" in last_msg["content"]
