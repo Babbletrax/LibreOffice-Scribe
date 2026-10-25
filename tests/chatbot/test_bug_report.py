@@ -52,8 +52,10 @@ def test_collect_environment_block_includes_endpoint_and_model():
         with patch("plugin.framework.client.model_fetcher.get_text_model", return_value="test-model"):
             with patch("plugin.framework.config.get_current_endpoint", return_value="https://api.example.com"):
                 with patch("plugin.framework.config.user_config_dir", return_value="/tmp/lo-user"):
-                    with patch("plugin.version.EXTENSION_VERSION", "0.8.33"):
-                        block = br.collect_environment_block(ctx=None)
+                    with patch("plugin.framework.logging.get_debug_log_path", return_value=None):
+                        with patch("plugin.version.EXTENSION_VERSION", "0.8.33"):
+                            header, rest = br._issue_sections(ctx=None)
+                            block = f"{header}\n\n{rest}"
     assert "Endpoint: https://api.example.com" in block
     assert "Chat model: test-model" in block
     assert "WriterAgent: 0.8.33" in block
@@ -66,14 +68,29 @@ def test_collect_environment_block_librepy_uses_venv_path():
     with patch("plugin.framework.uno_context.resolve_package_extension_id", return_value=EXTENSION_ID_LIBREPY):
         with patch("plugin.framework.config.get_config_str", return_value="/home/user/venv"):
             with patch("plugin.framework.config.user_config_dir", return_value="/tmp/lo-user"):
-                with patch("plugin.version.EXTENSION_VERSION", "0.8.33"):
-                    block = br.collect_environment_block(ctx=MagicMock())
+                with patch("plugin.framework.logging.get_debug_log_path", return_value=None):
+                    with patch("plugin.version.EXTENSION_VERSION", "0.8.33"):
+                        header, rest = br._issue_sections(ctx=MagicMock())
+                        block = f"{header}\n\n{rest}"
     assert "LibrePy: 0.8.33" in block
     assert "Python venv path: /home/user/venv" in block
     assert "Endpoint:" not in block
     assert "Chat model:" not in block
     expected_log = os.path.join("/tmp/lo-user", "writeragent_debug.log")
     assert f"LibrePy debug log: `{expected_log}`" in block
+
+
+def test_collect_environment_block_prefers_debug_log_path():
+    with patch("plugin.framework.uno_context.resolve_package_extension_id", return_value=EXTENSION_ID_WRITERAGENT):
+        with patch("plugin.framework.client.model_fetcher.get_text_model", return_value="test-model"):
+            with patch("plugin.framework.config.get_current_endpoint", return_value="https://api.example.com"):
+                with patch("plugin.framework.config.user_config_dir", return_value="/tmp/lo-user"):
+                    with patch("plugin.framework.logging.get_debug_log_path", return_value="/custom/path/writeragent_debug.log"):
+                        with patch("plugin.version.EXTENSION_VERSION", "0.8.33"):
+                            header, rest = br._issue_sections(ctx=None)
+                            block = f"{header}\n\n{rest}"
+    assert "WriterAgent debug log: `/custom/path/writeragent_debug.log`" in block
+    assert "/tmp/lo-user" not in block
 
 
 def test_format_lo_version_prefers_about_with_suffix():
